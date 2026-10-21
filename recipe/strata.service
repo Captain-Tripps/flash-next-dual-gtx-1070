@@ -1,0 +1,23 @@
+# Step 5: serve at boot as a systemd USER service (no root).
+#
+#   cp strata.service ~/.config/systemd/user/ && edit PRESET below
+#   systemctl --user daemon-reload && systemctl --user enable --now strata
+#   sudo loginctl enable-linger "$USER"      # once: start user services at boot without a login
+#
+# Logs: journalctl --user -u strata -f. Do not also run `strata launch` while this runs (same port, same cards).
+# --host 0.0.0.0 only if other machines should reach it; the config's API key is enforced either way.
+[Unit]
+Description=Strata server: Qwen3.8-Flash-Next IQ3_S on 2x GTX 1070
+
+[Service]
+Type=simple
+Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID
+Environment=PRESET=flashnext-iq3s
+ExecStart=/bin/sh -c 'exec %h/.local/bin/strata serve --profile %h/.local/state/strata/launch/$PRESET.json --host 127.0.0.1 --port 8080 --parallel 1'
+Restart=on-failure
+RestartSec=20
+TimeoutStartSec=900
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

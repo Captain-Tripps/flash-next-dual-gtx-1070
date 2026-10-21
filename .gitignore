@@ -1,0 +1,11 @@
+.env
+.env.*
+*.gguf
+*.so
+*.so.*
+*.log
+*.engine.log
+*.bak*
+.DS_Store
+Thumbs.db
+__pycache__/

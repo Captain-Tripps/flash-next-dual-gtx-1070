@@ -1,0 +1,30 @@
+{
+  "date": "2026-10-21",
+  "gpus": [
+    {"index": 0, "name": "NVIDIA GeForce GTX 1070", "arch": "Pascal", "compute_capability": "6.1", "vram_mib": 8192, "power_limit_w": 151, "pcie": "3.0 x16"},
+    {"index": 1, "name": "NVIDIA GeForce GTX 1070", "arch": "Pascal", "compute_capability": "6.1", "vram_mib": 8192, "power_limit_w": 151, "pcie": "3.0 x16"}
+  ],
+  "nvlink": false,
+  "pcie_host_to_device_gb_s": 12.1,
+  "cpu": {"model": "Intel Xeon E5-2690 v4", "cores": 14, "threads": 28, "isa": "AVX2, FMA, F16C (no AVX-512)", "sockets": 1},
+  "ram": {"total_gb": 64, "type": "DDR4-2133 RDIMM", "modules": "4 x 16 GB", "channels_working": "3 of 4"},
+  "storage": "1 TB NVMe (model files; the PLE table is read with direct I/O)",
+  "os": "Ubuntu 24.04.5 LTS",
+  "kernel": "6.8.0-147-generic",
+  "driver": "580.178.04 (nvidia-driver-580-server, Ubuntu prebuilt signed modules, Secure Boot on)",
+  "cuda_toolkit": "12.9.86",
+  "compiler": "gcc 13.3.0, cmake 3.28.3",
+  "strata": {
+    "terminal": "0.2.1 (build 0.1.46.2)",
+    "engine": "0.1.46, built from tag v0.2.1 (90767252f420e25223c739d604145ad15911d48b)",
+    "engine_build": "-DSTRATA_ENABLE_CUDA=ON -DSTRATA_EXPERIMENTAL_SM60=ON -DCMAKE_CUDA_ARCHITECTURES=61, CUDA 12.9"
+  },
+  "model": {
+    "repo": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF",
+    "quant": "IQ3_S (GSQ-RCO)",
+    "files_gb": 83.6,
+    "mtp_draft_layer_gb": 5.2,
+    "memory_needed_gb": 54.8
+  },
+  "live_engine_flags": "--expert-cache auto --prefill auto --spec 4 --spec-min-p 0.5 --kv k8v4 --max-context 131072 --kv-resident 32768 --pcie-frac 0.10 --mtp-draft-vocab draft_vocab_en.bin (layer split auto across both GPUs, K=31)"
+}
