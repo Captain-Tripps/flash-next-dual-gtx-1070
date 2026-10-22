@@ -1,6 +1,6 @@
 # A/B log: Strata on 2x GTX 1070 (Oct 2026)
 
-Every arm is in [`ab-runs.csv`](ab-runs.csv) (56 runs that completed; two more failed to start, noted below).
+Every arm is in [`ab-runs.csv`](ab-runs.csv) (62 runs that completed; two more failed to start, noted below).
 Harness: [`benchmarks/ab_bench.py`](../benchmarks/ab_bench.py).
 
 ## Method
@@ -8,7 +8,7 @@ Harness: [`benchmarks/ab_bench.py`](../benchmarks/ab_bench.py).
 - One test server per arm, started from a copy of the run config with one change. The serving instance is stopped
   so the arm has both cards to itself.
 - Warm-up: one short request, then one 300-token answer so the adaptive expert cache settles.
-- **Correctness first:** `17*23` -> `391`, capital of Australia -> `Canberra`, and an exact JSON echo. All 56 arms
+- **Correctness first:** `17*23` -> `391`, capital of Australia -> `Canberra`, and an exact JSON echo. All 62 arms
   passed. A speed number from a model producing garbage is meaningless, because wrong drafts still count as tokens.
 - **Decode:** three prompts (a ~250-word explanation, an LRU-cache class in Python, a ~300-word story), thinking on,
   512 max tokens, temperature 0, two runs each. The headline number is the median of those six
@@ -89,6 +89,19 @@ The sweep stopped at the first VRAM error.
 - Temperatures: no change vs stock. The warmer card sits at its 83 C target on long prompts either way; the VRAM
   stress test peaks at ~185 W.
 - Run-to-run noise was wider than in rounds 1-7: the stock config gave 28.9-31.6 on the same day.
+
+## Round 11: `--pcie-frac` around 0.10, with the memory offset
+
+Interleaved, two runs each, on the live config with +800:
+
+| `--pcie-frac` | Decode (2 runs) | Mean | Prompt 2K / 9K / 29K (first run) |
+| --- | --- | ---: | --- |
+| 0.05 | 31.7 / 31.7 | 31.7 | 210 / 297 / 315 |
+| **0.10** | **32.2 / 32.5** | **32.35** | **215 / 309 / 325** |
+| 0.15 | 31.6 / 29.2 | 30.4 | 208 / 294 / 314 |
+
+0.10 stays. With rounds 2-4 (0.20 ~ 0.10, 0.45 and up clearly worse, 0 = no gain), the optimum on this pair is a
+small but non-zero share of misses read over PCIe.
 
 ## Why it tops out near 31 tok/s: the decode profile
 

@@ -17,7 +17,7 @@ Current setup (22 Oct 2026):
 
 Setup's defaults on the same box gave 27.2 tok/s at 64K. Three settings took it to ~31 tok/s at 128K: a PCIe
 miss-share setting, the English draft vocabulary, and k8v4 KV with KV streaming. A GDDR5 memory overclock added
-another ~2 tok/s. All 56 A/B runs passed the same correctness checks: [results/](results/).
+another ~2 tok/s. All 62 A/B runs passed the same correctness checks: [results/](results/).
 
 | Config | Context | Decode tok/s | Prompt tok/s @ 2K / 9K / 29K |
 | --- | --- | ---: | --- |
@@ -32,7 +32,7 @@ another ~2 tok/s. All 56 A/B runs passed the same correctness checks: [results/]
 1. **`--pcie-frac 0.10`** (+13-15%). Strata picks how many expert-cache misses the GPU reads over PCIe instead of
    having the CPU compute them. Its startup probe chose 0.33 from the link speed (Gen3 x16, 12.1 GB/s). On a 1070,
    though, a PCIe expert read costs more than the CPU computing it: 0.45 -> 25.4 tok/s, 0.60 -> 22.1, 0.10 -> ~31.
-   Exactly 0 loses the gain (27.2). With a layer split the engine does not refine this value at runtime, so measure it.
+   Exactly 0 loses the gain (27.2), and 0.05 / 0.15 are both a little slower than 0.10 (31.7 / 30.4 vs 32.35). With a layer split the engine does not refine this value at runtime, so measure it.
 2. **English draft vocabulary** (`--mtp-draft-vocab .../data/draft_vocab_en.bin`, about +1 tok/s). It frees ~110 MiB
    on the card that holds the draft head, and the main model still verifies every token. Setup suggests it for 8 GB
    cards too.
