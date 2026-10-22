@@ -1,0 +1,2 @@
+# MHz memory clock offset per GPU (index order). 0 = stock.
+OFFSET=0

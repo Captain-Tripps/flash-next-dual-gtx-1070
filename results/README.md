@@ -1,6 +1,6 @@
 # A/B log: Strata on 2x GTX 1070 (Oct 2026)
 
-Every arm is in [`ab-runs.csv`](ab-runs.csv) (46 runs that completed; two more failed to start, noted below).
+Every arm is in [`ab-runs.csv`](ab-runs.csv) (56 runs that completed; two more failed to start, noted below).
 Harness: [`benchmarks/ab_bench.py`](../benchmarks/ab_bench.py).
 
 ## Method
@@ -8,7 +8,7 @@ Harness: [`benchmarks/ab_bench.py`](../benchmarks/ab_bench.py).
 - One test server per arm, started from a copy of the run config with one change. The serving instance is stopped
   so the arm has both cards to itself.
 - Warm-up: one short request, then one 300-token answer so the adaptive expert cache settles.
-- **Correctness first:** `17*23` -> `391`, capital of Australia -> `Canberra`, and an exact JSON echo. All 46 arms
+- **Correctness first:** `17*23` -> `391`, capital of Australia -> `Canberra`, and an exact JSON echo. All 56 arms
   passed. A speed number from a model producing garbage is meaningless, because wrong drafts still count as tokens.
 - **Decode:** three prompts (a ~250-word explanation, an LRU-cache class in Python, a ~300-word story), thinking on,
   512 max tokens, temperature 0, two runs each. The headline number is the median of those six
@@ -63,6 +63,33 @@ Rounds 5-7 start from the winner (int8, 64K, ~31 tok/s) and look for a longer co
 The ~101K prompt reuses the ~63K prompt's first part from the prompt cache, so its number covers the fresh tokens at
 positions 63K-101K. That is the same for both rows.
 
+## Rounds 8-10: GDDR5 memory offset
+
+Start: the live 128K config above. Under CUDA, both cards sit in P2 with memory at 3802 MHz instead of the 4004 MHz
+max. `nvmlDeviceSetMemClkVfOffset` (NVML, root, no X server) shifts that: the offset is in transfer-rate units, so
++200 = +100 MHz on the reported clock. Each arm first ran a VRAM pattern test on both cards
+([`memtest.cu`](../recipe/memory-offset/memtest.cu): 6 GB, hash fill + verify, 60 s per card), then the usual bench.
+The sweep stopped at the first VRAM error.
+
+| Offset | P2 memory clock | Copy bandwidth | VRAM errors | Decode | Prompt 2K / 9K / 29K |
+| --- | ---: | ---: | --- | ---: | --- |
+| +0 (4 runs) | 3802 MHz | 204 GB/s | 0 | 30.6 / 31.1 / 28.9 / 31.6 (mean 30.6) | ~208 / 296 / 310 |
+| +200 | 3898 | 210 | 0 | 31.3 | 209 / 297 / 308 |
+| +400 | 3999 | 216 | 0 | 31.4 | 207 / 292 / 310 |
+| +600 | 4100 | 222 | 0 | 31.7 | 208 / 294 / 311 |
+| **+800 (2 runs)** | **4201** | **228** | **0 (also a 5-min soak per card)** | **31.8 / 33.3 (mean 32.6)** | **210 / 301 / 316** |
+| +1000 | 4303 | 234 | 0 | 32.2 | 215 / 303 / 317 |
+| +1200 | 4404 | 241 | **2 on one card** | not run | - |
+
+- Bandwidth scaled linearly with the clock up to the failure, with no visible error-retry slowdown first, so the
+  pattern test is the only warning. Decode gains about half of the bandwidth gain (+12% bandwidth -> +5-6% decode):
+  the GPU stages are not purely bandwidth bound, and ~19% of a window waits on CPU experts anyway.
+- Chosen: **+800** on both cards, 400 units below the first error. +1000 was clean but one step from failure and
+  within noise of +800.
+- Temperatures: no change vs stock. The warmer card sits at its 83 C target on long prompts either way; the VRAM
+  stress test peaks at ~185 W.
+- Run-to-run noise was wider than in rounds 1-7: the stock config gave 28.9-31.6 on the same day.
+
 ## Why it tops out near 31 tok/s: the decode profile
 
 `STRATA_DECODE_TIMING=1`, steady state, 512-token answers: about **86 ms per verify window, 2.35 tokens per window**.
@@ -93,7 +120,8 @@ the 64K level. Even at ~101K tokens, 92% of KV block reads hit VRAM (162 MiB rea
 ## Did not help, or not tested
 
 - Monitoring that calls `nvidia-smi` every 2-5 s: no cost (30.7 vs 31.0).
-- Not tested: huge pages for the 47 GB expert arena (needs `vm.nr_hugepages`); `--batch N` slots (throughput for
+- Huge pages: the 47 GB expert arena already gets transparent huge pages (~49 GB `AnonHugePages` while serving),
+  so `vm.nr_hugepages` was not tried. Not tested: `--batch N` slots (throughput for
   several clients, slower per request); `--kv-resident` values other than 32768; `strata tune auto`.
 - This board has a dead memory channel (3 of 4 channels, DDR4-2133). A healthy quad-channel board should help
   the CPU-expert part a little.

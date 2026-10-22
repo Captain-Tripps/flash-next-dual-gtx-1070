@@ -1,0 +1,15 @@
+[Unit]
+Description=GPU memory clock offset (gpu-memoc, OFFSET in /etc/default/gpu-memoc)
+After=nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/default/gpu-memoc
+ExecStartPre=/usr/bin/nvidia-smi -pm 1
+ExecStart=/usr/local/sbin/gpu-memoc set $OFFSET
+ExecStop=/usr/local/sbin/gpu-memoc off
+
+[Install]
+WantedBy=multi-user.target
