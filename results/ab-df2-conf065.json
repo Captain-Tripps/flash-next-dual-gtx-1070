@@ -1,0 +1,36 @@
+{
+  "label": "df2-conf065",
+  "port": 8080,
+  "rows": [
+    {
+      "label": "prompt~2048",
+      "prompt_tokens": 2093,
+      "completion_tokens": 128,
+      "prompt_per_second": 233.3,
+      "predicted_per_second": 34.9,
+      "prompt_ms": 8970.6,
+      "predicted_ms": 3671.1,
+      "draft_n": 106,
+      "draft_n_accepted": 105,
+      "finish_reason": "length",
+      "reasoning_len": 0,
+      "wall_s": 12.68,
+      "target": 2048
+    },
+    {
+      "label": "prompt~8192",
+      "prompt_tokens": 9717,
+      "completion_tokens": 128,
+      "prompt_per_second": 341.5,
+      "predicted_per_second": 41.3,
+      "prompt_ms": 28455.0,
+      "predicted_ms": 3096.1,
+      "draft_n": 106,
+      "draft_n_accepted": 105,
+      "finish_reason": "length",
+      "reasoning_len": 0,
+      "wall_s": 31.56,
+      "target": 8192
+    }
+  ]
+}

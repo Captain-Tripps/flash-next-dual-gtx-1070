@@ -1,0 +1,37 @@
+{
+  "label": "pcie035",
+  "rows": [
+    {
+      "label": "prompt~2048",
+      "prompt_tokens": 2093,
+      "completion_tokens": 262,
+      "prompt_per_second": 228.4,
+      "predicted_per_second": 29.4,
+      "derived_steady_state": 29.44,
+      "prompt_ms": 8898.8,
+      "predicted_ms": 8898.8,
+      "draft_n": 220,
+      "draft_n_accepted": 219,
+      "finish_reason": "stop",
+      "reasoning_len": 0,
+      "wall_s": 18.12,
+      "target": 2048
+    },
+    {
+      "label": "prompt~8192",
+      "prompt_tokens": 9717,
+      "completion_tokens": 262,
+      "prompt_per_second": 318.3,
+      "predicted_per_second": 38.6,
+      "derived_steady_state": 38.61,
+      "prompt_ms": 6786.0,
+      "predicted_ms": 6786.0,
+      "draft_n": 220,
+      "draft_n_accepted": 220,
+      "finish_reason": "stop",
+      "reasoning_len": 0,
+      "wall_s": 37.33,
+      "target": 8192
+    }
+  ]
+}

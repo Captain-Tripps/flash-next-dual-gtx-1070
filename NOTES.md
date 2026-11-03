@@ -26,3 +26,13 @@ Things that cost time, in the order they bite. Several are worth an upstream iss
    per kernel. Keep unattended-upgrades off `linux-*` and `nvidia*`, and update both by hand.
 9. **The engine's own warning is worth reading.** With 8 GB cards it warns when a card has under 512 MiB free at the
    start of a request (`--vram-reserve-later-mib`), and it names exactly why the prompt chunk is smaller than asked.
+10. **The cards negotiated PCIe 1.0, not Gen3 (found 2026-11-03).** `lspci -vv` shows
+    `LnkCap: Speed 8GT/s, Width x16` (Gen3-capable) but `LnkSta: Speed 2.5GT/s (downgraded), Width x16` on **both**
+    1070s. 2.5 GT/s is PCIe 1.0 — ~1 GB/s, a 12× narrower pipe than the Gen3 12.1 GB/s the Machine table and item #1
+    assume. PCIe speed is auto-negotiated at boot to the lowest speed both ends agree on, so something in the path is
+    holding the link down. In order of likelihood: (a) the card is in a slot that is x16 *mechanically* but only PCIe
+    1.0 *electrically* (not all X99 x16 slots are wired to Gen3 — the secondary / lower slots often are not); (b) a
+    riser/extension cable rated for Gen1; (c) a BIOS "PCIe slot speed" set to Gen1 or Auto-picks-the-floor; (d) a
+    marginal edge-connector contact. **Check: reseat both cards, move them to the topmost full-length slots, and in
+    the BIOS force Gen3 on the slots they sit in.** Re-run the `lspci -vv | grep LnkSta` check — you want `Speed 8GT/s`.
+    Until then the decode ceiling and the `--pcie-frac` optimum were measured on a 1.0 link, so both may improve at Gen3.

@@ -1,0 +1,37 @@
+{
+  "label": "mtp-baseline-512",
+  "rows": [
+    {
+      "label": "prompt~2048",
+      "prompt_tokens": 2093,
+      "completion_tokens": 262,
+      "prompt_per_second": 230.9,
+      "predicted_per_second": 37.4,
+      "derived_steady_state": 37.37,
+      "prompt_ms": 7011.7,
+      "predicted_ms": 7011.7,
+      "draft_n": 195,
+      "draft_n_accepted": 195,
+      "finish_reason": "stop",
+      "reasoning_len": 0,
+      "wall_s": 16.13,
+      "target": 2048
+    },
+    {
+      "label": "prompt~8192",
+      "prompt_tokens": 9717,
+      "completion_tokens": 262,
+      "prompt_per_second": 321.9,
+      "predicted_per_second": 47.5,
+      "derived_steady_state": 47.49,
+      "prompt_ms": 5517.2,
+      "predicted_ms": 5517.2,
+      "draft_n": 198,
+      "draft_n_accepted": 198,
+      "finish_reason": "stop",
+      "reasoning_len": 0,
+      "wall_s": 35.72,
+      "target": 8192
+    }
+  ]
+}

@@ -7,13 +7,20 @@ This is a public log of running **Qwen3.8-Flash-Next**, a 125B-parameter MoE, on
 [Strata](https://github.com/Niko1221/Strata) engine. Strata supports GTX 10 cards only through an experimental
 path, and its signed Linux packages contain no Pascal code, so this repo also covers building that engine.
 
-Current setup (22 Oct 2026):
+Current setup (3 Nov 2026):
 
-- **~32-33 output tok/s** (median of chat, code and prose; temperature 0, thinking on)
+- **~37-47 output tok/s steady-state** (512-token measurement; 37.4 at a ~2K prompt, **47.5 at a ~9.7K prompt** —
+  the box's honest ceiling on stock config; temperature 0, thinking on). The older ~31-32 headline was a 128-token
+  sample that included the first-token ramp; the longer steady-state number is higher. See [results/](results/#nov-2026-engine-0156-the-drafter-and-the-512-token-steady-state-sweep).
 - **128K context**; prompt reading **~300-320 tok/s** from 9K to 63K tokens, **285 tok/s** at ~101K
 - Model: `Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S` (54.8 GB of RAM + VRAM), with the MTP draft layer (`--spec 4`)
-- Strata **0.2.1** (engine 0.1.46, tag `v0.2.1`), **built for `sm_61` with CUDA 12.9**, NVIDIA driver 580
+- Strata **engine 0.1.56 / Control 0.1.56** (upgraded from 0.1.46 on 3 Nov 2026), **built for `sm_61` with CUDA 12.9**,
+  NVIDIA driver 580
 - Layer split across both cards, ~7.6 GB VRAM each; ~50 GB of system RAM in use
+- **Open finding (3 Nov 2026):** both cards are negotiating **PCIe 1.0 (2.5 GT/s)**, not the Gen3 the Oct profile
+  assumed — `LnkCap` is 8 GT/s but `LnkSta` reads 2.5 GT/s on both 1070s. Likely a slot/BIOS/riser issue. The 47.5
+  ceiling and the `--pcie-frac 0.10` optimum were measured on that 1.0 link and may both improve at Gen3. See
+  [NOTES.md](NOTES.md) item 10 and [results/](results/).
 
 Setup's defaults on the same box gave 27.2 tok/s at 64K. Three settings took it to ~31 tok/s at 128K: a PCIe
 miss-share setting, the English draft vocabulary, and k8v4 KV with KV streaming. A GDDR5 memory overclock added
@@ -91,6 +98,10 @@ Details: [`hardware.json`](hardware.json).
    (`strata serve --profile ...`).
 6. Measure on your box: [`benchmarks/ab_bench.py`](benchmarks/ab_bench.py) `--config <run config> --docs <folder of
    .md> --name baseline`, then the same with `--args "--pcie-frac 0.2"` and so on.
+   For a **steady-state decode** number (the longer 512-token measurement that produced the 47.5 figure, not the
+   128-token sample), use [`benchmarks/hbench512.py`](benchmarks/hbench512.py) `--label <name>` against the running
+   server. It reports `timings.predicted_per_second` over the full 512-token completion, which at that length *is* the
+   steady-state rate (the first-token ramp is diluted to ~12%).
 
 Gotchas we hit along the way are listed in [NOTES.md](NOTES.md).
 

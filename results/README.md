@@ -103,6 +103,78 @@ Interleaved, two runs each, on the live config with +800:
 0.10 stays. With rounds 2-4 (0.20 ~ 0.10, 0.45 and up clearly worse, 0 = no gain), the optimum on this pair is a
 small but non-zero share of misses read over PCIe.
 
+## Nov 2026: engine 0.1.56, the drafter, and the 512-token steady-state sweep
+
+Raw data: the 512-token sweep is in `512-mtp-baseline.json`, `512-spec6.json`, `512-pcie035.json`,
+`512-spec6-pcie035.json`, `512-pcie035-spec4.json`; the drafter A/B is in `ab-mtp-0156.json`,
+`ab-mtp-0156-r2.json`, `ab-dflash2-0156.json`, `ab-df2-conf08.json`, `ab-df2-conf065.json`.
+
+This section supersedes the ~31 tok/s headline for *steady-state decode* — see why below. The box moved from
+Strata 0.2.1 (engine 0.1.46) to **engine 0.1.56 / Control 0.1.56**. Two things changed the numbers: the engine
+upgrade itself, and a **longer measurement** (512-token steady-state vs the old 128-token sample, which included the
+first-token ramp). The stock config (`--spec 4 --pcie-frac 0.10 --kv k8v4`, MTP drafter) now measures **47.5 tok/s
+steady-state at a ~9.7K prompt** and **37.4 at ~2K**. That 47.5 is the box's honest steady-state ceiling on stock
+config — the "~48" the operator remembered hitting at one point was this number, reproduced on purpose.
+
+### Drafter: DFlash2 (new in 0.2.10) loses to MTP, decisively
+
+DFlash2 is a ~0.7 GB Q4_0 drafter that replaces the 5.2 GB MTP layer. `strata drafting plan --mode dflash2`
+reports `serves: true` on this CC 6.1 pair (the earlier "CC 6.1 unsupported → MTP fallback" assumption was wrong for
+0.1.56; the caveat is `support: "untested"`). A/B'd live at `--parallel 1`, 2K/8K prompt, 128-token decode:
+
+| Drafter | Decode @2K | Decode @8K | Draft accept |
+| --- | ---: | ---: | --- |
+| **MTP (`--spec 4`)** | **36.9** | **46.1** | 96/96 (100%) |
+| DFlash2 (`--draft-conf 0.35`) | 34.4 | 41.2 | 95% |
+| DFlash2 (`--draft-conf 0.8`) | 35.2 | 41.5 | 99% |
+| DFlash2 (`--draft-conf 0.65`) | 34.9 | 41.3 | 99% |
+
+DFlash2 drafts *more* tokens but at *lower* acceptance, so net decode throughput is worse by ~5-12%. Tuning
+`--draft-conf` raised acceptance (95%→99%) but decode barely moved (+2%, noise) — on this PCIe-starved pair the
+bottleneck is expert traffic, not draft acceptance. Both drafters were also given `strata tune auto`: MTP →
+`default_confirmed` (base 29.3 cold, nothing faster), DFlash2 → `default_confirmed` (base 25.5 cold, nothing faster).
+**Drafter is closed: MTP, `--spec 4 --spec-min-p 0.5`.**
+
+### Single-stream sweep (512-token steady-state): stock config wins
+
+Harness: [`benchmarks/hbench512.py`](../benchmarks/hbench512.py) (512-token completions so the ramp is diluted to ~12%
+of the sample; `timings.predicted_per_second` over the full completion *is* the steady-state number at this length).
+All arms on the same warm server, `--parallel 1`, MTP drafter:
+
+| Config | Decode @~2K | Decode @~9.7K | Draft accept |
+| --- | ---: | ---: | --- |
+| **stock (`--spec 4 --pcie-frac 0.10`)** | **37.4** | **47.5** | 100% / 100% |
+| `--spec 6 --pcie-frac 0.10` | 33.7 | 43.5 | 98% / 100% |
+| `--spec 4 --pcie-frac 0.35` | 32.6 | 42.4 | 100% / 100% |
+| `--spec 6 --pcie-frac 0.35` | 29.3 | 38.6 | 99% / 100% |
+
+- **`--spec 6` is net-negative.** The wider MTP window drafts more tokens (195→220) at lower acceptance (100%→98%),
+  and the 6-token verify capture costs more VRAM + compute per round. On this PCIe-bound card the extra verify work
+  outweighs the saved round-trips. MTP is capped at `--spec 4` here — `tune auto` held it for the same reason.
+- **`--pcie-frac 0.35` is net-negative (47.5→42.4).** Counterintuitive vs the Oct sweep, where 0.10 beat 0.0 and 0.45.
+  At 0.35 the engine routes *more* of the expert cache over the link to the slower card, trading a fast-GPU cache for a
+  slow one. (See the PCIe 1.0 finding below — the whole `--pcie-frac` curve may shift at Gen3.)
+- **The combo is the worst** (29.3 / 38.6).
+- **Verdict: stock config is the measured winner at 47.5.** 50 tok/s is not reachable via the drafter or the
+  PCIe/kv knobs — both swept, both net-negative. Exceeding 47.5 needs a *structural* change (a different layer split /
+  expert-cache shape, or the PCIe link recovered to Gen3), not a tuning knob.
+
+### Why 47.5 now vs 31 before (the two are different measurements)
+
+The Oct "31 tok/s" was a **128-token sample** that includes the first-token ramp and a cold-ish expert cache, on
+**engine 0.1.46**. The Nov "47.5" is a **512-token steady-state** on **engine 0.1.56**, where the ramp is a small
+fraction and the cache is warm. The *short-prompt* steady-state (37.4 @ ~2K) is closer to the old number; the
+*long-prompt* steady-state (47.5 @ ~9.7K) is the box's true decode ceiling. They are not the same yardstick, so do not
+read 47.5 as a 50% jump from 31 — it is the same box measured over a longer, warmer window on a newer engine.
+
+### New finding: both cards negotiate PCIe 1.0, not Gen3
+
+`lspci -vv` (2026-11-03): `LnkCap: Speed 8GT/s, Width x16` but `LnkSta: Speed 2.5GT/s (downgraded), Width x16` on
+**both** 1070s. 2.5 GT/s is PCIe 1.0 (~1 GB/s) — 12× narrower than the Gen3 12.1 GB/s the Oct profile assumed. This
+contradicts the Machine table and item #1 in the README. The 47.5 ceiling and the `--pcie-frac 0.10` optimum were both
+measured on a 1.0 link, so **both may move if the link recovers to Gen3** (reseat / move to the topmost slots / force
+Gen3 in BIOS). Not yet re-benched. See NOTES.md item 10.
+
 ## Why it tops out near 31 tok/s: the decode profile
 
 `STRATA_DECODE_TIMING=1`, steady state, 512-token answers: about **86 ms per verify window, 2.35 tokens per window**.

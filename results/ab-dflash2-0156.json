@@ -1,0 +1,36 @@
+{
+  "label": "dflash2-0156",
+  "port": 8080,
+  "rows": [
+    {
+      "label": "prompt~2048",
+      "prompt_tokens": 2093,
+      "completion_tokens": 128,
+      "prompt_per_second": 231.8,
+      "predicted_per_second": 34.4,
+      "prompt_ms": 9031.2,
+      "predicted_ms": 3721.6,
+      "draft_n": 110,
+      "draft_n_accepted": 105,
+      "finish_reason": "length",
+      "reasoning_len": 0,
+      "wall_s": 12.79,
+      "target": 2048
+    },
+    {
+      "label": "prompt~8192",
+      "prompt_tokens": 9717,
+      "completion_tokens": 128,
+      "prompt_per_second": 345.6,
+      "predicted_per_second": 41.2,
+      "prompt_ms": 28119.2,
+      "predicted_ms": 3104.0,
+      "draft_n": 107,
+      "draft_n_accepted": 105,
+      "finish_reason": "length",
+      "reasoning_len": 0,
+      "wall_s": 31.24,
+      "target": 8192
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "label": "spec6",
+  "rows": [
+    {
+      "label": "prompt~2048",
+      "prompt_tokens": 2093,
+      "completion_tokens": 262,
+      "prompt_per_second": 229.9,
+      "predicted_per_second": 33.7,
+      "derived_steady_state": 33.69,
+      "prompt_ms": 7777.0,
+      "predicted_ms": 7777.0,
+      "draft_n": 220,
+      "draft_n_accepted": 216,
+      "finish_reason": "stop",
+      "reasoning_len": 0,
+      "wall_s": 16.93,
+      "target": 2048
+    },
+    {
+      "label": "prompt~8192",
+      "prompt_tokens": 9717,
+      "completion_tokens": 262,
+      "prompt_per_second": 317.8,
+      "predicted_per_second": 43.5,
+      "derived_steady_state": 43.53,
+      "prompt_ms": 6019.1,
+      "predicted_ms": 6019.1,
+      "draft_n": 220,
+      "draft_n_accepted": 220,
+      "finish_reason": "stop",
+      "reasoning_len": 0,
+      "wall_s": 36.61,
+      "target": 8192
+    }
+  ]
+}

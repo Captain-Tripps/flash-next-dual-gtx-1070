@@ -1,0 +1,36 @@
+{
+  "label": "mtp-0156-r2",
+  "port": 8080,
+  "rows": [
+    {
+      "label": "prompt~2048",
+      "prompt_tokens": 2093,
+      "completion_tokens": 128,
+      "prompt_per_second": 230.6,
+      "predicted_per_second": 36.5,
+      "prompt_ms": 9076.1,
+      "predicted_ms": 3506.8,
+      "draft_n": 96,
+      "draft_n_accepted": 96,
+      "finish_reason": "length",
+      "reasoning_len": 0,
+      "wall_s": 12.62,
+      "target": 2048
+    },
+    {
+      "label": "prompt~8192",
+      "prompt_tokens": 9717,
+      "completion_tokens": 128,
+      "prompt_per_second": 322.6,
+      "predicted_per_second": 45.6,
+      "prompt_ms": 30124.7,
+      "predicted_ms": 2806.7,
+      "draft_n": 96,
+      "draft_n_accepted": 96,
+      "finish_reason": "length",
+      "reasoning_len": 0,
+      "wall_s": 32.94,
+      "target": 8192
+    }
+  ]
+}

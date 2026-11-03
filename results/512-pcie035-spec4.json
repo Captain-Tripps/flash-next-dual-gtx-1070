@@ -1,0 +1,37 @@
+{
+  "label": "pcie035-spec4",
+  "rows": [
+    {
+      "label": "prompt~2048",
+      "prompt_tokens": 2093,
+      "completion_tokens": 262,
+      "prompt_per_second": 229.2,
+      "predicted_per_second": 32.6,
+      "derived_steady_state": 32.59,
+      "prompt_ms": 8039.8,
+      "predicted_ms": 8039.8,
+      "draft_n": 195,
+      "draft_n_accepted": 195,
+      "finish_reason": "stop",
+      "reasoning_len": 0,
+      "wall_s": 17.22,
+      "target": 2048
+    },
+    {
+      "label": "prompt~8192",
+      "prompt_tokens": 9717,
+      "completion_tokens": 262,
+      "prompt_per_second": 324.5,
+      "predicted_per_second": 42.4,
+      "derived_steady_state": 42.44,
+      "prompt_ms": 6173.8,
+      "predicted_ms": 6173.8,
+      "draft_n": 198,
+      "draft_n_accepted": 198,
+      "finish_reason": "stop",
+      "reasoning_len": 0,
+      "wall_s": 36.13,
+      "target": 8192
+    }
+  ]
+}
