@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dragonrider Aerie - Sea Stack</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #8fb4cf; }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  #hud {
+    position: fixed; left: 14px; bottom: 14px; z-index: 5;
+    font: 12px/1.55 "Segoe UI", system-ui, sans-serif;
+    color: rgba(232, 240, 248, .92); pointer-events: none;
+    background: rgba(9, 17, 26, .55); border: 1px solid rgba(255, 255, 255, .14);
+    border-radius: 7px; padding: 9px 13px; max-width: 360px;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, .7);
+  }
+  #hud h1 { font-size: 15px; margin: 0 0 4px; letter-spacing: .4px; color: #ffd98a; }
+  #hud .keys { color: rgba(214, 228, 242, .74); }
+  #hud .keys kbd {
+    font: 11px/1 ui-monospace, Consolas, monospace; background: rgba(255, 255, 255, .13);
+    border: 1px solid rgba(255, 255, 255, .2); border-radius: 3px; padding: 1px 4px;
+  }
+  #stats { margin-top: 6px; color: rgba(186, 205, 222, .6); font-size: 11px; }
+
+  #boot {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: #8fb4cf; color: #24384c; font: 14px/1 system-ui, sans-serif;
+    z-index: 10; transition: opacity .6s;
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="boot">Hauling up the sea...</div>
+<div id="hud">
+  <h1>Dragonrider Aerie</h1>
+  A flat-topped sea stack: rope windlass from the shore quay, timber landing deck with a
+  hoist derrick and harness racks, four projecting stone perches ringing the vaulted
+  hatchery, switchback stairs down a carved throat to a water-level boathouse.
+  Every solid thing here is cut from cubic blocks.
+  <div class="keys" style="margin-top:6px">
+    <kbd>drag</kbd> orbit &nbsp; <kbd>wheel</kbd> zoom &nbsp; <kbd>right-drag</kbd> pan
+    &nbsp; <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd> views
+    &nbsp; <kbd>R</kbd> auto-orbit &nbsp; <kbd>C</kbd> sea
+  </div>
+  <div id="stats"></div>
+</div>
+<script type="module">
+import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.187.0/three.module.min.js";
+
+/* ------------------------------------------------------------------ *
+ * Voxel ids -> base colour. One entry per surface in the scene.
+ * A block's final colour is its base, modulated by baked ambient
+ * occlusion plus a per-block tint, so the same material still reads
+ * as a pile of individual cubes rather than one smooth mass.
+ * ------------------------------------------------------------------ */
+
+const T = {
+  AIR: 0, ROCK: 1, SAND: 2, WET: 3, GRASS: 4, MOSS: 5, HEWN: 6, PAVE: 7,
+  SLATE: 8, PLANK: 9, BEAM: 10, BRACE: 11, ROPE: 12, IRON: 13, EGG: 14,
+  BONE: 15, HIDE: 16, CRATE: 17, LEAF: 18, SOOT: 19, EMBER: 20, FLAME: 21,
+  SCALE_A: 22, SCALE_B: 23, WEB: 24, EYE: 25, SCALE_C: 26,
+};
+
+const PALETTE = {
+  [T.ROCK]:   { c: 0x6f7684, jit: 0.10 },
+  [T.SAND]:   { c: 0xd7bd8c, jit: 0.07 },
+  [T.WET]:    { c: 0xa08a66, jit: 0.06 },
+  [T.GRASS]:  { c: 0x6f9350, jit: 0.11 },
+  [T.MOSS]:   { c: 0x53713d, jit: 0.09 },
+  [T.HEWN]:   { c: 0x9c9081, jit: 0.07 },
+  [T.PAVE]:   { c: 0x8b9099, jit: 0.08 },
+  [T.SLATE]:  { c: 0x59606e, jit: 0.08 },
+  [T.PLANK]:  { c: 0x9a6b40, jit: 0.09 },
+  [T.BEAM]:   { c: 0x6d492b, jit: 0.08 },
+  [T.BRACE]:  { c: 0x5e3f24, jit: 0.08 },
+  [T.ROPE]:   { c: 0xba9a68, jit: 0.05 },
+  [T.IRON]:   { c: 0x474c55, jit: 0.04 },
+  [T.EGG]:    { c: 0xe9e2cd, jit: 0.03 },
+  [T.BONE]:   { c: 0xc9c0ac, jit: 0.05 },
+  [T.HIDE]:   { c: 0x7a4f45, jit: 0.06 },
+  [T.CRATE]:  { c: 0x8a5f39, jit: 0.08 },
+  [T.LEAF]:   { c: 0x4d7a3c, jit: 0.12 },
+  [T.SOOT]:   { c: 0x3a3a40, jit: 0.05 },
+  [T.EMBER]:  { c: 0xff7a2a, jit: 0.10, emissive: true },
+  [T.FLAME]:  { c: 0xffc24a, jit: 0.14, emissive: true },
+  /* The beast pelts are the one place where a voxel id does the work of a
+   * material: SCALE_A/B are the body, SCALE_C the gold pelt, WEB the wing
+   * membrane, and EYE an emissive glow rather than a surface. */
+  [T.SCALE_A]:{ c: 0x9c5b38, jit: 0.09 },
+  [T.SCALE_B]:{ c: 0xc47f4f, jit: 0.09 },
+  [T.SCALE_C]:{ c: 0xd9ab4a, jit: 0.10 },
+  [T.WEB]:    { c: 0x5d3a34, jit: 0.05 },
+  [T.EYE]:    { c: 0xffc24a, jit: 0.02, emissive: true },
+};
+
+/* Self-lit blocks get their own merged group so the solid geometry can
+ * stay one cheap MeshStandardMaterial with vertex colours. */
+const EMISSIVE_IDS = new Set([T.EMBER, T.FLAME, T.EYE]);
+
+/* Cliff rock: every third y-band is tone-shifted, so the cliff face reads
+ * as strata instead of one flat grey slab. */
+function strataTint(y) {
+  const ramp = [1.0, 0.93, 1.04];
+  const band = ((Math.floor(y / 3) % 3) + 3) % 3;
+  return ramp[band];
+}
+
+/* ------------------------------------------------------------------ *
+ * Deterministic noise. Deliberate, not random: one seed lays the whole
+ * world, so a reload never rebuilds the stack differently on you.
+ * ------------------------------------------------------------------ */
+
+function hash2(x, y) {
+  const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return s - Math.floor(s);
+}
+function hash3(x, y, z) {
+  const s = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453;
+  return s - Math.floor(s);
+}
+
+/* ------------------------------------------------------------------ *
+ * Two containers, one builder API. Field is a bounded dense grid for the
+ * world; Bag is unbounded and sparse, used for dragons and eggs, which
+ * are placed as units and therefore need no world bounds.
+ * ------------------------------------------------------------------ */
+
+const Shapes = {
+  fill(x, y, z, type) { return this.set(x, y, z, type); },
+
+  box(x0, x1, y0, y1, z0, z1, type) {
+    for (let z = z0; z <= z1; z++)
+      for (let y = y0; y <= y1; y++)
+        for (let x = x0; x <= x1; x++) this.set(x, y, z, type);
+    return this;
+  },
+
+  /* the same box, spelled from two corner points */
+  block([ax, ay, az], [bx, by, bz], type) {
+    return this.box(Math.min(ax, bx), Math.max(ax, bx), Math.min(ay, by),
+      Math.max(ay, by), Math.min(az, bz), Math.max(az, bz), type);
+  },
+
+  column(x, z, y0, y1, type) {
+    for (let y = Math.min(y0, y1); y <= Math.max(y0, y1); y++) this.set(x, y, z, type);
+    return this;
+  },
+
+  /* a rope of blocks between two points; gap=2 for slack rope, 1 for taut */
+  strand(x0, y0, z0, x1, y1, z1, type, gap = 1) {
+    const dx = x1 - x0, dy = y1 - y0, dz = z1 - z0;
+    const steps = Math.max(1, Math.ceil(Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz)) / gap));
+    for (let i = 0; i <= steps; i++) {
+      this.set(
+        Math.round(x0 + dx * i / steps),
+        Math.round(y0 + dy * i / steps),
+        Math.round(z0 + dz * i / steps),
+        type
+      );
+    }
+    return this;
+  },
+
+  /* a blocky ellipsoid: diam is the inscribed box width; a voxel is solid
+   * when its centre falls inside that ellipsoid. Odd diam = exact width. */
+  blob(cx, cy, cz, rx, ry, rz, type) {
+    for (let dz = -Math.ceil(rz); dz <= Math.ceil(rz); dz++)
+      for (let dy = -Math.ceil(ry); dy <= Math.ceil(ry); dy++)
+        for (let dx = -Math.ceil(rx); dx <= Math.ceil(rx); dx++) {
+          const q = (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) + (dz * dz) / (rz * rz);
+          if (q <= 1) this.set(cx + dx, cy + dy, cz + dz, type);
+        }
+    return this;
+  },
+
+  /* a corbelled dome: ring n shrinks by 1 each lift, sampled at voxel centres */
+  cupola(cx, cy, cz, rx, rz, lifts, type) {
+    for (let lift = 0; lift < lifts; lift++) {
+      const f = 1 - lift / lifts;
+      const limX = Math.ceil(rx * f), limZ = Math.ceil(rz * f);
+      for (let dz = -limZ; dz <= limZ; dz++)
+        for (let dx = -limX; dx <= limX; dx++) {
+          const ox = dx + 0.5, oz = dz + 0.5;
+          if ((ox * ox) / (rx * rx) + (oz * oz) / (rz * rz) <= (rx * f) * (rx * f)) {
+            this.set(cx + dx, cy + lift, cz + dz, type);
+          }
+        }
+    }
+    return this;
+  },
+
+  /* hollow a box back out to air; set() refuses air, so carving is its own call */
+  carve(x0, x1, y0, y1, z0, z1) {
+    for (let z = z0; z <= z1; z++)
+      for (let y = y0; y <= y1; y++)
+        for (let x = x0; x <= x1; x++) this.clear(x, y, z);
+    return this;
+  },
+
+  /* perimeter of a rectangle on one lift, for parapets and railings */
+  rim(x0, x1, z0, z1, y, type) {
+    for (let x = x0; x <= x1; x++) { this.set(x, y, z0, type); this.set(x, y, z1, type); }
+    for (let z = z0; z <= z1; z++) { this.set(x0, y, z, type); this.set(x1, y, z, type); }
+    return this;
+  },
+};
+
+class Field {
+  constructor(minX, minY, minZ, sizeX, sizeY, sizeZ) {
+    this.min = [minX, minY, minZ];
+    this.size = [sizeX, sizeY, sizeZ];
+    this.data = new Uint8Array(sizeX * sizeY * sizeZ);
+  }
+  index(x, y, z) {
+    const [mx, my, mz] = this.min, sx = this.size[0], sy = this.size[1];
+    return (x - mx) + sx * ((y - my) + sy * (z - mz));
+  }
+  inside(x, y, z) {
+    const [mx, my, mz] = this.min, [sx, sy, sz] = this.size;
+    return x >= mx && x < mx + sx && y >= my && y < my + sy && z >= mz && z < mz + sz;
+  }
+  get(x, y, z) { return this.inside(x, y, z) ? this.data[this.index(x, y, z)] : T.AIR; }
+  set(x, y, z, type) {
+    if (!this.inside(x, y, z) || type === T.AIR) return this;
+    this.data[this.index(x, y, z)] = type;
+    return this;
+  }
+  clear(x, y, z) {
+    if (this.inside(x, y, z)) this.data[this.index(x, y, z)] = T.AIR;
+    return this;
+  }
+  cells() {
+    const out = [], [mx, my, mz] = this.min, [sx, sy, sz] = this.size;
+    for (let z = mz; z < mz + sz; z++)
+      for (let y = my; y < my + sy; y++)
+        for (let x = mx; x < mx + sx; x++) {
+          const type = this.get(x, y, z);
+          if (type) out.push([x, y, z, type]);
+        }
+    return out;
+  }
+}
+
+class Bag {
+  constructor() { this.map = new Map(); }
+  /* Base-1801 packing of (x,y,z) into one Map key so a dragon shape can live in
+   * a sparse grid without string keys. Range is +-900 around an origin. */
+  static key(x, y, z) { return (x + 900) * 1801 * 1801 + (y + 900) * 1801 + (z + 900); }
+  static unkey(k) {
+    const z = (k % 1801) - 900;
+    const t = Math.floor(k / 1801);
+    const y = (t % 1801) - 900;
+    const x = Math.floor(t / 1801) - 900;
+    return [x, y, z];
+  }
+  get(x, y, z) { return this.map.get(Bag.key(x, y, z)) || T.AIR; }
+  clear(x, y, z) { this.map.delete(Bag.key(x, y, z)); return this; }
+  set(x, y, z, type) {
+    if (type === T.AIR) this.map.delete(Bag.key(x, y, z));
+    else this.map.set(Bag.key(x, y, z), type);
+    return this;
+  }
+  cells() {
+    const out = [];
+    for (const [k, type] of this.map) out.push([...Bag.unkey(k), type]);
+    return out;
+  }
+}
+
+Object.assign(Field.prototype, Shapes);
+Object.assign(Bag.prototype, Shapes);

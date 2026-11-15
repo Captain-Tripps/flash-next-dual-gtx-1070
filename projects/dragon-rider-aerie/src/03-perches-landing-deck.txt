@@ -1,0 +1,176 @@
+
+/* ------------------------------------------------------------------ *
+ * Four projecting perches ring the hatchery: a stone platform a lift
+ * above the plaza, aproned underneath, parapet-walled on the three
+ * seaward sides, open toward the plaza, and carried out over the sea on
+ * masonry needles that spread into sea stacks at their feet. Mooring
+ * posts with iron rings stand at the seaward corners.
+ * ---------------------------------------------------------------- */
+
+function parapetEdges(rect, facing) {
+  // the three sides away from the plaza: two flanks plus the far face
+  const flanks = {
+    n: [[rect.x0, rect.x0, rect.z0, rect.z1], [rect.x1, rect.x1, rect.z0, rect.z1]],
+    s: [[rect.x0, rect.x0, rect.z0, rect.z1], [rect.x1, rect.x1, rect.z0, rect.z1]],
+    e: [[rect.x0, rect.x1, rect.z0, rect.z0], [rect.x0, rect.x1, rect.z1, rect.z1]],
+    w: [[rect.x0, rect.x1, rect.z0, rect.z0], [rect.x0, rect.x1, rect.z1, rect.z1]],
+  };
+  const far = { n: [rect.x0, rect.x1, rect.z0, rect.z0], s: [rect.x0, rect.x1, rect.z1, rect.z1],
+    e: [rect.x1, rect.x1, rect.z0, rect.z1], w: [rect.x0, rect.x0, rect.z0, rect.z1] };
+  return [...flanks[facing], far[facing]];
+}
+
+function seawardCorners(rect, facing) {
+  const { x0, x1, z0, z1 } = rect;
+  if (facing === "n") return [[x0, z0], [x1, z0]];
+  if (facing === "s") return [[x0, z1], [x1, z1]];
+  if (facing === "e") return [[x1, z0], [x1, z1]];
+  return [[x0, z0], [x0, z1]];
+}
+
+function tieBack(rect, px, pz) {
+  const cx = (rect.x0 + rect.x1) / 2, cz = (rect.z0 + rect.z1) / 2;
+  return [Math.sign(cx - px), Math.sign(cz - pz)];
+}
+
+function perchSteps(rect, facing, deckY) {
+  /* The deck is a lift clear of the plaza, so a rider reaches it by a two-tile
+   * masonry stair off the paving: one tile at deckY-1 under the deck's inner
+   * row, then a tread on the plaza-side lip. Without this the perch reads as a
+   * slab bolted to the cliff and you cannot tell where a rider walks on. */
+  const inner = { n: ["z", rect.z1], s: ["z", rect.z0], e: ["x", rect.x0], w: ["x", rect.x1] };
+  const outward = { n: 1, s: -1, e: -1, w: 1 };
+  const [axis, fixed] = inner[facing];
+  const step = fixed + outward[facing];
+  if (axis === "z") {
+    for (let x = rect.x0; x <= rect.x1; x++) {
+      world.clear(x, deckY, fixed);
+      world.set(x, deckY - 1, fixed, T.HEWN);
+      world.set(x, deckY - 2, step, T.HEWN);
+    }
+  } else {
+    for (let z = rect.z0; z <= rect.z1; z++) {
+      world.clear(fixed, deckY, z);
+      world.set(fixed, deckY - 1, z, T.HEWN);
+      world.set(step, deckY - 2, z, T.HEWN);
+    }
+  }
+}
+
+function buildPerch(rect, facing) {
+  const { x0, x1, z0, z1 } = rect;
+  const deckY = 24;
+
+  world.block([x0, deckY, z0], [x1, deckY, z1], T.PAVE);
+  /* The apron and the deck's outer fascia are dark slate: a light stone deck
+   * butted against light stone cliff has no silhouette at all from the levels
+   * the aerie is judged at, and a dark band under the lip reads as a shadow and
+   * puts the balcony in relief against the cliff it is carried on. Slate and
+   * not timber - these are stone perches, and the carpentry belongs on the
+   * landing deck. */
+  world.block([x0 - 1, deckY - 1, z0 - 1], [x1 + 1, deckY - 1, z1 + 1], T.SLATE);
+  for (const [ax, bx, az, bz] of parapetEdges(rect, facing))
+    world.rim(Math.min(ax, bx), Math.max(ax, bx), Math.min(az, bz), Math.max(az, bz), deckY, T.SLATE);
+
+  for (const [ax, bx, az, bz] of parapetEdges(rect, facing))
+    world.rim(Math.min(ax, bx), Math.max(ax, bx), Math.min(az, bz), Math.max(az, bz), deckY + 1, T.HEWN);
+
+  perchSteps(rect, facing, deckY);
+
+  for (const [px, pz] of seawardCorners(rect, facing)) {
+    world.column(px, pz, deckY + 1, deckY + 2, T.BEAM);
+    world.fill(px, deckY + 1, pz, T.IRON);
+
+    // needle: pier with a sea footing, narrow shaft, corbel shelf under the apron
+    for (let y = 6; y < deckY - 1; y++) {
+      const g = y < 9 ? 2 : y > 18 ? 1 : y > 13 ? 0 : 1;
+      world.block([px - g, y, pz - g], [px + g, y, pz + g], T.HEWN);
+    }
+    const [dx, dz] = tieBack(rect, px, pz);
+    for (let y = 14; y < deckY - 1; y += 2) world.fill(px + dx, y, pz + dz, T.HEWN);
+  }
+}
+
+const PERCHS = [
+  { name: "north perch", rect: { x0: 5, x1: 11, z0: -18, z1: -10 }, facing: "n" },
+  { name: "east perch", rect: { x0: 18, x1: 24, z0: -9, z1: -2 }, facing: "e" },
+  { name: "west perch", rect: { x0: -17, x1: -10, z0: 8, z1: 16 }, facing: "w" },
+  { name: "south perch", rect: { x0: -6, x1: 3, z0: 16, z1: 24 }, facing: "s" },
+];
+
+function buildPerches() {
+  for (const p of PERCHS) buildPerch(p.rect, p.facing);
+}
+
+/* ------------------------------------------------------------------ *
+ * Landing deck: planked platform on trestles off the east shoulder,
+ * hoist derrick at its sea edge, harness racks along the plaza lip and
+ * tackle scattered about. The busiest deck on the aerie.
+ * ---------------------------------------------------------------- */
+
+function buildDeck() {
+  const x0 = 17, x1 = 22, z0 = -1, z1 = 6, y = 17;
+  world.block([x0, y, z0], [x1, y, z1], T.PLANK);
+
+  // trestle needles under the corners, buried in the shoulder where they can
+  for (const [px, pz] of [[x1, z0], [x1, z1], [x1 - 2, z1], [x0, z0], [x0 + 2, z1]])
+    world.column(px, pz, 6, y - 1, T.BEAM);
+  for (const [px, pz] of [[x1, z0], [x1, z1]]) {
+    world.fill(px - 1, y - 2, pz, T.BRACE);
+    world.fill(px - 1, y - 4, pz, T.BRACE);
+    world.fill(px, y - 3, pz - 1, T.BRACE);
+  }
+
+  // railings on the seaward lips, tall gate posts at the corners
+  world.rim(x1, x1, z0, z1, y + 1, T.BEAM);
+  world.rim(x0, x1, z1, z1, y + 1, T.BEAM);
+  for (const z of [z0, z1]) world.column(x1, z, y + 1, y + 3, T.BEAM);
+
+  // gate posts where the switchback arrives, leaving the approach free
+  for (const z of [z0, z1]) world.fill(x0, y + 1, z, T.BEAM);
+
+  buildDerrick(x1 - 2, y, z0 + 1);
+  buildHarnessRacks();
+  buildDeckCargo(x0, y, z1);
+}
+
+function buildDerrick(footX, deckY, footZ) {
+  // mast, yard raked out over the drop, guy back to the rail, hook drop
+  world.column(footX, footZ, deckY + 1, deckY + 5, T.BEAM);
+  world.strand(footX, deckY + 5, footZ, footX + 4, deckY + 2, footZ, T.BEAM);
+  world.strand(footX, deckY + 5, footZ, footX - 2, deckY + 2, footZ, T.ROPE);
+  world.strand(footX + 4, deckY + 2, footZ, footX + 4, deckY - 1, footZ, T.ROPE);
+  world.fill(footX + 4, deckY - 1, footZ, T.IRON);
+}
+
+function buildHarnessRacks() {
+  // three rack posts standing on the plaza apron, between the keep door and
+  // the stair mouth; a crossbeam ties them and rope collars hang off it
+  const x = 12;
+  for (const z of [-4, -1, 2]) {
+    world.column(x, z, PLAZA_Y + 1, PLAZA_Y + 3, T.BEAM);
+    world.fill(x, PLAZA_Y + 1, z, T.IRON);
+  }
+  world.strand(x, PLAZA_Y + 3, -4, x, PLAZA_Y + 3, 2, T.BEAM);
+  for (const z of [-3, -2, 0, 1]) {
+    world.fill(x, PLAZA_Y + 2, z, T.ROPE);
+    world.fill(x, PLAZA_Y + 1, z, T.ROPE);
+  }
+
+  // the roading yard gear: crate stack, folded leather, a water barrel
+  world.block([9, PLAZA_Y + 1, -2], [10, PLAZA_Y + 2, -1], T.CRATE);
+  world.fill(9, PLAZA_Y + 3, -1, T.CRATE);
+  world.block([14, PLAZA_Y + 1, -5], [15, PLAZA_Y + 2, -4], T.HIDE);
+  world.blob(8, PLAZA_Y + 1, -6, 1, 1, 1, T.BEAM);
+  world.blob(8, PLAZA_Y + 2, -6, 1, 0.4, 1, T.SLATE);
+}
+
+function buildDeckCargo(x0, deckY, z1) {
+  // barrel with a slate head, crate stack at the inboard corner, lamp at the gate
+  world.blob(x0 + 1, deckY + 1, z1 - 3, 1, 1, 1, T.BEAM);
+  world.blob(x0 + 1, deckY + 2, z1 - 3, 1, 0.4, 1, T.SLATE);
+  world.block([x0 + 3, deckY + 1, z1 - 4], [x0 + 4, deckY + 2, z1 - 3], T.CRATE);
+  world.fill(x0 + 3, deckY + 3, z1 - 4, T.CRATE);
+  world.fill(x0 + 1, deckY + 1, z1, T.IRON);
+  world.fill(x0 + 1, deckY + 2, z1, T.FLAME);
+}

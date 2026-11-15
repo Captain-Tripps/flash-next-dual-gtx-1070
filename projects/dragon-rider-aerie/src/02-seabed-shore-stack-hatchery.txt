@@ -1,0 +1,205 @@
+
+/* ------------------------------------------------------------------ *
+ * World layout. Everything is measured in blocks; the stack sits at the
+ * origin, the shore runs along the east side, and the working quarter
+ * (deck, derrick, throat with its stairs and boathouse) faces the sea.
+ * ------------------------------------------------------------------ */
+
+const SEA_Y = 6;        // top lift of the sea column; water surface sits at y + .5
+const PLAZA_Y = 21;     // paving lift of the stack top
+const HX = 6, HZ = 6;   // hatchery half-extents (13 x 13 keep)
+
+const world = new Field(-36, 0, -36, 73, 34, 73);
+
+/* ------------------------------------------------------------ seabed */
+
+function laySeabed() {
+  for (let z = -36; z <= 36; z++) {
+    for (let x = -36; x <= 36; x++) {
+      const barTop = 3 + (hash2(x * 0.7 + 11, z * 0.7 - 4) > 0.6 ? 1 : 0);
+      world.box(x, x, 0, 2, z, z, T.ROCK);
+      world.box(x, x, 3, barTop, z, z, T.SAND);
+    }
+  }
+}
+
+/* The shore runs along the east edge of the block field and is only as wide as
+ * eleven columns, so a slab with square ends reads as a floating bar of sand.
+ * Instead the spit is tapered: the tideline marches east until the land dies
+ * out into the sea at both ends of the field, which is also what a spit does.
+ * The bay under the quay is held open so the quay and its boats sit on water. */
+function shoreEdgeAt(z) {
+  const out = Math.max(0, Math.abs(z) - 20) / 16;
+  const taper = Math.min(1, out);
+  const inBay = z >= 4 && z <= 20;
+  const wander = 2.2 * Math.sin(z * 0.31) + 1.4 * Math.sin(z * 0.83 + 1.7);
+  // under the quay the beach never marches further west than 25: that water is
+  // the bay the boats lie on, and the pier needs it to stay open
+  const push = inBay ? Math.max(0, wander) : wander;
+  return 25 + Math.round(push * (1 - taper)) + Math.round(taper * 11);
+}
+
+function layShore() {
+  for (let z = -36; z <= 36; z++) {
+    const edge = shoreEdgeAt(z);
+    const taper = Math.min(1, Math.max(0, (Math.abs(z) - 20) / 16));
+    const lift = Math.round((1 - taper) * 3);
+    for (let x = edge; x <= 36; x++) {
+      const step = x >= 34 ? 3 : (x >= 30 ? 2 : (x >= 28 ? 1 : 0));
+      const duneTop = 6 + Math.min(step, lift);
+      world.box(x, x, 3, duneTop, z, z, T.SAND);
+      const fringe = x <= edge + 1;
+      if (fringe) world.set(x, duneTop, z, T.WET);
+      /* Dune turf is patchy: gorse and marram clumps with blown sand between,
+       * not a lawn. A continuous grass cap reads as a green pavement slab. */
+      const cover = hash2(x * 7 + z * 11, 57);
+      if (fringe) continue;
+      if (duneTop >= 8 && cover > 0.72) world.set(x, duneTop, z, T.GRASS);
+      else if (cover > 0.9) world.set(x, duneTop, z, T.MOSS);
+    }
+    // storm boulders on the tideline
+    if (hash2(z, 13) > 0.8 && edge < 30) world.fill(edge + 2, 7, z + 1, T.ROCK);
+    // a blowout ridge on the flat beach, so the tideline isn't one straight eave
+    if (hash2(z * 3 + 5, 71) > 0.62 && edge + 3 <= 36) world.fill(edge + 3, 7, z, T.SAND);
+  }
+  // a spring on the dune: the aerie's fresh water, and a green cushion round it
+  world.blob(31, 8, 5, 1.5, 0.4, 1.5, T.MOSS);
+  world.blob(31, 9, 5, 1, 1, 1, T.LEAF);
+  world.blob(30, 9, 4, 1, 1, 1, T.LEAF);
+}
+
+/* ------------------------------------------------------------ sea stack
+ * Five stepped bands, each with a per-sector radius jitter so the cliff
+ * is craggy rather than conical, plus gully sectors cut down the face.
+ * The SE throat is a slot carved right through the stack: the boathouse
+ * and switchback stairs hang in that slot.
+ * ---------------------------------------------------------------- */
+
+const STACK_BANDS = [
+  { from: 0, radius: 20 },
+  { from: 8, radius: 19 },
+  { from: 12, radius: 17 },
+  { from: 16, radius: 16 },
+  { from: 20, radius: 15 },
+];
+
+function bandRadius(y) {
+  let r = STACK_BANDS[0].radius;
+  for (const band of STACK_BANDS) if (y >= band.from) r = band.radius;
+  return r;
+}
+
+function layStack() {
+  for (let y = 0; y <= PLAZA_Y; y++) {
+    for (let x = -23; x <= 23; x++) {
+      for (let z = -23; z <= 23; z++) {
+        const d = Math.hypot(x, z);
+        if (d > 22) continue;
+        const sector = Math.floor(((Math.atan2(z, x) + Math.PI) / (Math.PI * 2)) * 24);
+        const crag = (hash2(sector * 13 + 5, y * 7 + 3) - 0.5) * 1.8;
+        const gully = hash2(sector, 7) > 0.74 && y >= 9 ? -2 : 0;
+        if (d <= bandRadius(y) + crag + gully) world.set(x, y, z, T.ROCK);
+      }
+    }
+  }
+
+  // the throat: a slot cut back into the SE shoulder, open to the sky, with a
+  // shelf at its foot for the boathouse and a sea arch bored under its mouth
+  world.carve(11, 16, 9, PLAZA_Y, 3, 9);
+  world.carve(13, 18, 9, 13, 10, 15);
+  world.carve(11, 17, 3, 8, 4, 9);
+
+  // the plaza: paving only where rock shoulders stand below it
+  for (let x = -20; x <= 20; x++)
+    for (let z = -20; z <= 20; z++)
+      if (world.get(x, PLAZA_Y - 1, z) !== T.AIR) world.set(x, PLAZA_Y, z, T.PAVE);
+
+  // moss gardens on the plaza, green on the cliff shoulders, and wet rock
+  // round the splash zone: only the lift above the tide line gets barnacled
+  for (let x = -20; x <= 20; x++)
+    for (let z = -20; z <= 20; z++) {
+      if (world.get(x, PLAZA_Y, z) === T.PAVE && hash3(x, PLAZA_Y, z) > 0.93)
+        world.set(x, PLAZA_Y, z, T.MOSS);
+      for (let y = 9; y <= PLAZA_Y - 2; y++) {
+        if (world.get(x, y, z) !== T.ROCK) continue;
+        if (world.get(x, y + 1, z) === T.AIR && hash3(x, y, z) > 0.9)
+          world.set(x, y + 1, z, T.MOSS);
+        break;
+      }
+    }
+
+  for (let x = -22; x <= 22; x++)
+    for (let z = -22; z <= 22; z++)
+      for (let y = 5; y <= 7; y++) {
+        if (world.get(x, y, z) !== T.ROCK) continue;
+        const open = (dx, dz) => world.get(x + dx, y, z + dz) === T.AIR;
+        if (open(1, 0) || open(-1, 0) || open(0, 1) || open(0, -1))
+          world.set(x, y, z, T.WET);
+      }
+}
+
+function laySkerries() {
+  // leaning rocks to windward: they break the swell and give the skyline weight
+  for (const [cx, cz, r, top] of [[-27, -15, 4, 11], [-31, -7, 2.5, 8], [-24, -22, 3, 9]]) {
+    for (let y = 0; y <= top; y++) {
+      const shrink = Math.floor(y / 4);
+      for (let x = -r; x <= r; x++)
+        for (let z = -r; z <= r; z++)
+          if (Math.hypot(x, z) <= r - shrink + (hash2(x + cx, z + cz) - 0.5))
+            world.set(cx + x, y, cz + z, T.ROCK);
+    }
+  }
+}
+
+/* ------------------------------------------------------------ hatchery
+ * A 13 x 13 stone keep with a corbelled vault over an 11 x 11 cave, an
+ * ared entrance facing the plaza, and a 3 x 3 smoke hole through three
+ * roof lifts. The smoke hole is aligned over the hearth so the line
+ * reads from any angle.
+ * ------------------------------------------------------------------- */
+
+function buildHatchery() {
+  world.block([-HX, 22, -HZ], [HX, 27, HZ], T.HEWN);
+
+  // the vault: cave full height, then two corbel lifts closing the crown
+  world.carve(-5, 5, 22, 25, -5, 5);
+  world.carve(-3, 3, 26, 27, -3, 3);
+
+  // ared entrance, facing the plaza and the stair mouth
+  world.carve(-2, 2, 22, 25, HZ, HZ);
+  world.carve(-1, 1, 26, 26, HZ, HZ);
+  // slit windows to wind and light the cave
+  world.carve(-HX, -HX, 24, 24, -2, -1);
+  world.carve(HX, HX, 24, 24, 1, 2);
+  world.carve(-1, 0, 24, 24, -HZ, -HZ);
+
+  // stepped roof lifts, then the smoke hole straight through them
+  world.block([-6, 28, -6], [6, 28, 6], T.SLATE);
+  world.block([-5, 29, -5], [5, 29, 5], T.SLATE);
+  world.block([-2, 30, -2], [2, 30, 2], T.HEWN);
+  world.block([-1, 31, -1], [1, 31, 1], T.PAVE);
+  world.carve(-1, 1, 28, 31, -1, 1);
+
+  // soot up around the flue
+  world.block([-2, 27, -2], [2, 27, 2], T.SOOT);
+  world.carve(-1, 1, 27, 27, -1, 1);
+
+  buildNestChamber();
+}
+
+function buildNestChamber() {
+  // hearth dead centre, under the flue
+  world.block([-1, 22, -1], [1, 22, 1], T.SOOT);
+  world.block([-1, 22, -1], [1, 22, 1], T.EMBER);
+  world.set(0, 23, 0, T.FLAME);
+  world.set(1, 23, 0, T.FLAME);
+  world.set(0, 23, 1, T.FLAME);
+
+  // four sand nests in the corners of the cave, each with a clutch
+  for (const [nx, nz] of [[-4, -4], [4, -4], [-4, 4], [3, 4]]) {
+    world.blob(nx, 22, nz, 2, 0.6, 2, T.SAND);
+    world.blob(nx, 23, nz, 1.4, 1.2, 1.4, T.EGG);
+    world.fill(nx, 24, nz, T.EGG);
+    if (hash3(nx, nz, 7) > 0.55) world.fill(nx + 1, 23, nz, T.EGG);
+  }
+}
