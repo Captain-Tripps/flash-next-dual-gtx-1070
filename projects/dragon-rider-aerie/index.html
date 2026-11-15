@@ -1,0 +1,1658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dragonrider Aerie - Sea Stack</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #8fb4cf; }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  #hud {
+    position: fixed; left: 14px; bottom: 14px; z-index: 5;
+    font: 12px/1.55 "Segoe UI", system-ui, sans-serif;
+    color: rgba(232, 240, 248, .92); pointer-events: none;
+    background: rgba(9, 17, 26, .55); border: 1px solid rgba(255, 255, 255, .14);
+    border-radius: 7px; padding: 9px 13px; max-width: 360px;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, .7);
+  }
+  #hud h1 { font-size: 15px; margin: 0 0 4px; letter-spacing: .4px; color: #ffd98a; }
+  #hud .keys { color: rgba(214, 228, 242, .74); }
+  #hud .keys kbd {
+    font: 11px/1 ui-monospace, Consolas, monospace; background: rgba(255, 255, 255, .13);
+    border: 1px solid rgba(255, 255, 255, .2); border-radius: 3px; padding: 1px 4px;
+  }
+  #stats { margin-top: 6px; color: rgba(186, 205, 222, .6); font-size: 11px; }
+
+  #boot {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: #8fb4cf; color: #24384c; font: 14px/1 system-ui, sans-serif;
+    z-index: 10; transition: opacity .6s;
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="boot">Hauling up the sea...</div>
+<div id="hud">
+  <h1>Dragonrider Aerie</h1>
+  A flat-topped sea stack: rope windlass from the shore quay, timber landing deck with a
+  hoist derrick and harness racks, four projecting stone perches ringing the vaulted
+  hatchery, switchback stairs down a carved throat to a water-level boathouse.
+  Every solid thing here is cut from cubic blocks.
+  <div class="keys" style="margin-top:6px">
+    <kbd>drag</kbd> orbit &nbsp; <kbd>wheel</kbd> zoom &nbsp; <kbd>right-drag</kbd> pan
+    &nbsp; <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd> views
+    &nbsp; <kbd>R</kbd> auto-orbit &nbsp; <kbd>C</kbd> sea
+  </div>
+  <div id="stats"></div>
+</div>
+<script type="module">
+import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.187.0/three.module.min.js";
+
+/* ------------------------------------------------------------------ *
+ * Voxel ids -> base colour. One entry per surface in the scene.
+ * A block's final colour is its base, modulated by baked ambient
+ * occlusion plus a per-block tint, so the same material still reads
+ * as a pile of individual cubes rather than one smooth mass.
+ * ------------------------------------------------------------------ */
+
+const T = {
+  AIR: 0, ROCK: 1, SAND: 2, WET: 3, GRASS: 4, MOSS: 5, HEWN: 6, PAVE: 7,
+  SLATE: 8, PLANK: 9, BEAM: 10, BRACE: 11, ROPE: 12, IRON: 13, EGG: 14,
+  BONE: 15, HIDE: 16, CRATE: 17, LEAF: 18, SOOT: 19, EMBER: 20, FLAME: 21,
+  SCALE_A: 22, SCALE_B: 23, WEB: 24, EYE: 25, SCALE_C: 26,
+};
+
+const PALETTE = {
+  [T.ROCK]:   { c: 0x6f7684, jit: 0.10 },
+  [T.SAND]:   { c: 0xd7bd8c, jit: 0.07 },
+  [T.WET]:    { c: 0xa08a66, jit: 0.06 },
+  [T.GRASS]:  { c: 0x6f9350, jit: 0.11 },
+  [T.MOSS]:   { c: 0x53713d, jit: 0.09 },
+  [T.HEWN]:   { c: 0x9c9081, jit: 0.07 },
+  [T.PAVE]:   { c: 0x8b9099, jit: 0.08 },
+  [T.SLATE]:  { c: 0x59606e, jit: 0.08 },
+  [T.PLANK]:  { c: 0x9a6b40, jit: 0.09 },
+  [T.BEAM]:   { c: 0x6d492b, jit: 0.08 },
+  [T.BRACE]:  { c: 0x5e3f24, jit: 0.08 },
+  [T.ROPE]:   { c: 0xba9a68, jit: 0.05 },
+  [T.IRON]:   { c: 0x474c55, jit: 0.04 },
+  [T.EGG]:    { c: 0xe9e2cd, jit: 0.03 },
+  [T.BONE]:   { c: 0xc9c0ac, jit: 0.05 },
+  [T.HIDE]:   { c: 0x7a4f45, jit: 0.06 },
+  [T.CRATE]:  { c: 0x8a5f39, jit: 0.08 },
+  [T.LEAF]:   { c: 0x4d7a3c, jit: 0.12 },
+  [T.SOOT]:   { c: 0x3a3a40, jit: 0.05 },
+  [T.EMBER]:  { c: 0xff7a2a, jit: 0.10, emissive: true },
+  [T.FLAME]:  { c: 0xffc24a, jit: 0.14, emissive: true },
+  /* The beast pelts are the one place where a voxel id does the work of a
+   * material: SCALE_A/B are the body, SCALE_C the gold pelt, WEB the wing
+   * membrane, and EYE an emissive glow rather than a surface. */
+  [T.SCALE_A]:{ c: 0x9c5b38, jit: 0.09 },
+  [T.SCALE_B]:{ c: 0xc47f4f, jit: 0.09 },
+  [T.SCALE_C]:{ c: 0xd9ab4a, jit: 0.10 },
+  [T.WEB]:    { c: 0x5d3a34, jit: 0.05 },
+  [T.EYE]:    { c: 0xffc24a, jit: 0.02, emissive: true },
+};
+
+/* Self-lit blocks get their own merged group so the solid geometry can
+ * stay one cheap MeshStandardMaterial with vertex colours. */
+const EMISSIVE_IDS = new Set([T.EMBER, T.FLAME, T.EYE]);
+
+/* Cliff rock: every third y-band is tone-shifted, so the cliff face reads
+ * as strata instead of one flat grey slab. */
+function strataTint(y) {
+  const ramp = [1.0, 0.93, 1.04];
+  const band = ((Math.floor(y / 3) % 3) + 3) % 3;
+  return ramp[band];
+}
+
+/* ------------------------------------------------------------------ *
+ * Deterministic noise. Deliberate, not random: one seed lays the whole
+ * world, so a reload never rebuilds the stack differently on you.
+ * ------------------------------------------------------------------ */
+
+function hash2(x, y) {
+  const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return s - Math.floor(s);
+}
+function hash3(x, y, z) {
+  const s = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453;
+  return s - Math.floor(s);
+}
+
+/* ------------------------------------------------------------------ *
+ * Two containers, one builder API. Field is a bounded dense grid for the
+ * world; Bag is unbounded and sparse, used for dragons and eggs, which
+ * are placed as units and therefore need no world bounds.
+ * ------------------------------------------------------------------ */
+
+const Shapes = {
+  fill(x, y, z, type) { return this.set(x, y, z, type); },
+
+  box(x0, x1, y0, y1, z0, z1, type) {
+    for (let z = z0; z <= z1; z++)
+      for (let y = y0; y <= y1; y++)
+        for (let x = x0; x <= x1; x++) this.set(x, y, z, type);
+    return this;
+  },
+
+  /* the same box, spelled from two corner points */
+  block([ax, ay, az], [bx, by, bz], type) {
+    return this.box(Math.min(ax, bx), Math.max(ax, bx), Math.min(ay, by),
+      Math.max(ay, by), Math.min(az, bz), Math.max(az, bz), type);
+  },
+
+  column(x, z, y0, y1, type) {
+    for (let y = Math.min(y0, y1); y <= Math.max(y0, y1); y++) this.set(x, y, z, type);
+    return this;
+  },
+
+  /* a rope of blocks between two points; gap=2 for slack rope, 1 for taut */
+  strand(x0, y0, z0, x1, y1, z1, type, gap = 1) {
+    const dx = x1 - x0, dy = y1 - y0, dz = z1 - z0;
+    const steps = Math.max(1, Math.ceil(Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz)) / gap));
+    for (let i = 0; i <= steps; i++) {
+      this.set(
+        Math.round(x0 + dx * i / steps),
+        Math.round(y0 + dy * i / steps),
+        Math.round(z0 + dz * i / steps),
+        type
+      );
+    }
+    return this;
+  },
+
+  /* a blocky ellipsoid: diam is the inscribed box width; a voxel is solid
+   * when its centre falls inside that ellipsoid. Odd diam = exact width. */
+  blob(cx, cy, cz, rx, ry, rz, type) {
+    for (let dz = -Math.ceil(rz); dz <= Math.ceil(rz); dz++)
+      for (let dy = -Math.ceil(ry); dy <= Math.ceil(ry); dy++)
+        for (let dx = -Math.ceil(rx); dx <= Math.ceil(rx); dx++) {
+          const q = (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) + (dz * dz) / (rz * rz);
+          if (q <= 1) this.set(cx + dx, cy + dy, cz + dz, type);
+        }
+    return this;
+  },
+
+  /* a corbelled dome: ring n shrinks by 1 each lift, sampled at voxel centres */
+  cupola(cx, cy, cz, rx, rz, lifts, type) {
+    for (let lift = 0; lift < lifts; lift++) {
+      const f = 1 - lift / lifts;
+      const limX = Math.ceil(rx * f), limZ = Math.ceil(rz * f);
+      for (let dz = -limZ; dz <= limZ; dz++)
+        for (let dx = -limX; dx <= limX; dx++) {
+          const ox = dx + 0.5, oz = dz + 0.5;
+          if ((ox * ox) / (rx * rx) + (oz * oz) / (rz * rz) <= (rx * f) * (rx * f)) {
+            this.set(cx + dx, cy + lift, cz + dz, type);
+          }
+        }
+    }
+    return this;
+  },
+
+  /* hollow a box back out to air; set() refuses air, so carving is its own call */
+  carve(x0, x1, y0, y1, z0, z1) {
+    for (let z = z0; z <= z1; z++)
+      for (let y = y0; y <= y1; y++)
+        for (let x = x0; x <= x1; x++) this.clear(x, y, z);
+    return this;
+  },
+
+  /* perimeter of a rectangle on one lift, for parapets and railings */
+  rim(x0, x1, z0, z1, y, type) {
+    for (let x = x0; x <= x1; x++) { this.set(x, y, z0, type); this.set(x, y, z1, type); }
+    for (let z = z0; z <= z1; z++) { this.set(x0, y, z, type); this.set(x1, y, z, type); }
+    return this;
+  },
+};
+
+class Field {
+  constructor(minX, minY, minZ, sizeX, sizeY, sizeZ) {
+    this.min = [minX, minY, minZ];
+    this.size = [sizeX, sizeY, sizeZ];
+    this.data = new Uint8Array(sizeX * sizeY * sizeZ);
+  }
+  index(x, y, z) {
+    const [mx, my, mz] = this.min, sx = this.size[0], sy = this.size[1];
+    return (x - mx) + sx * ((y - my) + sy * (z - mz));
+  }
+  inside(x, y, z) {
+    const [mx, my, mz] = this.min, [sx, sy, sz] = this.size;
+    return x >= mx && x < mx + sx && y >= my && y < my + sy && z >= mz && z < mz + sz;
+  }
+  get(x, y, z) { return this.inside(x, y, z) ? this.data[this.index(x, y, z)] : T.AIR; }
+  set(x, y, z, type) {
+    if (!this.inside(x, y, z) || type === T.AIR) return this;
+    this.data[this.index(x, y, z)] = type;
+    return this;
+  }
+  clear(x, y, z) {
+    if (this.inside(x, y, z)) this.data[this.index(x, y, z)] = T.AIR;
+    return this;
+  }
+  cells() {
+    const out = [], [mx, my, mz] = this.min, [sx, sy, sz] = this.size;
+    for (let z = mz; z < mz + sz; z++)
+      for (let y = my; y < my + sy; y++)
+        for (let x = mx; x < mx + sx; x++) {
+          const type = this.get(x, y, z);
+          if (type) out.push([x, y, z, type]);
+        }
+    return out;
+  }
+}
+
+class Bag {
+  constructor() { this.map = new Map(); }
+  /* Base-1801 packing of (x,y,z) into one Map key so a dragon shape can live in
+   * a sparse grid without string keys. Range is +-900 around an origin. */
+  static key(x, y, z) { return (x + 900) * 1801 * 1801 + (y + 900) * 1801 + (z + 900); }
+  static unkey(k) {
+    const z = (k % 1801) - 900;
+    const t = Math.floor(k / 1801);
+    const y = (t % 1801) - 900;
+    const x = Math.floor(t / 1801) - 900;
+    return [x, y, z];
+  }
+  get(x, y, z) { return this.map.get(Bag.key(x, y, z)) || T.AIR; }
+  clear(x, y, z) { this.map.delete(Bag.key(x, y, z)); return this; }
+  set(x, y, z, type) {
+    if (type === T.AIR) this.map.delete(Bag.key(x, y, z));
+    else this.map.set(Bag.key(x, y, z), type);
+    return this;
+  }
+  cells() {
+    const out = [];
+    for (const [k, type] of this.map) out.push([...Bag.unkey(k), type]);
+    return out;
+  }
+}
+
+Object.assign(Field.prototype, Shapes);
+Object.assign(Bag.prototype, Shapes);
+
+/* ------------------------------------------------------------------ *
+ * World layout. Everything is measured in blocks; the stack sits at the
+ * origin, the shore runs along the east side, and the working quarter
+ * (deck, derrick, throat with its stairs and boathouse) faces the sea.
+ * ------------------------------------------------------------------ */
+
+const SEA_Y = 6;        // top lift of the sea column; water surface sits at y + .5
+const PLAZA_Y = 21;     // paving lift of the stack top
+const HX = 6, HZ = 6;   // hatchery half-extents (13 x 13 keep)
+
+const world = new Field(-36, 0, -36, 73, 34, 73);
+
+/* ------------------------------------------------------------ seabed */
+
+function laySeabed() {
+  for (let z = -36; z <= 36; z++) {
+    for (let x = -36; x <= 36; x++) {
+      const barTop = 3 + (hash2(x * 0.7 + 11, z * 0.7 - 4) > 0.6 ? 1 : 0);
+      world.box(x, x, 0, 2, z, z, T.ROCK);
+      world.box(x, x, 3, barTop, z, z, T.SAND);
+    }
+  }
+}
+
+/* The shore runs along the east edge of the block field and is only as wide as
+ * eleven columns, so a slab with square ends reads as a floating bar of sand.
+ * Instead the spit is tapered: the tideline marches east until the land dies
+ * out into the sea at both ends of the field, which is also what a spit does.
+ * The bay under the quay is held open so the quay and its boats sit on water. */
+function shoreEdgeAt(z) {
+  const out = Math.max(0, Math.abs(z) - 20) / 16;
+  const taper = Math.min(1, out);
+  const inBay = z >= 4 && z <= 20;
+  const wander = 2.2 * Math.sin(z * 0.31) + 1.4 * Math.sin(z * 0.83 + 1.7);
+  // under the quay the beach never marches further west than 25: that water is
+  // the bay the boats lie on, and the pier needs it to stay open
+  const push = inBay ? Math.max(0, wander) : wander;
+  return 25 + Math.round(push * (1 - taper)) + Math.round(taper * 11);
+}
+
+function layShore() {
+  for (let z = -36; z <= 36; z++) {
+    const edge = shoreEdgeAt(z);
+    const taper = Math.min(1, Math.max(0, (Math.abs(z) - 20) / 16));
+    const lift = Math.round((1 - taper) * 3);
+    for (let x = edge; x <= 36; x++) {
+      const step = x >= 34 ? 3 : (x >= 30 ? 2 : (x >= 28 ? 1 : 0));
+      const duneTop = 6 + Math.min(step, lift);
+      world.box(x, x, 3, duneTop, z, z, T.SAND);
+      const fringe = x <= edge + 1;
+      if (fringe) world.set(x, duneTop, z, T.WET);
+      /* Dune turf is patchy: gorse and marram clumps with blown sand between,
+       * not a lawn. A continuous grass cap reads as a green pavement slab. */
+      const cover = hash2(x * 7 + z * 11, 57);
+      if (fringe) continue;
+      if (duneTop >= 8 && cover > 0.72) world.set(x, duneTop, z, T.GRASS);
+      else if (cover > 0.9) world.set(x, duneTop, z, T.MOSS);
+    }
+    // storm boulders on the tideline
+    if (hash2(z, 13) > 0.8 && edge < 30) world.fill(edge + 2, 7, z + 1, T.ROCK);
+    // a blowout ridge on the flat beach, so the tideline isn't one straight eave
+    if (hash2(z * 3 + 5, 71) > 0.62 && edge + 3 <= 36) world.fill(edge + 3, 7, z, T.SAND);
+  }
+  // a spring on the dune: the aerie's fresh water, and a green cushion round it
+  world.blob(31, 8, 5, 1.5, 0.4, 1.5, T.MOSS);
+  world.blob(31, 9, 5, 1, 1, 1, T.LEAF);
+  world.blob(30, 9, 4, 1, 1, 1, T.LEAF);
+}
+
+/* ------------------------------------------------------------ sea stack
+ * Five stepped bands, each with a per-sector radius jitter so the cliff
+ * is craggy rather than conical, plus gully sectors cut down the face.
+ * The SE throat is a slot carved right through the stack: the boathouse
+ * and switchback stairs hang in that slot.
+ * ---------------------------------------------------------------- */
+
+const STACK_BANDS = [
+  { from: 0, radius: 20 },
+  { from: 8, radius: 19 },
+  { from: 12, radius: 17 },
+  { from: 16, radius: 16 },
+  { from: 20, radius: 15 },
+];
+
+function bandRadius(y) {
+  let r = STACK_BANDS[0].radius;
+  for (const band of STACK_BANDS) if (y >= band.from) r = band.radius;
+  return r;
+}
+
+function layStack() {
+  for (let y = 0; y <= PLAZA_Y; y++) {
+    for (let x = -23; x <= 23; x++) {
+      for (let z = -23; z <= 23; z++) {
+        const d = Math.hypot(x, z);
+        if (d > 22) continue;
+        const sector = Math.floor(((Math.atan2(z, x) + Math.PI) / (Math.PI * 2)) * 24);
+        const crag = (hash2(sector * 13 + 5, y * 7 + 3) - 0.5) * 1.8;
+        const gully = hash2(sector, 7) > 0.74 && y >= 9 ? -2 : 0;
+        if (d <= bandRadius(y) + crag + gully) world.set(x, y, z, T.ROCK);
+      }
+    }
+  }
+
+  // the throat: a slot cut back into the SE shoulder, open to the sky, with a
+  // shelf at its foot for the boathouse and a sea arch bored under its mouth
+  world.carve(11, 16, 9, PLAZA_Y, 3, 9);
+  world.carve(13, 18, 9, 13, 10, 15);
+  world.carve(11, 17, 3, 8, 4, 9);
+
+  // the plaza: paving only where rock shoulders stand below it
+  for (let x = -20; x <= 20; x++)
+    for (let z = -20; z <= 20; z++)
+      if (world.get(x, PLAZA_Y - 1, z) !== T.AIR) world.set(x, PLAZA_Y, z, T.PAVE);
+
+  // moss gardens on the plaza, green on the cliff shoulders, and wet rock
+  // round the splash zone: only the lift above the tide line gets barnacled
+  for (let x = -20; x <= 20; x++)
+    for (let z = -20; z <= 20; z++) {
+      if (world.get(x, PLAZA_Y, z) === T.PAVE && hash3(x, PLAZA_Y, z) > 0.93)
+        world.set(x, PLAZA_Y, z, T.MOSS);
+      for (let y = 9; y <= PLAZA_Y - 2; y++) {
+        if (world.get(x, y, z) !== T.ROCK) continue;
+        if (world.get(x, y + 1, z) === T.AIR && hash3(x, y, z) > 0.9)
+          world.set(x, y + 1, z, T.MOSS);
+        break;
+      }
+    }
+
+  for (let x = -22; x <= 22; x++)
+    for (let z = -22; z <= 22; z++)
+      for (let y = 5; y <= 7; y++) {
+        if (world.get(x, y, z) !== T.ROCK) continue;
+        const open = (dx, dz) => world.get(x + dx, y, z + dz) === T.AIR;
+        if (open(1, 0) || open(-1, 0) || open(0, 1) || open(0, -1))
+          world.set(x, y, z, T.WET);
+      }
+}
+
+function laySkerries() {
+  // leaning rocks to windward: they break the swell and give the skyline weight
+  for (const [cx, cz, r, top] of [[-27, -15, 4, 11], [-31, -7, 2.5, 8], [-24, -22, 3, 9]]) {
+    for (let y = 0; y <= top; y++) {
+      const shrink = Math.floor(y / 4);
+      for (let x = -r; x <= r; x++)
+        for (let z = -r; z <= r; z++)
+          if (Math.hypot(x, z) <= r - shrink + (hash2(x + cx, z + cz) - 0.5))
+            world.set(cx + x, y, cz + z, T.ROCK);
+    }
+  }
+}
+
+/* ------------------------------------------------------------ hatchery
+ * A 13 x 13 stone keep with a corbelled vault over an 11 x 11 cave, an
+ * ared entrance facing the plaza, and a 3 x 3 smoke hole through three
+ * roof lifts. The smoke hole is aligned over the hearth so the line
+ * reads from any angle.
+ * ------------------------------------------------------------------- */
+
+function buildHatchery() {
+  world.block([-HX, 22, -HZ], [HX, 27, HZ], T.HEWN);
+
+  // the vault: cave full height, then two corbel lifts closing the crown
+  world.carve(-5, 5, 22, 25, -5, 5);
+  world.carve(-3, 3, 26, 27, -3, 3);
+
+  // ared entrance, facing the plaza and the stair mouth
+  world.carve(-2, 2, 22, 25, HZ, HZ);
+  world.carve(-1, 1, 26, 26, HZ, HZ);
+  // slit windows to wind and light the cave
+  world.carve(-HX, -HX, 24, 24, -2, -1);
+  world.carve(HX, HX, 24, 24, 1, 2);
+  world.carve(-1, 0, 24, 24, -HZ, -HZ);
+
+  // stepped roof lifts, then the smoke hole straight through them
+  world.block([-6, 28, -6], [6, 28, 6], T.SLATE);
+  world.block([-5, 29, -5], [5, 29, 5], T.SLATE);
+  world.block([-2, 30, -2], [2, 30, 2], T.HEWN);
+  world.block([-1, 31, -1], [1, 31, 1], T.PAVE);
+  world.carve(-1, 1, 28, 31, -1, 1);
+
+  // soot up around the flue
+  world.block([-2, 27, -2], [2, 27, 2], T.SOOT);
+  world.carve(-1, 1, 27, 27, -1, 1);
+
+  buildNestChamber();
+}
+
+function buildNestChamber() {
+  // hearth dead centre, under the flue
+  world.block([-1, 22, -1], [1, 22, 1], T.SOOT);
+  world.block([-1, 22, -1], [1, 22, 1], T.EMBER);
+  world.set(0, 23, 0, T.FLAME);
+  world.set(1, 23, 0, T.FLAME);
+  world.set(0, 23, 1, T.FLAME);
+
+  // four sand nests in the corners of the cave, each with a clutch
+  for (const [nx, nz] of [[-4, -4], [4, -4], [-4, 4], [3, 4]]) {
+    world.blob(nx, 22, nz, 2, 0.6, 2, T.SAND);
+    world.blob(nx, 23, nz, 1.4, 1.2, 1.4, T.EGG);
+    world.fill(nx, 24, nz, T.EGG);
+    if (hash3(nx, nz, 7) > 0.55) world.fill(nx + 1, 23, nz, T.EGG);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Four projecting perches ring the hatchery: a stone platform a lift
+ * above the plaza, aproned underneath, parapet-walled on the three
+ * seaward sides, open toward the plaza, and carried out over the sea on
+ * masonry needles that spread into sea stacks at their feet. Mooring
+ * posts with iron rings stand at the seaward corners.
+ * ---------------------------------------------------------------- */
+
+function parapetEdges(rect, facing) {
+  // the three sides away from the plaza: two flanks plus the far face
+  const flanks = {
+    n: [[rect.x0, rect.x0, rect.z0, rect.z1], [rect.x1, rect.x1, rect.z0, rect.z1]],
+    s: [[rect.x0, rect.x0, rect.z0, rect.z1], [rect.x1, rect.x1, rect.z0, rect.z1]],
+    e: [[rect.x0, rect.x1, rect.z0, rect.z0], [rect.x0, rect.x1, rect.z1, rect.z1]],
+    w: [[rect.x0, rect.x1, rect.z0, rect.z0], [rect.x0, rect.x1, rect.z1, rect.z1]],
+  };
+  const far = { n: [rect.x0, rect.x1, rect.z0, rect.z0], s: [rect.x0, rect.x1, rect.z1, rect.z1],
+    e: [rect.x1, rect.x1, rect.z0, rect.z1], w: [rect.x0, rect.x0, rect.z0, rect.z1] };
+  return [...flanks[facing], far[facing]];
+}
+
+function seawardCorners(rect, facing) {
+  const { x0, x1, z0, z1 } = rect;
+  if (facing === "n") return [[x0, z0], [x1, z0]];
+  if (facing === "s") return [[x0, z1], [x1, z1]];
+  if (facing === "e") return [[x1, z0], [x1, z1]];
+  return [[x0, z0], [x0, z1]];
+}
+
+function tieBack(rect, px, pz) {
+  const cx = (rect.x0 + rect.x1) / 2, cz = (rect.z0 + rect.z1) / 2;
+  return [Math.sign(cx - px), Math.sign(cz - pz)];
+}
+
+function perchSteps(rect, facing, deckY) {
+  /* The deck is a lift clear of the plaza, so a rider reaches it by a two-tile
+   * masonry stair off the paving: one tile at deckY-1 under the deck's inner
+   * row, then a tread on the plaza-side lip. Without this the perch reads as a
+   * slab bolted to the cliff and you cannot tell where a rider walks on. */
+  const inner = { n: ["z", rect.z1], s: ["z", rect.z0], e: ["x", rect.x0], w: ["x", rect.x1] };
+  const outward = { n: 1, s: -1, e: -1, w: 1 };
+  const [axis, fixed] = inner[facing];
+  const step = fixed + outward[facing];
+  if (axis === "z") {
+    for (let x = rect.x0; x <= rect.x1; x++) {
+      world.clear(x, deckY, fixed);
+      world.set(x, deckY - 1, fixed, T.HEWN);
+      world.set(x, deckY - 2, step, T.HEWN);
+    }
+  } else {
+    for (let z = rect.z0; z <= rect.z1; z++) {
+      world.clear(fixed, deckY, z);
+      world.set(fixed, deckY - 1, z, T.HEWN);
+      world.set(step, deckY - 2, z, T.HEWN);
+    }
+  }
+}
+
+function buildPerch(rect, facing) {
+  const { x0, x1, z0, z1 } = rect;
+  const deckY = 24;
+
+  world.block([x0, deckY, z0], [x1, deckY, z1], T.PAVE);
+  /* The apron and the deck's outer fascia are dark slate: a light stone deck
+   * butted against light stone cliff has no silhouette at all from the levels
+   * the aerie is judged at, and a dark band under the lip reads as a shadow and
+   * puts the balcony in relief against the cliff it is carried on. Slate and
+   * not timber - these are stone perches, and the carpentry belongs on the
+   * landing deck. */
+  world.block([x0 - 1, deckY - 1, z0 - 1], [x1 + 1, deckY - 1, z1 + 1], T.SLATE);
+  for (const [ax, bx, az, bz] of parapetEdges(rect, facing))
+    world.rim(Math.min(ax, bx), Math.max(ax, bx), Math.min(az, bz), Math.max(az, bz), deckY, T.SLATE);
+
+  for (const [ax, bx, az, bz] of parapetEdges(rect, facing))
+    world.rim(Math.min(ax, bx), Math.max(ax, bx), Math.min(az, bz), Math.max(az, bz), deckY + 1, T.HEWN);
+
+  perchSteps(rect, facing, deckY);
+
+  for (const [px, pz] of seawardCorners(rect, facing)) {
+    world.column(px, pz, deckY + 1, deckY + 2, T.BEAM);
+    world.fill(px, deckY + 1, pz, T.IRON);
+
+    // needle: pier with a sea footing, narrow shaft, corbel shelf under the apron
+    for (let y = 6; y < deckY - 1; y++) {
+      const g = y < 9 ? 2 : y > 18 ? 1 : y > 13 ? 0 : 1;
+      world.block([px - g, y, pz - g], [px + g, y, pz + g], T.HEWN);
+    }
+    const [dx, dz] = tieBack(rect, px, pz);
+    for (let y = 14; y < deckY - 1; y += 2) world.fill(px + dx, y, pz + dz, T.HEWN);
+  }
+}
+
+const PERCHS = [
+  { name: "north perch", rect: { x0: 5, x1: 11, z0: -18, z1: -10 }, facing: "n" },
+  { name: "east perch", rect: { x0: 18, x1: 24, z0: -9, z1: -2 }, facing: "e" },
+  { name: "west perch", rect: { x0: -17, x1: -10, z0: 8, z1: 16 }, facing: "w" },
+  { name: "south perch", rect: { x0: -6, x1: 3, z0: 16, z1: 24 }, facing: "s" },
+];
+
+function buildPerches() {
+  for (const p of PERCHS) buildPerch(p.rect, p.facing);
+}
+
+/* ------------------------------------------------------------------ *
+ * Landing deck: planked platform on trestles off the east shoulder,
+ * hoist derrick at its sea edge, harness racks along the plaza lip and
+ * tackle scattered about. The busiest deck on the aerie.
+ * ---------------------------------------------------------------- */
+
+function buildDeck() {
+  const x0 = 17, x1 = 22, z0 = -1, z1 = 6, y = 17;
+  world.block([x0, y, z0], [x1, y, z1], T.PLANK);
+
+  // trestle needles under the corners, buried in the shoulder where they can
+  for (const [px, pz] of [[x1, z0], [x1, z1], [x1 - 2, z1], [x0, z0], [x0 + 2, z1]])
+    world.column(px, pz, 6, y - 1, T.BEAM);
+  for (const [px, pz] of [[x1, z0], [x1, z1]]) {
+    world.fill(px - 1, y - 2, pz, T.BRACE);
+    world.fill(px - 1, y - 4, pz, T.BRACE);
+    world.fill(px, y - 3, pz - 1, T.BRACE);
+  }
+
+  // railings on the seaward lips, tall gate posts at the corners
+  world.rim(x1, x1, z0, z1, y + 1, T.BEAM);
+  world.rim(x0, x1, z1, z1, y + 1, T.BEAM);
+  for (const z of [z0, z1]) world.column(x1, z, y + 1, y + 3, T.BEAM);
+
+  // gate posts where the switchback arrives, leaving the approach free
+  for (const z of [z0, z1]) world.fill(x0, y + 1, z, T.BEAM);
+
+  buildDerrick(x1 - 2, y, z0 + 1);
+  buildHarnessRacks();
+  buildDeckCargo(x0, y, z1);
+}
+
+function buildDerrick(footX, deckY, footZ) {
+  // mast, yard raked out over the drop, guy back to the rail, hook drop
+  world.column(footX, footZ, deckY + 1, deckY + 5, T.BEAM);
+  world.strand(footX, deckY + 5, footZ, footX + 4, deckY + 2, footZ, T.BEAM);
+  world.strand(footX, deckY + 5, footZ, footX - 2, deckY + 2, footZ, T.ROPE);
+  world.strand(footX + 4, deckY + 2, footZ, footX + 4, deckY - 1, footZ, T.ROPE);
+  world.fill(footX + 4, deckY - 1, footZ, T.IRON);
+}
+
+function buildHarnessRacks() {
+  // three rack posts standing on the plaza apron, between the keep door and
+  // the stair mouth; a crossbeam ties them and rope collars hang off it
+  const x = 12;
+  for (const z of [-4, -1, 2]) {
+    world.column(x, z, PLAZA_Y + 1, PLAZA_Y + 3, T.BEAM);
+    world.fill(x, PLAZA_Y + 1, z, T.IRON);
+  }
+  world.strand(x, PLAZA_Y + 3, -4, x, PLAZA_Y + 3, 2, T.BEAM);
+  for (const z of [-3, -2, 0, 1]) {
+    world.fill(x, PLAZA_Y + 2, z, T.ROPE);
+    world.fill(x, PLAZA_Y + 1, z, T.ROPE);
+  }
+
+  // the roading yard gear: crate stack, folded leather, a water barrel
+  world.block([9, PLAZA_Y + 1, -2], [10, PLAZA_Y + 2, -1], T.CRATE);
+  world.fill(9, PLAZA_Y + 3, -1, T.CRATE);
+  world.block([14, PLAZA_Y + 1, -5], [15, PLAZA_Y + 2, -4], T.HIDE);
+  world.blob(8, PLAZA_Y + 1, -6, 1, 1, 1, T.BEAM);
+  world.blob(8, PLAZA_Y + 2, -6, 1, 0.4, 1, T.SLATE);
+}
+
+function buildDeckCargo(x0, deckY, z1) {
+  // barrel with a slate head, crate stack at the inboard corner, lamp at the gate
+  world.blob(x0 + 1, deckY + 1, z1 - 3, 1, 1, 1, T.BEAM);
+  world.blob(x0 + 1, deckY + 2, z1 - 3, 1, 0.4, 1, T.SLATE);
+  world.block([x0 + 3, deckY + 1, z1 - 4], [x0 + 4, deckY + 2, z1 - 3], T.CRATE);
+  world.fill(x0 + 3, deckY + 3, z1 - 4, T.CRATE);
+  world.fill(x0 + 1, deckY + 1, z1, T.IRON);
+  world.fill(x0 + 1, deckY + 2, z1, T.FLAME);
+}
+
+/* ------------------------------------------------------------------ *
+ * Rope windlass. A shore capstan hauls cargo up a diagonal lift line to
+ * the derrick on the landing deck - you cannot walk a load up a vertical
+ * cliff. The load rides a travelling cradle on the line.
+ * ---------------------------------------------------------------- */
+
+function buildQuay() {
+  // stone pier out to the tideline, deck one lift over the sea, iron bollards
+  world.block([24, 5, 9], [26, 6, 15], T.HEWN);
+  world.block([24, 7, 9], [27, 7, 15], T.PAVE);
+  for (const z of [9, 12, 15]) world.fill(24, 8, z, T.IRON);
+  for (const x of [25, 26]) world.fill(x, 8, 9, T.IRON);
+
+  // beach ramp up to the dune, and a boat shed up on the grass
+  world.strand(28, 7, 12, 32, 8, 12, T.SAND);
+  world.block([31, 8, 15], [33, 9, 18], T.BEAM);
+  world.block([31, 10, 15], [33, 10, 18], T.SLATE);
+  world.carve(32, 32, 8, 9, 16, 18);
+  world.fill(31, 8, 17, T.CRATE);
+}
+
+function buildWindlass() {
+  // capstan frame, drum, ratchet pawl and the bar sweep the watchers shove
+  for (const z of [10, 13]) {
+    world.column(25, z, 8, 11, T.BEAM);
+    world.fill(26, 8, z, T.BRACE);
+    world.fill(24, 11, z, T.BEAM);
+  }
+  world.strand(25, 11, 10, 25, 11, 13, T.BEAM);       // drum axle
+  world.fill(25, 10, 11, T.ROPE);
+  world.fill(25, 10, 12, T.ROPE);
+  world.strand(26, 11, 13, 27, 12, 14, T.BEAM);       // pawl
+  world.strand(24, 12, 11, 24, 13, 13, T.BEAM);       // bar sweep
+
+  // lift line: capstan head up to the derrick's yard arm, standing clear
+  // outboard of the deck rail, load riding the lower span on a cradle
+  world.fill(25, 12, 10, T.IRON);                     // snatch block on the drum
+  world.fill(24, 19, 0, T.IRON);                      // whisker at the yard arm
+  world.strand(25, 12, 10, 24, 19, 0, T.ROPE, 2);
+  world.fill(25, 13, 8, T.BEAM);                      // travelling cradle
+  world.fill(25, 12, 8, T.ROPE);                      // strop
+  world.block([24, 10, 7], [26, 11, 9], T.CRATE);     // cargo sling below
+  world.fill(27, 8, 13, T.IRON);                      // quarter deck cleat
+  world.blob(26, 8, 11, 1, 0.4, 1, T.ROPE);           // spare coil
+}
+
+/* ------------------------------------------------------------------ *
+ * Boathouse: stone piers standing in the sea, a placked floor two lifts
+ * over the water, three timber walls, and the south end open to the swell
+ * so the cutter rides the flooded slip. The stair door is in the north
+ * wall, at the foot of the switchback.
+ * ---------------------------------------------------------------- */
+
+function buildBoathouse() {
+  const floorY = 9;
+  const x0 = 13, x1 = 18, z0 = 10, z1 = 15;
+
+  for (const [px, pz] of [[x0, z0], [x1, z0], [x0, z1], [x1, z1], [x1 - 3, z1]])
+    world.block([px, 5, pz], [px + 1, 8, pz + 1], T.HEWN);
+
+  world.block([x0, floorY, z0], [x1, floorY, z1], T.PLANK);
+  world.carve(16, 17, 6, 8, 13, 15);                  // flooded slip
+  for (const x of [16, 17]) world.strand(x, 6, 16, x, 8, 16, T.HEWN);
+
+  world.block([x0, floorY + 1, z0], [x1, floorY + 3, z0], T.BEAM);
+  world.block([x0, floorY + 1, z0], [x0, floorY + 3, z1], T.BEAM);
+  world.block([x1, floorY + 1, z0], [x1, floorY + 3, z1], T.BEAM);
+  world.carve(14, 15, floorY, floorY + 1, z0, z0);    // stair door
+  world.carve(16, 17, floorY + 1, floorY + 2, z1, z1);
+
+  world.block([x0, 13, z0], [x1, 13, z1], T.SLATE);
+  world.block([x0 + 1, 14, z0 + 1], [x1 - 1, 14, z1 - 1], T.SLATE);
+  world.fill(x1 - 1, floorY + 2, z1, T.FLAME);
+  world.fill(x1 - 1, floorY + 1, z1, T.IRON);
+
+  buildBoats();
+  buildBoatGear();
+}
+
+function buildBoats() {
+  // a cutter in the flooded slip: hull, gunwale, mast stowed against the wall
+  const bz = 14;
+  world.blob(16, 7, bz, 1.2, 0.9, 1.8, T.PLANK);
+  world.carve(16, 16, 7, 8, bz, bz);
+  world.strand(16, 8, bz - 1, 16, 8, bz + 1, T.BONE);
+  world.strand(16, 8, bz, 16, 11, bz, T.BEAM);
+  world.fill(15, 7, bz, T.BEAM);
+
+  // a dinghy on the beach below the quay, oars shipped
+  world.blob(23, 7, 17, 1.2, 0.7, 1, T.PLANK);
+  world.strand(22, 8, 16, 24, 8, 18, T.BEAM);
+}
+
+function buildBoatGear() {
+  // crates, tarps, barrels, a net of fish under the low beams
+  world.block([14, 10, 12], [15, 11, 13], T.CRATE);
+  world.fill(14, 12, 12, T.CRATE);
+  world.block([17, 10, 11], [18, 10, 12], T.HIDE);
+  world.blob(13, 10, 11, 1, 0.5, 1, T.ROPE);
+  for (const [x, z] of [[17, 13], [18, 14]]) world.fill(x, 10, z, T.IRON);
+}
+
+/* ------------------------------------------------------------------ *
+ * Switchback stairs. Seven landings zig-zag down the carved throat, each
+ * flight raked against the rock, every landing carried on timber needles
+  * driven into the cliff and standing in the sea.
+ * ---------------------------------------------------------------- */
+
+const STAIRS = [
+  { x0: 13, x1: 16, z0: 3, z1: 5, y: 21 },   // mouth, level with the plaza
+  { x0: 12, x1: 15, z0: 6, z1: 8, y: 19 },
+  { x0: 14, x1: 16, z0: 5, z1: 7, y: 17 },   // lands at the landing deck
+  { x0: 12, x1: 15, z0: 3, z1: 5, y: 15 },
+  { x0: 14, x1: 16, z0: 6, z1: 8, y: 13 },
+  { x0: 13, x1: 15, z0: 3, z1: 5, y: 11 },
+  { x0: 13, x1: 16, z0: 6, z1: 8, y: 9 },    // foot, at the boathouse door
+];
+
+function buildStairs() {
+  for (const l of STAIRS) {
+    world.block([l.x0, l.y, l.z0], [l.x1, l.y, l.z1], T.PLANK);
+    world.block([l.x0, l.y - 1, l.z0], [l.x1, l.y - 1, l.z1], T.BRACE);
+    world.rim(l.x0, l.x1, l.z1, l.z1, l.y + 1, T.BEAM);      // outer handrail
+    world.fill(l.x0, l.y + 1, l.z0, T.BEAM);
+    world.clear(l.x1, l.y + 1, l.z1);                        // gate where the flight lands
+  }
+
+  for (let i = 0; i + 1 < STAIRS.length; i++) buildFlight(STAIRS[i], STAIRS[i + 1]);
+
+  // needles: each landing sits on a pair of them, foot to the sea or the rock
+  for (const l of STAIRS) {
+    for (const [px, pz] of [[l.x0, l.z0], [l.x1, l.z1]]) {
+      world.column(px, pz, 6, l.y - 1, T.BEAM);
+      world.fill(px + 1, l.y - 2, pz, T.BRACE);
+      world.fill(px, l.y - 2, pz + 1, T.BRACE);
+    }
+  }
+
+  // sill at the throat mouth, and the footbridge over to the boathouse door
+  world.strand(11, PLAZA_Y, 4, 13, STAIRS[0].y, 4, T.PAVE);
+  world.block([13, STAIRS[6].y, 9], [16, STAIRS[6].y, 9], T.PLANK);
+
+  /* Torch posts on alternate landings. They are not decoration: a switchback
+   * in a narrow slot reads as a dark crack from outside, and the line of
+   * glowing dots down the throat is what tells the reader the crack is a stair
+   * and which way it goes. */
+  for (const l of [STAIRS[0], STAIRS[2], STAIRS[4], STAIRS[6]]) {
+    const px = l.x1, pz = l.z1;
+    world.column(px, pz, l.y + 1, l.y + 2, T.BEAM);
+    world.fill(px, l.y + 3, pz, T.EMBER);
+  }
+}
+
+/* one flight: a stepped mass of plank treads three tiles wide, braced
+ * underneath, running down the shared edge between two landings. A single
+ * tread between two landings two lifts apart is invisible from every level the
+ * aerie is judged at, and a stair you cannot see is a throat you cannot read.
+ * Newel posts on the seaward edge mark the pitch. */
+function buildFlight(upper, lower) {
+  const sx = midpoint(upper.x0, upper.x1, lower.x0, lower.x1);
+  const sz = midpoint(upper.z0, upper.z1, lower.z0, lower.z1);
+  // the run direction: whichever axis the two landing centres differ on
+  const runsZ = Math.abs(upper.z0 + upper.z1 - lower.z0 - lower.z1)
+    >= Math.abs(upper.x0 + upper.x1 - lower.x0 - lower.x1);
+  for (let i = 1; i < upper.y - lower.y; i++) {
+    const y = upper.y - i;
+    if (runsZ) {
+      world.block([sx - 1, y, sz], [sx + 1, y, sz], T.PLANK);
+      world.block([sx - 1, y - 1, sz], [sx + 1, y - 1, sz], T.BRACE);
+      world.fill(sx - 1, y + 1, sz, T.BEAM);
+      world.fill(sx + 1, y + 1, sz, T.BEAM);
+    } else {
+      world.block([sx, y, sz - 1], [sx, y, sz + 1], T.PLANK);
+      world.block([sx, y - 1, sz - 1], [sx, y - 1, sz + 1], T.BRACE);
+      world.fill(sx, y + 1, sz - 1, T.BEAM);
+      world.fill(sx, y + 1, sz + 1, T.BEAM);
+    }
+  }
+}
+
+function midpoint(a0, a1, b0, b1) {
+  return Math.round((Math.max(a0, b0) + Math.min(a1, b1)) / 2);
+}
+
+/* ------------------------------------------------------------------ *
+ * Riders: block figures - a watchman at the quay head, a man shoving the
+ * capstan bar, a tier at the stair mouth, a carer on the landing deck.
+ * ---------------------------------------------------------------- */
+
+function buildFigures() {
+  for (const [x, y, z, body, head] of [
+    [27, 8, 11, T.HIDE, T.BONE],
+    [24, 12, 12, T.PLANK, T.BONE],
+    [10, PLAZA_Y + 1, 6, T.HIDE, T.BONE],
+    [19, 18, 3, T.PLANK, T.BONE],
+    [15, 10, 12, T.PLANK, T.BONE],
+  ]) {
+    world.fill(x, y, z, body);
+    world.fill(x, y + 1, z, body);
+    world.fill(x, y + 2, z, head);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Dragons. Built as block stacks in sparse Bags rather than in the world
+ * field: a dragon is a unit, it has to move, and its wings need to move
+ * independently of its body. Each dragon therefore gets three Bags -
+ * body, left wing, right wing - and the wings are keyed around their
+ * shoulder joint so the hinge sits where the geometry joins it.
+ *
+ * Local frame for every beast: head along +x, tail along -x, left wing toward
+ * +z, lift +y. A beast with no yaw therefore faces due east; yaw +PI/2 turns
+ * its head to -z, which is outward on the north perch.
+ * ---------------------------------------------------------------- */
+
+const DRAGON_SHAPES = {
+  /* Chunky on purpose: a 1-block-thick body reads as a line from the level view
+   * the aerie is watched from, so the barrel is five blocks through and the
+   * limbs are two. Compact overall, so a perched beast still fits its perch. */
+  body(bag) {
+    // trunk: barrel, ribbed belly, dorsal plate
+    bag.box(-3, 3, -2, 2, -2, 2, T.SCALE_A);
+    bag.box(-3, 3, -2, -1, -2, 2, T.SCALE_B);
+    bag.box(-3, 3, 2, 2, -1, 1, T.SCALE_B);
+
+    // shoulder mass, then neck raked up to the head
+    bag.box(4, 4, -1, 2, -2, 2, T.SCALE_A);
+    bag.box(5, 7, 0, 3, -1, 1, T.SCALE_A);
+    bag.box(8, 10, 2, 4, -1, 1, T.SCALE_A);
+    bag.box(11, 12, 2, 3, -1, 1, T.SCALE_A);
+    bag.fill(9, 4, -1, T.EYE);
+    bag.fill(9, 4, 1, T.EYE);
+    bag.strand(9, 5, -1, 10, 6, -1, T.BONE);          // horns
+    bag.strand(9, 5, 1, 10, 6, 1, T.BONE);
+    bag.fill(12, 4, 0, T.BONE);                        // nose plate
+
+    // tail: thick at the root, tapering, ending in a raked fluke
+    bag.strand(-4, -1, 0, -7, 0, 0, T.SCALE_A, 2);
+    bag.strand(-7, 0, 0, -10, 1, 0, T.SCALE_A, 1);
+    bag.fill(-11, 1, 0, T.WEB);
+    bag.fill(-11, 2, 0, T.WEB);
+    bag.fill(-10, 2, 0, T.WEB);
+    bag.strand(-11, 1, -1, -11, 3, -1, T.BONE);
+    bag.strand(-11, 1, 1, -11, 3, 1, T.BONE);
+
+    // spine ridge: a fin of spikes down the back
+    for (let x = -3; x <= 4; x += 2) {
+      bag.fill(x, 3, 0, T.SCALE_B);
+      if (x % 4 === 1) bag.fill(x, 4, 0, T.SCALE_B);
+    }
+
+    // limbs, folded with the claws tucked against the flanks
+    for (const x of [3, -2]) {
+      bag.box(x, x, -2, -3, -2, -1, T.SCALE_A);
+      bag.strand(x, -3, -1, x, -4, 1, T.SCALE_A);
+      bag.fill(x, -4, 1, T.BONE);
+    }
+    return bag;
+  },
+
+  /* wing keyed to (0,0,0) at its shoulder; fingers run out along -z and +z */
+  wing(bag, mirror) {
+    const s = mirror ? -1 : 1;
+    bag.strand(0, 0, s * 1, 2, 1, s * 7, T.SCALE_A);          // leading arm
+    bag.strand(2, 1, s * 7, -1, 0, s * 9, T.BONE);            // outer finger
+    bag.strand(0, 0, s * 1, -3, 0, s * 5, T.BONE);            // radial
+    for (let z = 1; z <= 8; z++) {
+      const lean = Math.max(-3, Math.min(1, Math.round(z * 0.35) - 2));
+      for (let x = lean; x <= 2; x++) bag.fill(x, 0, s * z, T.WEB);
+    }
+    for (let z = 1; z <= 7; z++) bag.fill(2, 1, s * z, T.WEB);  // scalloped top
+    return bag;
+  },
+};
+
+/* Each beast is the authored shape with a pelt swap: SCALE_A/SCALE_B are the
+ * body colours, so one map per kind gives three clearly different animals
+ * without three copies of the shape. Membranes stay WEB for all of them, which
+ * is what makes the wing outline read against any pelt. */
+const DRAGON_PELTS = {
+  copper: [],
+  gold: [[T.SCALE_A, T.SCALE_C], [T.SCALE_B, T.EGG]],
+  broadwing: [[T.SCALE_A, T.EGG], [T.SCALE_B, T.BONE]],
+  charcoal: [[T.SCALE_A, T.SOOT], [T.SCALE_B, T.IRON]],
+};
+
+function makeDragon(kind) {
+  const body = new Bag();
+  DRAGON_SHAPES.body(body);
+  for (const [from, to] of DRAGON_PELTS[kind] || [])
+    for (const [x, y, z, t] of body.cells()) if (t === from) body.set(x, y, z, to);
+  const wingL = DRAGON_SHAPES.wing(new Bag(), false);
+  const wingR = DRAGON_SHAPES.wing(new Bag(), true);
+  return { body, wingL, wingR };
+}
+
+/* ------------------------------------------------------------------ *
+ * Voxel -> mesh. Only faces touching air are emitted, so the interior of
+ * a cliff costs nothing. Each face gets per-vertex ambient occlusion
+ * baked from its three planar neighbours, plus per-block colour jitter
+ * and a small per-block bump along its own normal. The bump is what
+ * makes a run of paving read as separate cubes; a mortar gap would be
+ * cheaper to write but would let light through the seams.
+ * ---------------------------------------------------------------- */
+
+const INSETS = [
+  { dir: [1, 0, 0], a: [0, 1, 0], b: [0, 0, 1] },
+  { dir: [-1, 0, 0], a: [0, 0, 1], b: [0, 1, 0] },
+  { dir: [0, 1, 0], a: [0, 0, 1], b: [1, 0, 0] },
+  { dir: [0, -1, 0], a: [1, 0, 0], b: [0, 0, 1] },
+  { dir: [0, 0, 1], a: [1, 0, 0], b: [0, 1, 0] },
+  { dir: [0, 0, -1], a: [0, 1, 0], b: [1, 0, 0] },
+];
+
+const AO_CURVE = [1, 0.74, 0.58, 0.4];
+
+/* how much a block of that surface bulges or sinks, in blocks */
+const BUMP = {
+  [T.ROCK]: 0.055, [T.SAND]: 0.03, [T.WET]: 0.025, [T.GRASS]: 0.05, [T.MOSS]: 0.05,
+  [T.HEWN]: 0.022, [T.PAVE]: 0.026, [T.SLATE]: 0.02, [T.PLANK]: 0.018, [T.BEAM]: 0.02,
+  [T.BRACE]: 0.02, [T.ROPE]: 0.0, [T.IRON]: 0.008, [T.EGG]: 0.012, [T.BONE]: 0.012,
+  [T.HIDE]: 0.03, [T.CRATE]: 0.02, [T.LEAF]: 0.06, [T.SOOT]: 0.012,
+  [T.EMBER]: 0.03, [T.FLAME]: 0.06, [T.SCALE_A]: 0.022, [T.SCALE_B]: 0.022,
+  [T.SCALE_C]: 0.022,
+  [T.WEB]: 0.008, [T.EYE]: 0.0,
+};
+
+const tmpColor = new THREE.Color();
+
+function blockTint(type, x, y, z) {
+  const spec = PALETTE[type];
+  tmpColor.setHex(spec.c);
+  const jitter = 1 + (hash3(x * 3 + 1, y * 5 + 2, z * 7 + 3) - 0.5) * 2 * (spec.jit || 0);
+  const strata = type === T.ROCK || type === T.MOSS ? strataTint(y) : 1;
+  return { r: tmpColor.r * jitter * strata, g: tmpColor.g * jitter * strata, b: tmpColor.b * jitter * strata };
+}
+
+/* returns {position, normal, color, index} arrays for the two material groups
+ * (solid faces, self-lit faces) of one set of blocks */
+function voxelGeometry(cells, solid) {
+  const groups = [makeBuf(), makeBuf()];
+  let faceCount = 0;
+  for (const [x, y, z, type] of cells) {
+    const emissive = EMISSIVE_IDS.has(type);
+    const g = groups[emissive ? 1 : 0];
+    const tint = blockTint(type, x, y, z);
+    const bump = (BUMP[type] || 0) * (hash3(x + 9, y - 4, z + 17) - 0.5) * 2;
+
+    for (const { dir, a, b } of INSETS) {
+      const [dx, dy, dz] = dir;
+      if (solid(x + dx, y + dy, z + dz)) continue;
+      faceCount++;
+      const base = g.position.length / 3;
+      for (const [i, j] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        const ox = x + dx + a[0] * i + b[0] * j;
+        const oy = y + dy + a[1] * i + b[1] * j;
+        const oz = z + dz + a[2] * i + b[2] * j;
+        const ao = emissive ? 1
+          : AO_CURVE[occlusion(solid, x + dx, y + dy, z + dz, a, b, i, j)];
+        g.position.push(
+          x + dx * (0.5 + bump) + a[0] * i * 0.5 + b[0] * j * 0.5,
+          y + dy * (0.5 + bump) + a[1] * i * 0.5 + b[1] * j * 0.5,
+          z + dz * (0.5 + bump) + a[2] * i * 0.5 + b[2] * j * 0.5
+        );
+        g.normal.push(dx, dy, dz);
+        g.color.push(tint.r * ao, tint.g * ao, tint.b * ao);
+      }
+      g.index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+  }
+  const meshes = groups.map((buf) => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(buf.position, 3));
+    geo.setAttribute("normal", new THREE.Float32BufferAttribute(buf.normal, 3));
+    geo.setAttribute("color", new THREE.Float32BufferAttribute(buf.color, 3));
+    geo.setIndex(buf.index);
+    geo.computeBoundingSphere();
+    return geo;
+  });
+  return { meshes, faceCount };
+}
+
+function makeBuf() { return { position: [], normal: [], color: [], index: [] }; }
+
+/* classic three-neighbour voxel occlusion: two edges and the corner between
+ * them, all sampled in the layer the face is looking out across */
+function occlusion(solid, px, py, pz, a, b, i, j) {
+  const s1 = solid(px + a[0] * i, py + a[1] * i, pz + a[2] * i) ? 1 : 0;
+  const s2 = solid(px + b[0] * j, py + b[1] * j, pz + b[2] * j) ? 1 : 0;
+  if (s1 && s2) return 3;
+  const c = solid(px + a[0] * i + b[0] * j, py + a[1] * i + b[1] * j, pz + a[2] * i + b[2] * j) ? 1 : 0;
+  return s1 + s2 + c;
+}
+
+/* one Mesh per material group, so a whole world is a single draw call */
+function makeVoxelMesh(container, cells) {
+  const solid = (x, y, z) => container.get(x, y, z) !== T.AIR;
+  const { meshes, faceCount } = voxelGeometry(cells, solid);
+  const [solidGeo, glowGeo] = meshes;
+  const solidMat = new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: 0.86, metalness: 0.04, flatShading: true,
+  });
+  const glowMat = new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: true });
+  const mesh = new THREE.Mesh(solidGeo, solidMat);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  const glow = new THREE.Mesh(glowGeo, glowMat);
+  glow.frustumCulled = false;
+  mesh.add(glow);
+  return { mesh, glow, faceCount };
+}
+
+/* A dragon is three separate meshes so the wings can hinge: body, and two
+ * wing groups keyed to their shoulder. AO is baked only against the dragon
+ * itself - the cliff it stands on does not shadow it, and getting that
+ * would mean re-baking the world every time the beast moved. */
+function buildDragon(dragon, at, yaw, scale) {
+  const group = new THREE.Group();
+  const wings = [];
+  let blocks = 0;
+  for (const [bag, key, offset] of [
+    [dragon.body, "body", [0, 0, 0]],
+    [dragon.wingL, "wingL", [3, 2, 2]],
+    [dragon.wingR, "wingR", [3, 2, -2]],
+  ]) {
+    const cells = bag.cells();
+    blocks += cells.length;
+    const { mesh } = makeVoxelMesh(bag, cells);
+    if (key === "body") {
+      group.add(mesh);
+      continue;
+    }
+    // the hinge is the shoulder, so the wing mesh is offset into a pivot group
+    const pivot = new THREE.Group();
+    pivot.position.set(...offset);
+    pivot.add(mesh);
+    group.add(pivot);
+    wings.push(pivot);
+  }
+  group.position.set(at[0], at[1], at[2]);
+  group.rotation.y = yaw;
+  group.scale.setScalar(scale);
+  return { group, wingL: wings[0], wingR: wings[1], blocks, flying: false };
+}
+
+/* ------------------------------------------------------------------ *
+ * Render plumbing. cdnjs ships three.js core only - no examples/jsm, so
+ * no OrbitControls and no BufferGeometryUtils. The camera rig below is a
+ * plain spherical orbit with a damped goal, which is all this scene needs.
+ * ---------------------------------------------------------------- */
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(46, innerWidth / innerHeight, 0.6, 900);
+
+const renderer = new THREE.WebGLRenderer({
+  antialias: true,
+  preserveDrawingBuffer: true,   // lets the verification probe read pixels back
+});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.95;
+document.getElementById("app").appendChild(renderer.domElement);
+
+scene.fog = new THREE.Fog(0xa9c4d8, 132, 330);
+scene.add(skyDome());
+
+function skyDome() {
+  // vertical gradient dome: cold at the zenith, pale haze at the horizon
+  const geo = new THREE.SphereGeometry(420, 20, 14);
+  const pos = geo.attributes.position;
+  const colors = new Float32Array(pos.count * 3);
+  const cold = new THREE.Color(0x3f6f9d), haze = new THREE.Color(0xbdd2e0);
+  const c = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) {
+    const h = THREE.MathUtils.clamp(pos.getY(i) / 420 * 0.5 + 0.5, 0, 1);
+    c.copy(haze).lerp(cold, Math.pow(h, 1.5));
+    colors.set([c.r, c.g, c.b], i * 3);
+  }
+  geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    vertexColors: true, side: THREE.BackSide, fog: false,
+  }));
+  mesh.frustumCulled = false;
+  return mesh;
+}
+
+/* ------------------------------------------------------------- lights */
+
+scene.add(new THREE.HemisphereLight(0xbcd6ee, 0x6c6a5c, 0.78));
+
+/* Cool fill from the side the sun never reaches: without it the shaded half of
+ * the stack closes to black and the silhouette loses the stepped bands. */
+const fill = new THREE.DirectionalLight(0x93b8d6, 0.42);
+fill.position.set(-70, 34, -46);
+scene.add(fill);
+
+const sun = new THREE.DirectionalLight(0xffeccf, 1.55);
+sun.position.set(74, 96, 52);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near = 12;
+sun.shadow.camera.far = 280;
+sun.shadow.camera.left = -58;
+sun.shadow.camera.right = 58;
+sun.shadow.camera.top = 58;
+sun.shadow.camera.bottom = -58;
+sun.shadow.bias = -0.0007;
+sun.shadow.normalBias = 0.45;
+scene.add(sun, sun.target);
+sun.target.position.set(0, 14, 4);
+
+const hearth = new THREE.PointLight(0xff8a3c, 24, 34, 2.1);
+hearth.position.set(0, 25, 0);
+scene.add(hearth);
+
+/* ------------------------------------------------------------ the build */
+
+laySeabed();
+layShore();
+layStack();
+laySkerries();
+buildHatchery();
+buildPerches();
+buildDeck();
+buildQuay();
+buildWindlass();
+buildStairs();
+buildBoathouse();
+buildFigures();
+
+const worldCells = world.cells();
+const aerie = makeVoxelMesh(world, worldCells);
+scene.add(aerie.mesh);
+
+/* Perched beasts stand with their lowest claw blocks on the deck's top face:
+ * that face is one lift above the deck block, and the lowest claw sits four and
+ * a half blocks under the body centre in local space, so the anchor is
+ * deckY + 1 + 4.5*scale. Scale 0.4 puts a beast at just over a block-man's
+ * height and fills a 7x9 perch without overrunning it. */
+const roster = [
+  { kind: "copper", at: [8, 26.8, -14], yaw: Math.PI / 2, scale: 0.4 },      // north perch
+  { kind: "gold", at: [-1.5, 26.8, 20], yaw: -Math.PI / 2, scale: 0.4 },     // south perch
+  { kind: "broadwing", at: [-13.5, 26.8, 12], yaw: Math.PI, scale: 0.4 },    // west perch
+  { kind: "charcoal", at: [-16, 31, -8], yaw: 0.4, scale: 0.45 },            // the one on the wing
+];
+const dragons = roster.map((b) => buildDragon(makeDragon(b.kind), b.at, b.yaw, b.scale));
+for (const d of dragons) scene.add(d.group);
+
+const blocksPlaced = worldCells.length;
+const dragonBlocks = dragons.reduce((sum, d) => sum + d.blocks, 0);
+
+/* --------------------------------------------------------------- water */
+
+const seaCells = [];
+for (let z = -36; z <= 36; z++) {
+  for (let x = -36; x <= 36; x++) {
+    if (world.get(x, SEA_Y, z) !== T.AIR) continue;
+    let floor = SEA_Y;
+    while (floor > 3 && world.get(x, floor - 1, z) === T.AIR) floor--;
+    seaCells.push({
+      x, z, floor, lift: 0, wide: 1, tall: 1,
+      phase: hash2(x * 1.3 + 7, z * 1.9 + 3) * 6.283,
+    });
+  }
+}
+
+/* The block field ends at +-36, so the chop alone stops in a straight line a
+ * few blocks out and reads as a square tile of water. A wide, jittered scatter
+ * of crests sits on the open plate beyond that: near-continuous sheet, no grid,
+ * so the seam is gone and the water keeps going out to the fog. */
+for (let z = -84; z <= 84; z += 4) {
+  for (let x = -84; x <= 84; x += 4) {
+    if (Math.abs(x) <= 37 && Math.abs(z) <= 37) continue;
+    const r1 = hash2(x * 0.71 + 5, z * 1.31 + 9);
+    const r2 = hash2(x * 2.11 + 3, z * 0.97 + 21);
+    seaCells.push({
+      x: x + (r1 - 0.5) * 3.2,
+      z: z + (r2 - 0.5) * 3.2,
+      floor: SEA_Y,
+      lift: 0.02 + r1 * 0.12,
+      wide: 3.4 + r2 * 1.6,
+      tall: 0.9 + r1 * 0.5,
+      phase: hash2(x * 1.3 + 7, z * 1.9 + 3) * 6.283,
+    });
+  }
+}
+
+const unitBox = new THREE.BoxGeometry(1, 1, 1);
+const seaBody = new THREE.InstancedMesh(unitBox, new THREE.MeshStandardMaterial({
+  color: 0x3d7590, transparent: true, opacity: 0.95, roughness: 0.55, metalness: 0.2,
+}), seaCells.length);
+const seaSwell = new THREE.InstancedMesh(unitBox, new THREE.MeshStandardMaterial({
+  color: 0x9dc6d8, transparent: true, opacity: 0.6, roughness: 0.16, metalness: 0.45,
+  flatShading: true,
+}), seaCells.length);
+seaBody.receiveShadow = seaSwell.receiveShadow = true;
+seaBody.frustumCulled = seaSwell.frustumCulled = false;
+scene.add(seaBody, seaSwell);
+
+/* The block field only holds sea as far as its bounds, which ends in a hard
+ * wall at x,z +-36. A plain plane at the same tide line carries the water out
+ * past the fog and hides that wall; the swell blocks above it do the chop. */
+/* The plate stops short of the sky dome's radius (420) and goes fully fog
+ * colour out there, so the water/dome seam blends instead of hardening. */
+const openSea = new THREE.Mesh(
+  new THREE.PlaneGeometry(400, 400),
+  new THREE.MeshStandardMaterial({ color: 0x4b7f99, roughness: 0.5, metalness: 0.25 })
+);
+openSea.rotation.x = -Math.PI / 2;
+openSea.position.y = 6.45;
+openSea.receiveShadow = true;
+scene.add(openSea);
+
+const place = new THREE.Matrix4();
+for (let i = 0; i < seaCells.length; i++) {
+  const c = seaCells[i];
+  const column = SEA_Y - 1 - c.floor + 1;
+  if (column > 0) {
+    place.makeScale(1, column, 1);
+    place.setPosition(c.x, (c.floor + SEA_Y - 1) / 2, c.z);
+    seaBody.setMatrixAt(i, place);
+  } else {
+    place.makeScale(0, 0, 0);
+    seaBody.setMatrixAt(i, place);
+  }
+}
+seaBody.instanceMatrix.needsUpdate = true;
+
+let seaCalm = false;
+function swaySea(t) {
+  const amp = seaCalm ? 0.05 : 0.16;
+  for (let i = 0; i < seaCells.length; i++) {
+    const c = seaCells[i];
+    const swell = Math.sin(c.x * 0.55 + c.z * 0.42 + t * 1.6 + c.phase)
+      + 0.6 * Math.cos(c.z * 0.75 - c.x * 0.3 + t * 2.1 - c.phase);
+    place.makeScale(c.wide, c.tall, c.wide);
+    place.setPosition(c.x, SEA_Y + c.lift + swell * amp * 0.5, c.z);
+    seaSwell.setMatrixAt(i, place);
+  }
+  seaSwell.instanceMatrix.needsUpdate = true;
+}
+swaySea(0);
+
+/* --------------------------------------------------------------- smoke */
+
+/* A plume only reads as smoke if the puffs dissolve rather than stack: short
+ * chimney, wide drift under the wind, and each puff recolved from soot grey to
+ * the horizon haze as it climbs. Ten times the lift height of 130 solid puffs
+ * earlier made the flue look like a white spike. */
+const flue = new THREE.Vector3(0, 31.6, 0);
+const PUFFS = 60;
+const smoke = new THREE.InstancedMesh(unitBox, new THREE.MeshBasicMaterial({
+  transparent: true, opacity: 0.22, depthWrite: false,
+}), PUFFS);
+smoke.frustumCulled = false;
+scene.add(smoke);
+
+const soot = Array.from({ length: PUFFS }, (_, i) => ({
+  seed: hash2(i * 3.7, 11),
+  driftRate: 0.05 + hash2(i, 5) * 0.045,   // cycle of the puff per second
+  spin: hash2(i, 17) * 6.283,
+  size: 0.7 + hash2(i, 23) * 0.7,
+  sway: 2.2 + hash2(i, 31) * 4.4,
+}));
+
+const sootLow = new THREE.Color(0x7d848a), sootHigh = new THREE.Color(0xbdd2e0);
+const sootTint = new THREE.Color();
+
+function driftSmoke(t) {
+  for (let i = 0; i < PUFFS; i++) {
+    const puff = soot[i];
+    const life = (t * puff.driftRate + puff.seed) % 1;
+    const size = puff.size * (0.6 + life * 2.4);
+    place.makeScale(size, size * 0.75, size);
+    place.setPosition(
+      flue.x + Math.sin(puff.spin + t * 0.45) * puff.sway * life + life * life * 12,
+      flue.y + 1 + life * 15,
+      flue.z + Math.cos(puff.spin + t * 0.4) * puff.sway * life + life * life * 5
+    );
+    smoke.setMatrixAt(i, place);
+    sootTint.copy(sootLow).lerp(sootHigh, Math.min(1, life * 0.95));
+    smoke.setColorAt(i, sootTint);
+  }
+  smoke.instanceMatrix.needsUpdate = true;
+  if (smoke.instanceColor) smoke.instanceColor.needsUpdate = true;
+}
+
+/* --------------------------------------------------------- orbit camera
+ * yaw/pitch/range with a damped goal, so the scene lands smoothly on a
+ * preset instead of snapping to it.
+ * ------------------------------------------------------------------- */
+
+class OrbitRig {
+  constructor(cam, dom) {
+    this.cam = cam;
+    this.dom = dom;
+    this.target = new THREE.Vector3(0, 16, 6);
+    this.goalTarget = this.target.clone();
+    this.goal = { yaw: 0.62, pitch: 1.15, range: 88 };
+    this.cur = { ...this.goal };
+    this.auto = false;
+    this.pointers = new Map();
+    this.lastSpan = 0;
+    this.bindEvents();
+  }
+
+  moveTo({ yaw, pitch, range }, target) {
+    this.goal.yaw = yaw; this.goal.pitch = pitch; this.goal.range = range;
+    if (target) this.goalTarget.copy(target);
+  }
+
+  update(dt) {
+    if (this.auto) this.goal.yaw += dt * 0.11;
+    const k = 1 - Math.pow(0.0015, Math.max(dt, 0.001));
+    for (const key of ["yaw", "pitch", "range"])
+      this.cur[key] += (this.goal[key] - this.cur[key]) * k;
+    this.target.lerp(this.goalTarget, k);
+
+    const { yaw, pitch, range } = this.cur;
+    const ring = Math.sin(pitch) * range;
+    this.cam.position.set(
+      this.target.x + ring * Math.cos(yaw),
+      this.target.y + Math.cos(pitch) * range,
+      this.target.z + ring * Math.sin(yaw)
+    );
+    this.cam.lookAt(this.target);
+  }
+
+  bindEvents() {
+    const dom = this.dom;
+    dom.style.touchAction = "none";
+    dom.addEventListener("contextmenu", (e) => e.preventDefault());
+    dom.addEventListener("pointerdown", (e) => {
+      dom.setPointerCapture(e.pointerId);
+      this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, button: e.button });
+      this.lastSpan = 0;
+    });
+    dom.addEventListener("pointermove", (e) => {
+      const p = this.pointers.get(e.pointerId);
+      if (!p) return;
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      p.x = e.clientX; p.y = e.clientY;
+      if (this.pointers.size >= 2) return this.pinch();
+      if (p.button === 2) this.pan(dx, dy);
+      else this.orbit(dx, dy);
+    });
+    const release = (e) => {
+      this.pointers.delete(e.pointerId);
+      if (dom.hasPointerCapture(e.pointerId)) dom.releasePointerCapture(e.pointerId);
+      this.lastSpan = 0;
+    };
+    dom.addEventListener("pointerup", release);
+    dom.addEventListener("pointercancel", release);
+    dom.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      this.zoom(Math.exp(e.deltaY * 0.0014));
+    }, { passive: false });
+  }
+
+  orbit(dx, dy) {
+    this.goal.yaw -= dx * 0.006;
+    this.goal.pitch = THREE.MathUtils.clamp(this.goal.pitch - dy * 0.005, 0.12, 1.5);
+  }
+
+  zoom(factor) {
+    this.goal.range = THREE.MathUtils.clamp(this.goal.range * factor, 8, 210);
+  }
+
+  pan(dx, dy) {
+    const toTarget = new THREE.Vector3().subVectors(this.cam.position, this.target);
+    const right = new THREE.Vector3(0, 1, 0).cross(toTarget).normalize();
+    const up = toTarget.normalize().cross(new THREE.Vector3(0, 1, 0)).normalize();
+    const scale = this.cur.range * 0.0016;
+    this.goalTarget.addScaledVector(right, -dx * scale).addScaledVector(up, dy * scale);
+  }
+
+  pinch() {
+    const pts = [...this.pointers.values()];
+    if (pts.length < 2) return;
+    const span = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    if (this.lastSpan) this.zoom(Math.pow(this.lastSpan / span, 1.2));
+    this.lastSpan = span;
+  }
+}
+
+/* Four framings, each aimed at one thing the brief asks for: the whole stack
+ * from the sea with the shore and windlass, the landing deck and derrick, the
+ * hatchery mouth with its smoke hole, and the stair ribbon down to the
+ * boathouse at the water. */
+const VIEWS = [
+  { yaw: 0.62, pitch: 1.12, range: 96, at: [2, 17, 4] },
+  { yaw: 2.55, pitch: 1.24, range: 46, at: [-6, 24, 2] },
+  { yaw: -0.35, pitch: 1.28, range: 30, at: [2, 23, -1] },
+  { yaw: 1.30, pitch: 1.45, range: 30, at: [12, 12, 12] },
+];
+
+const rig = new OrbitRig(camera, renderer.domElement);
+let viewIndex = 0;
+function showView(n) {
+  const v = VIEWS[n];
+  viewIndex = n;
+  rig.moveTo({ yaw: v.yaw, pitch: v.pitch, range: v.range }, new THREE.Vector3(...v.at));
+}
+showView(0);
+
+addEventListener("keydown", (e) => {
+  const key = e.key.toLowerCase();
+  if (key >= "1" && key <= String(VIEWS.length)) showView(Number(key) - 1);
+  else if (key === "r") rig.auto = !rig.auto;
+  else if (key === "c") seaCalm = !seaCalm;
+});
+
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ------------------------------------------------------------- readout */
+
+const statsBox = document.getElementById("stats");
+let frames = 0, fpsMark = 0, fps = 0, lastShown = 0;
+
+function readout(now) {
+  frames++;
+  if (now - fpsMark > 500) {
+    fps = Math.round(frames * 1000 / (now - fpsMark));
+    frames = 0;
+    fpsMark = now;
+  }
+  if (now - lastShown > 900) {
+    lastShown = now;
+    statsBox.textContent =
+      `${blocksPlaced} rock+build blocks, ${dragonBlocks} dragon blocks, ` +
+      `${aerie.faceCount} faces · ${seaCells.length} sea blocks · ` +
+      `${renderer.info.render.calls} draws · ${fps} fps · view ${viewIndex + 1}` +
+      `${rig.auto ? " · orbit" : ""}${seaCalm ? " · calm" : ""}`;
+  }
+}
+
+/* Debug surface: the numbers the visual checks downstream assert against.
+ * probe() samples the back buffer on a stride, counts the colours actually
+ * painted, and reports where on screen the silhouette lands. */
+window.AER = {
+  views: VIEWS.length,
+  view: () => viewIndex + 1,
+  showView,
+  setPerched,
+  setCalm(v) { seaCalm = !!v; },
+  setAuto(v) { rig.auto = !!v; },
+  /* Debug aim: snap the rig to an arbitrary framing so the inspecting script
+   * can frame one perch or dragon without pressing keys. */
+  cam(yaw, pitch, range, at) {
+    rig.moveTo({ yaw, pitch, range }, at ? new THREE.Vector3(at[0], at[1], at[2]) : undefined);
+    rig.cur = { ...rig.goal };
+    rig.target.copy(rig.goalTarget);
+    rig.update(0);
+  },
+  data() {
+    return {
+      blocks: blocksPlaced, dragons: dragonBlocks, faces: aerie.faceCount,
+      sea: seaCells.length, draws: renderer.info.render.calls,
+      tris: renderer.info.render.triangles, view: viewIndex + 1, fps,
+    };
+  },
+  camera() {
+    const p = camera.position;
+    return {
+      x: +p.x.toFixed(1), y: +p.y.toFixed(1), z: +p.z.toFixed(1),
+      range: +rig.cur.range.toFixed(1),
+    };
+  },
+  /* Debug census of the beasts: where each group sits, how big it is, and how
+   * much geometry actually made it through the face-culling pass. */
+  beasts() {
+    return dragons.map((d) => {
+      const p = d.group.getWorldPosition(new THREE.Vector3());
+      const box = new THREE.Box3().setFromObject(d.group);
+      return {
+        x: +p.x.toFixed(2), y: +p.y.toFixed(2), z: +p.z.toFixed(2),
+        scale: d.group.scale.x, blocks: d.blocks, flying: d.flying,
+        box: box.isEmpty() ? null
+          : [box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z].map((v) => +v.toFixed(2)),
+        faces: d.group.children.reduce(
+          (n, c) => n + (c.isMesh ? (c.geometry.index ? c.geometry.index.count / 3 : 0) : 0), 0),
+      };
+    });
+  },
+  probe(stride = 5) {
+    const src = renderer.domElement;
+    const grab = document.createElement("canvas");
+    grab.width = src.width; grab.height = src.height;
+    const ctx = grab.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(src, 0, 0);
+    const { data, width, height } = ctx.getImageData(0, 0, grab.width, grab.height);
+    const seen = new Map();
+    let sampled = 0, dark = 0, bright = 0, mid = 0, sum = 0, solid = 0;
+    let minX = width, maxX = -1, minY = height, maxY = -1;
+
+    /* The sky and the sea are both vertical gradients, so a single luminance
+     * threshold cannot tell rock from water. The left edge of every row is by
+     * construction open sky or open water: compare each pixel to that local
+     * background and the bbox becomes the real silhouette of the aerie. */
+    for (let y = 0; y < height; y += stride) {
+      const row = y * width;
+      const back = row * 4;
+      const bgR = data[back], bgG = data[back + 1], bgB = data[back + 2];
+      for (let x = 0; x < width; x += stride) {
+        const p = (row + x) * 4;
+        const r = data[p], g = data[p + 1], b = data[p + 2];
+        const lum = r * 0.3 + g * 0.59 + b * 0.3;
+        const key = (r >> 3) << 10 | (g >> 3 << 5) | (b >> 3);
+        seen.set(key, (seen.get(key) || 0) + 1);
+        sampled++;
+        sum += lum;
+        if (lum < 90) dark++;
+        else if (lum > 215) bright++;
+        else mid++;
+        if (Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB) > 96) {
+          solid++;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    return {
+      distinct: seen.size, sampled,
+      darkRatio: +(dark / sampled).toFixed(3),
+      midRatio: +(mid / sampled).toFixed(3),
+      brightRatio: +(bright / sampled).toFixed(3),
+      solidRatio: +(solid / sampled).toFixed(3),
+      meanLum: Math.round(sum / sampled),
+      silhouette: maxX >= 0
+        ? {
+          w: +((maxX - minX + 1) / width).toFixed(3),
+          h: +((maxY - minY + 1) / height).toFixed(3),
+          left: minX, top: minY,
+        }
+        : null,
+    };
+  },
+  ready: true,
+};
+
+/* --------------------------------------------------------------- loop */
+
+function flapWings(beasts, t) {
+  for (let i = 0; i < beasts.length; i++) {
+    const beast = beasts[i];
+    const flying = beast.flying;
+    /* Perched beasts hold their wings folded against the shoulder: a raised
+     * sail of membrane over the back. A flat wing on a perched animal is a
+     * horizontal sheet that blurs into the body mass from every viewing angle
+     * the aerie is watched from, so the fold is not vanity, it is silhouette.
+     * The flying beast keeps its spread wings and beats them. */
+    const fold = flying ? 0 : 1.25;
+    const beat = Math.sin(t * (flying ? 2.4 : 0.55) + i) * (flying ? 0.62 : 0.05);
+    const s = fold + beat;
+    beast.wingL.rotation.x = -s;
+    beast.wingR.rotation.x = s;
+    if (flying) {
+      const course = t * 0.13;
+      beast.group.position.set(
+        Math.cos(course) * 30, 30.5 + Math.sin(t * 0.8) * 1.8, Math.sin(course) * 30
+      );
+      beast.group.rotation.y = course + Math.PI / 2;
+    }
+  }
+}
+
+function setPerched(on) {
+  for (const d of dragons) d.group.visible = on;
+}
+dragons[dragons.length - 1].flying = true;
+
+let startMs = 0;
+function frame(now) {
+  if (!startMs) startMs = now;
+  const t = (now - startMs) / 1000;
+  rig.update(1 / 60);
+  swaySea(t);
+  driftSmoke(t);
+  flapWings(dragons, t);
+  hearth.intensity = 20 + 7 * Math.abs(Math.sin(t * 3.1)) * (0.6 + 0.4 * Math.sin(t * 7.7));
+  renderer.render(scene, camera);
+  readout(now);
+  requestAnimationFrame(frame);
+}
+
+const boot = document.getElementById("boot");
+boot.style.opacity = "0";
+setTimeout(() => boot.remove(), 800);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

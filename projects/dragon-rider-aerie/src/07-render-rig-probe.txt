@@ -1,0 +1,554 @@
+
+/* ------------------------------------------------------------------ *
+ * Render plumbing. cdnjs ships three.js core only - no examples/jsm, so
+ * no OrbitControls and no BufferGeometryUtils. The camera rig below is a
+ * plain spherical orbit with a damped goal, which is all this scene needs.
+ * ---------------------------------------------------------------- */
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(46, innerWidth / innerHeight, 0.6, 900);
+
+const renderer = new THREE.WebGLRenderer({
+  antialias: true,
+  preserveDrawingBuffer: true,   // lets the verification probe read pixels back
+});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.95;
+document.getElementById("app").appendChild(renderer.domElement);
+
+scene.fog = new THREE.Fog(0xa9c4d8, 132, 330);
+scene.add(skyDome());
+
+function skyDome() {
+  // vertical gradient dome: cold at the zenith, pale haze at the horizon
+  const geo = new THREE.SphereGeometry(420, 20, 14);
+  const pos = geo.attributes.position;
+  const colors = new Float32Array(pos.count * 3);
+  const cold = new THREE.Color(0x3f6f9d), haze = new THREE.Color(0xbdd2e0);
+  const c = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) {
+    const h = THREE.MathUtils.clamp(pos.getY(i) / 420 * 0.5 + 0.5, 0, 1);
+    c.copy(haze).lerp(cold, Math.pow(h, 1.5));
+    colors.set([c.r, c.g, c.b], i * 3);
+  }
+  geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    vertexColors: true, side: THREE.BackSide, fog: false,
+  }));
+  mesh.frustumCulled = false;
+  return mesh;
+}
+
+/* ------------------------------------------------------------- lights */
+
+scene.add(new THREE.HemisphereLight(0xbcd6ee, 0x6c6a5c, 0.78));
+
+/* Cool fill from the side the sun never reaches: without it the shaded half of
+ * the stack closes to black and the silhouette loses the stepped bands. */
+const fill = new THREE.DirectionalLight(0x93b8d6, 0.42);
+fill.position.set(-70, 34, -46);
+scene.add(fill);
+
+const sun = new THREE.DirectionalLight(0xffeccf, 1.55);
+sun.position.set(74, 96, 52);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.near = 12;
+sun.shadow.camera.far = 280;
+sun.shadow.camera.left = -58;
+sun.shadow.camera.right = 58;
+sun.shadow.camera.top = 58;
+sun.shadow.camera.bottom = -58;
+sun.shadow.bias = -0.0007;
+sun.shadow.normalBias = 0.45;
+scene.add(sun, sun.target);
+sun.target.position.set(0, 14, 4);
+
+const hearth = new THREE.PointLight(0xff8a3c, 24, 34, 2.1);
+hearth.position.set(0, 25, 0);
+scene.add(hearth);
+
+/* ------------------------------------------------------------ the build */
+
+laySeabed();
+layShore();
+layStack();
+laySkerries();
+buildHatchery();
+buildPerches();
+buildDeck();
+buildQuay();
+buildWindlass();
+buildStairs();
+buildBoathouse();
+buildFigures();
+
+const worldCells = world.cells();
+const aerie = makeVoxelMesh(world, worldCells);
+scene.add(aerie.mesh);
+
+/* Perched beasts stand with their lowest claw blocks on the deck's top face:
+ * that face is one lift above the deck block, and the lowest claw sits four and
+ * a half blocks under the body centre in local space, so the anchor is
+ * deckY + 1 + 4.5*scale. Scale 0.4 puts a beast at just over a block-man's
+ * height and fills a 7x9 perch without overrunning it. */
+const roster = [
+  { kind: "copper", at: [8, 26.8, -14], yaw: Math.PI / 2, scale: 0.4 },      // north perch
+  { kind: "gold", at: [-1.5, 26.8, 20], yaw: -Math.PI / 2, scale: 0.4 },     // south perch
+  { kind: "broadwing", at: [-13.5, 26.8, 12], yaw: Math.PI, scale: 0.4 },    // west perch
+  { kind: "charcoal", at: [-16, 31, -8], yaw: 0.4, scale: 0.45 },            // the one on the wing
+];
+const dragons = roster.map((b) => buildDragon(makeDragon(b.kind), b.at, b.yaw, b.scale));
+for (const d of dragons) scene.add(d.group);
+
+const blocksPlaced = worldCells.length;
+const dragonBlocks = dragons.reduce((sum, d) => sum + d.blocks, 0);
+
+/* --------------------------------------------------------------- water */
+
+const seaCells = [];
+for (let z = -36; z <= 36; z++) {
+  for (let x = -36; x <= 36; x++) {
+    if (world.get(x, SEA_Y, z) !== T.AIR) continue;
+    let floor = SEA_Y;
+    while (floor > 3 && world.get(x, floor - 1, z) === T.AIR) floor--;
+    seaCells.push({
+      x, z, floor, lift: 0, wide: 1, tall: 1,
+      phase: hash2(x * 1.3 + 7, z * 1.9 + 3) * 6.283,
+    });
+  }
+}
+
+/* The block field ends at +-36, so the chop alone stops in a straight line a
+ * few blocks out and reads as a square tile of water. A wide, jittered scatter
+ * of crests sits on the open plate beyond that: near-continuous sheet, no grid,
+ * so the seam is gone and the water keeps going out to the fog. */
+for (let z = -84; z <= 84; z += 4) {
+  for (let x = -84; x <= 84; x += 4) {
+    if (Math.abs(x) <= 37 && Math.abs(z) <= 37) continue;
+    const r1 = hash2(x * 0.71 + 5, z * 1.31 + 9);
+    const r2 = hash2(x * 2.11 + 3, z * 0.97 + 21);
+    seaCells.push({
+      x: x + (r1 - 0.5) * 3.2,
+      z: z + (r2 - 0.5) * 3.2,
+      floor: SEA_Y,
+      lift: 0.02 + r1 * 0.12,
+      wide: 3.4 + r2 * 1.6,
+      tall: 0.9 + r1 * 0.5,
+      phase: hash2(x * 1.3 + 7, z * 1.9 + 3) * 6.283,
+    });
+  }
+}
+
+const unitBox = new THREE.BoxGeometry(1, 1, 1);
+const seaBody = new THREE.InstancedMesh(unitBox, new THREE.MeshStandardMaterial({
+  color: 0x3d7590, transparent: true, opacity: 0.95, roughness: 0.55, metalness: 0.2,
+}), seaCells.length);
+const seaSwell = new THREE.InstancedMesh(unitBox, new THREE.MeshStandardMaterial({
+  color: 0x9dc6d8, transparent: true, opacity: 0.6, roughness: 0.16, metalness: 0.45,
+  flatShading: true,
+}), seaCells.length);
+seaBody.receiveShadow = seaSwell.receiveShadow = true;
+seaBody.frustumCulled = seaSwell.frustumCulled = false;
+scene.add(seaBody, seaSwell);
+
+/* The block field only holds sea as far as its bounds, which ends in a hard
+ * wall at x,z +-36. A plain plane at the same tide line carries the water out
+ * past the fog and hides that wall; the swell blocks above it do the chop. */
+/* The plate stops short of the sky dome's radius (420) and goes fully fog
+ * colour out there, so the water/dome seam blends instead of hardening. */
+const openSea = new THREE.Mesh(
+  new THREE.PlaneGeometry(400, 400),
+  new THREE.MeshStandardMaterial({ color: 0x4b7f99, roughness: 0.5, metalness: 0.25 })
+);
+openSea.rotation.x = -Math.PI / 2;
+openSea.position.y = 6.45;
+openSea.receiveShadow = true;
+scene.add(openSea);
+
+const place = new THREE.Matrix4();
+for (let i = 0; i < seaCells.length; i++) {
+  const c = seaCells[i];
+  const column = SEA_Y - 1 - c.floor + 1;
+  if (column > 0) {
+    place.makeScale(1, column, 1);
+    place.setPosition(c.x, (c.floor + SEA_Y - 1) / 2, c.z);
+    seaBody.setMatrixAt(i, place);
+  } else {
+    place.makeScale(0, 0, 0);
+    seaBody.setMatrixAt(i, place);
+  }
+}
+seaBody.instanceMatrix.needsUpdate = true;
+
+let seaCalm = false;
+function swaySea(t) {
+  const amp = seaCalm ? 0.05 : 0.16;
+  for (let i = 0; i < seaCells.length; i++) {
+    const c = seaCells[i];
+    const swell = Math.sin(c.x * 0.55 + c.z * 0.42 + t * 1.6 + c.phase)
+      + 0.6 * Math.cos(c.z * 0.75 - c.x * 0.3 + t * 2.1 - c.phase);
+    place.makeScale(c.wide, c.tall, c.wide);
+    place.setPosition(c.x, SEA_Y + c.lift + swell * amp * 0.5, c.z);
+    seaSwell.setMatrixAt(i, place);
+  }
+  seaSwell.instanceMatrix.needsUpdate = true;
+}
+swaySea(0);
+
+/* --------------------------------------------------------------- smoke */
+
+/* A plume only reads as smoke if the puffs dissolve rather than stack: short
+ * chimney, wide drift under the wind, and each puff recolved from soot grey to
+ * the horizon haze as it climbs. Ten times the lift height of 130 solid puffs
+ * earlier made the flue look like a white spike. */
+const flue = new THREE.Vector3(0, 31.6, 0);
+const PUFFS = 60;
+const smoke = new THREE.InstancedMesh(unitBox, new THREE.MeshBasicMaterial({
+  transparent: true, opacity: 0.22, depthWrite: false,
+}), PUFFS);
+smoke.frustumCulled = false;
+scene.add(smoke);
+
+const soot = Array.from({ length: PUFFS }, (_, i) => ({
+  seed: hash2(i * 3.7, 11),
+  driftRate: 0.05 + hash2(i, 5) * 0.045,   // cycle of the puff per second
+  spin: hash2(i, 17) * 6.283,
+  size: 0.7 + hash2(i, 23) * 0.7,
+  sway: 2.2 + hash2(i, 31) * 4.4,
+}));
+
+const sootLow = new THREE.Color(0x7d848a), sootHigh = new THREE.Color(0xbdd2e0);
+const sootTint = new THREE.Color();
+
+function driftSmoke(t) {
+  for (let i = 0; i < PUFFS; i++) {
+    const puff = soot[i];
+    const life = (t * puff.driftRate + puff.seed) % 1;
+    const size = puff.size * (0.6 + life * 2.4);
+    place.makeScale(size, size * 0.75, size);
+    place.setPosition(
+      flue.x + Math.sin(puff.spin + t * 0.45) * puff.sway * life + life * life * 12,
+      flue.y + 1 + life * 15,
+      flue.z + Math.cos(puff.spin + t * 0.4) * puff.sway * life + life * life * 5
+    );
+    smoke.setMatrixAt(i, place);
+    sootTint.copy(sootLow).lerp(sootHigh, Math.min(1, life * 0.95));
+    smoke.setColorAt(i, sootTint);
+  }
+  smoke.instanceMatrix.needsUpdate = true;
+  if (smoke.instanceColor) smoke.instanceColor.needsUpdate = true;
+}
+
+/* --------------------------------------------------------- orbit camera
+ * yaw/pitch/range with a damped goal, so the scene lands smoothly on a
+ * preset instead of snapping to it.
+ * ------------------------------------------------------------------- */
+
+class OrbitRig {
+  constructor(cam, dom) {
+    this.cam = cam;
+    this.dom = dom;
+    this.target = new THREE.Vector3(0, 16, 6);
+    this.goalTarget = this.target.clone();
+    this.goal = { yaw: 0.62, pitch: 1.15, range: 88 };
+    this.cur = { ...this.goal };
+    this.auto = false;
+    this.pointers = new Map();
+    this.lastSpan = 0;
+    this.bindEvents();
+  }
+
+  moveTo({ yaw, pitch, range }, target) {
+    this.goal.yaw = yaw; this.goal.pitch = pitch; this.goal.range = range;
+    if (target) this.goalTarget.copy(target);
+  }
+
+  update(dt) {
+    if (this.auto) this.goal.yaw += dt * 0.11;
+    const k = 1 - Math.pow(0.0015, Math.max(dt, 0.001));
+    for (const key of ["yaw", "pitch", "range"])
+      this.cur[key] += (this.goal[key] - this.cur[key]) * k;
+    this.target.lerp(this.goalTarget, k);
+
+    const { yaw, pitch, range } = this.cur;
+    const ring = Math.sin(pitch) * range;
+    this.cam.position.set(
+      this.target.x + ring * Math.cos(yaw),
+      this.target.y + Math.cos(pitch) * range,
+      this.target.z + ring * Math.sin(yaw)
+    );
+    this.cam.lookAt(this.target);
+  }
+
+  bindEvents() {
+    const dom = this.dom;
+    dom.style.touchAction = "none";
+    dom.addEventListener("contextmenu", (e) => e.preventDefault());
+    dom.addEventListener("pointerdown", (e) => {
+      dom.setPointerCapture(e.pointerId);
+      this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, button: e.button });
+      this.lastSpan = 0;
+    });
+    dom.addEventListener("pointermove", (e) => {
+      const p = this.pointers.get(e.pointerId);
+      if (!p) return;
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      p.x = e.clientX; p.y = e.clientY;
+      if (this.pointers.size >= 2) return this.pinch();
+      if (p.button === 2) this.pan(dx, dy);
+      else this.orbit(dx, dy);
+    });
+    const release = (e) => {
+      this.pointers.delete(e.pointerId);
+      if (dom.hasPointerCapture(e.pointerId)) dom.releasePointerCapture(e.pointerId);
+      this.lastSpan = 0;
+    };
+    dom.addEventListener("pointerup", release);
+    dom.addEventListener("pointercancel", release);
+    dom.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      this.zoom(Math.exp(e.deltaY * 0.0014));
+    }, { passive: false });
+  }
+
+  orbit(dx, dy) {
+    this.goal.yaw -= dx * 0.006;
+    this.goal.pitch = THREE.MathUtils.clamp(this.goal.pitch - dy * 0.005, 0.12, 1.5);
+  }
+
+  zoom(factor) {
+    this.goal.range = THREE.MathUtils.clamp(this.goal.range * factor, 8, 210);
+  }
+
+  pan(dx, dy) {
+    const toTarget = new THREE.Vector3().subVectors(this.cam.position, this.target);
+    const right = new THREE.Vector3(0, 1, 0).cross(toTarget).normalize();
+    const up = toTarget.normalize().cross(new THREE.Vector3(0, 1, 0)).normalize();
+    const scale = this.cur.range * 0.0016;
+    this.goalTarget.addScaledVector(right, -dx * scale).addScaledVector(up, dy * scale);
+  }
+
+  pinch() {
+    const pts = [...this.pointers.values()];
+    if (pts.length < 2) return;
+    const span = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    if (this.lastSpan) this.zoom(Math.pow(this.lastSpan / span, 1.2));
+    this.lastSpan = span;
+  }
+}
+
+/* Four framings, each aimed at one thing the brief asks for: the whole stack
+ * from the sea with the shore and windlass, the landing deck and derrick, the
+ * hatchery mouth with its smoke hole, and the stair ribbon down to the
+ * boathouse at the water. */
+const VIEWS = [
+  { yaw: 0.62, pitch: 1.12, range: 96, at: [2, 17, 4] },
+  { yaw: 2.55, pitch: 1.24, range: 46, at: [-6, 24, 2] },
+  { yaw: -0.35, pitch: 1.28, range: 30, at: [2, 23, -1] },
+  { yaw: 1.30, pitch: 1.45, range: 30, at: [12, 12, 12] },
+];
+
+const rig = new OrbitRig(camera, renderer.domElement);
+let viewIndex = 0;
+function showView(n) {
+  const v = VIEWS[n];
+  viewIndex = n;
+  rig.moveTo({ yaw: v.yaw, pitch: v.pitch, range: v.range }, new THREE.Vector3(...v.at));
+}
+showView(0);
+
+addEventListener("keydown", (e) => {
+  const key = e.key.toLowerCase();
+  if (key >= "1" && key <= String(VIEWS.length)) showView(Number(key) - 1);
+  else if (key === "r") rig.auto = !rig.auto;
+  else if (key === "c") seaCalm = !seaCalm;
+});
+
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ------------------------------------------------------------- readout */
+
+const statsBox = document.getElementById("stats");
+let frames = 0, fpsMark = 0, fps = 0, lastShown = 0;
+
+function readout(now) {
+  frames++;
+  if (now - fpsMark > 500) {
+    fps = Math.round(frames * 1000 / (now - fpsMark));
+    frames = 0;
+    fpsMark = now;
+  }
+  if (now - lastShown > 900) {
+    lastShown = now;
+    statsBox.textContent =
+      `${blocksPlaced} rock+build blocks, ${dragonBlocks} dragon blocks, ` +
+      `${aerie.faceCount} faces · ${seaCells.length} sea blocks · ` +
+      `${renderer.info.render.calls} draws · ${fps} fps · view ${viewIndex + 1}` +
+      `${rig.auto ? " · orbit" : ""}${seaCalm ? " · calm" : ""}`;
+  }
+}
+
+/* Debug surface: the numbers the visual checks downstream assert against.
+ * probe() samples the back buffer on a stride, counts the colours actually
+ * painted, and reports where on screen the silhouette lands. */
+window.AER = {
+  views: VIEWS.length,
+  view: () => viewIndex + 1,
+  showView,
+  setPerched,
+  setCalm(v) { seaCalm = !!v; },
+  setAuto(v) { rig.auto = !!v; },
+  /* Debug aim: snap the rig to an arbitrary framing so the inspecting script
+   * can frame one perch or dragon without pressing keys. */
+  cam(yaw, pitch, range, at) {
+    rig.moveTo({ yaw, pitch, range }, at ? new THREE.Vector3(at[0], at[1], at[2]) : undefined);
+    rig.cur = { ...rig.goal };
+    rig.target.copy(rig.goalTarget);
+    rig.update(0);
+  },
+  data() {
+    return {
+      blocks: blocksPlaced, dragons: dragonBlocks, faces: aerie.faceCount,
+      sea: seaCells.length, draws: renderer.info.render.calls,
+      tris: renderer.info.render.triangles, view: viewIndex + 1, fps,
+    };
+  },
+  camera() {
+    const p = camera.position;
+    return {
+      x: +p.x.toFixed(1), y: +p.y.toFixed(1), z: +p.z.toFixed(1),
+      range: +rig.cur.range.toFixed(1),
+    };
+  },
+  /* Debug census of the beasts: where each group sits, how big it is, and how
+   * much geometry actually made it through the face-culling pass. */
+  beasts() {
+    return dragons.map((d) => {
+      const p = d.group.getWorldPosition(new THREE.Vector3());
+      const box = new THREE.Box3().setFromObject(d.group);
+      return {
+        x: +p.x.toFixed(2), y: +p.y.toFixed(2), z: +p.z.toFixed(2),
+        scale: d.group.scale.x, blocks: d.blocks, flying: d.flying,
+        box: box.isEmpty() ? null
+          : [box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z].map((v) => +v.toFixed(2)),
+        faces: d.group.children.reduce(
+          (n, c) => n + (c.isMesh ? (c.geometry.index ? c.geometry.index.count / 3 : 0) : 0), 0),
+      };
+    });
+  },
+  probe(stride = 5) {
+    const src = renderer.domElement;
+    const grab = document.createElement("canvas");
+    grab.width = src.width; grab.height = src.height;
+    const ctx = grab.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(src, 0, 0);
+    const { data, width, height } = ctx.getImageData(0, 0, grab.width, grab.height);
+    const seen = new Map();
+    let sampled = 0, dark = 0, bright = 0, mid = 0, sum = 0, solid = 0;
+    let minX = width, maxX = -1, minY = height, maxY = -1;
+
+    /* The sky and the sea are both vertical gradients, so a single luminance
+     * threshold cannot tell rock from water. The left edge of every row is by
+     * construction open sky or open water: compare each pixel to that local
+     * background and the bbox becomes the real silhouette of the aerie. */
+    for (let y = 0; y < height; y += stride) {
+      const row = y * width;
+      const back = row * 4;
+      const bgR = data[back], bgG = data[back + 1], bgB = data[back + 2];
+      for (let x = 0; x < width; x += stride) {
+        const p = (row + x) * 4;
+        const r = data[p], g = data[p + 1], b = data[p + 2];
+        const lum = r * 0.3 + g * 0.59 + b * 0.3;
+        const key = (r >> 3) << 10 | (g >> 3 << 5) | (b >> 3);
+        seen.set(key, (seen.get(key) || 0) + 1);
+        sampled++;
+        sum += lum;
+        if (lum < 90) dark++;
+        else if (lum > 215) bright++;
+        else mid++;
+        if (Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB) > 96) {
+          solid++;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    return {
+      distinct: seen.size, sampled,
+      darkRatio: +(dark / sampled).toFixed(3),
+      midRatio: +(mid / sampled).toFixed(3),
+      brightRatio: +(bright / sampled).toFixed(3),
+      solidRatio: +(solid / sampled).toFixed(3),
+      meanLum: Math.round(sum / sampled),
+      silhouette: maxX >= 0
+        ? {
+          w: +((maxX - minX + 1) / width).toFixed(3),
+          h: +((maxY - minY + 1) / height).toFixed(3),
+          left: minX, top: minY,
+        }
+        : null,
+    };
+  },
+  ready: true,
+};
+
+/* --------------------------------------------------------------- loop */
+
+function flapWings(beasts, t) {
+  for (let i = 0; i < beasts.length; i++) {
+    const beast = beasts[i];
+    const flying = beast.flying;
+    /* Perched beasts hold their wings folded against the shoulder: a raised
+     * sail of membrane over the back. A flat wing on a perched animal is a
+     * horizontal sheet that blurs into the body mass from every viewing angle
+     * the aerie is watched from, so the fold is not vanity, it is silhouette.
+     * The flying beast keeps its spread wings and beats them. */
+    const fold = flying ? 0 : 1.25;
+    const beat = Math.sin(t * (flying ? 2.4 : 0.55) + i) * (flying ? 0.62 : 0.05);
+    const s = fold + beat;
+    beast.wingL.rotation.x = -s;
+    beast.wingR.rotation.x = s;
+    if (flying) {
+      const course = t * 0.13;
+      beast.group.position.set(
+        Math.cos(course) * 30, 30.5 + Math.sin(t * 0.8) * 1.8, Math.sin(course) * 30
+      );
+      beast.group.rotation.y = course + Math.PI / 2;
+    }
+  }
+}
+
+function setPerched(on) {
+  for (const d of dragons) d.group.visible = on;
+}
+dragons[dragons.length - 1].flying = true;
+
+let startMs = 0;
+function frame(now) {
+  if (!startMs) startMs = now;
+  const t = (now - startMs) / 1000;
+  rig.update(1 / 60);
+  swaySea(t);
+  driftSmoke(t);
+  flapWings(dragons, t);
+  hearth.intensity = 20 + 7 * Math.abs(Math.sin(t * 3.1)) * (0.6 + 0.4 * Math.sin(t * 7.7));
+  renderer.render(scene, camera);
+  readout(now);
+  requestAnimationFrame(frame);
+}
+
+const boot = document.getElementById("boot");
+boot.style.opacity = "0";
+setTimeout(() => boot.remove(), 800);
+requestAnimationFrame(frame);

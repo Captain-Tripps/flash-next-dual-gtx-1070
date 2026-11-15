@@ -1,0 +1,149 @@
+
+/* ------------------------------------------------------------------ *
+ * Voxel -> mesh. Only faces touching air are emitted, so the interior of
+ * a cliff costs nothing. Each face gets per-vertex ambient occlusion
+ * baked from its three planar neighbours, plus per-block colour jitter
+ * and a small per-block bump along its own normal. The bump is what
+ * makes a run of paving read as separate cubes; a mortar gap would be
+ * cheaper to write but would let light through the seams.
+ * ---------------------------------------------------------------- */
+
+const INSETS = [
+  { dir: [1, 0, 0], a: [0, 1, 0], b: [0, 0, 1] },
+  { dir: [-1, 0, 0], a: [0, 0, 1], b: [0, 1, 0] },
+  { dir: [0, 1, 0], a: [0, 0, 1], b: [1, 0, 0] },
+  { dir: [0, -1, 0], a: [1, 0, 0], b: [0, 0, 1] },
+  { dir: [0, 0, 1], a: [1, 0, 0], b: [0, 1, 0] },
+  { dir: [0, 0, -1], a: [0, 1, 0], b: [1, 0, 0] },
+];
+
+const AO_CURVE = [1, 0.74, 0.58, 0.4];
+
+/* how much a block of that surface bulges or sinks, in blocks */
+const BUMP = {
+  [T.ROCK]: 0.055, [T.SAND]: 0.03, [T.WET]: 0.025, [T.GRASS]: 0.05, [T.MOSS]: 0.05,
+  [T.HEWN]: 0.022, [T.PAVE]: 0.026, [T.SLATE]: 0.02, [T.PLANK]: 0.018, [T.BEAM]: 0.02,
+  [T.BRACE]: 0.02, [T.ROPE]: 0.0, [T.IRON]: 0.008, [T.EGG]: 0.012, [T.BONE]: 0.012,
+  [T.HIDE]: 0.03, [T.CRATE]: 0.02, [T.LEAF]: 0.06, [T.SOOT]: 0.012,
+  [T.EMBER]: 0.03, [T.FLAME]: 0.06, [T.SCALE_A]: 0.022, [T.SCALE_B]: 0.022,
+  [T.SCALE_C]: 0.022,
+  [T.WEB]: 0.008, [T.EYE]: 0.0,
+};
+
+const tmpColor = new THREE.Color();
+
+function blockTint(type, x, y, z) {
+  const spec = PALETTE[type];
+  tmpColor.setHex(spec.c);
+  const jitter = 1 + (hash3(x * 3 + 1, y * 5 + 2, z * 7 + 3) - 0.5) * 2 * (spec.jit || 0);
+  const strata = type === T.ROCK || type === T.MOSS ? strataTint(y) : 1;
+  return { r: tmpColor.r * jitter * strata, g: tmpColor.g * jitter * strata, b: tmpColor.b * jitter * strata };
+}
+
+/* returns {position, normal, color, index} arrays for the two material groups
+ * (solid faces, self-lit faces) of one set of blocks */
+function voxelGeometry(cells, solid) {
+  const groups = [makeBuf(), makeBuf()];
+  let faceCount = 0;
+  for (const [x, y, z, type] of cells) {
+    const emissive = EMISSIVE_IDS.has(type);
+    const g = groups[emissive ? 1 : 0];
+    const tint = blockTint(type, x, y, z);
+    const bump = (BUMP[type] || 0) * (hash3(x + 9, y - 4, z + 17) - 0.5) * 2;
+
+    for (const { dir, a, b } of INSETS) {
+      const [dx, dy, dz] = dir;
+      if (solid(x + dx, y + dy, z + dz)) continue;
+      faceCount++;
+      const base = g.position.length / 3;
+      for (const [i, j] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        const ox = x + dx + a[0] * i + b[0] * j;
+        const oy = y + dy + a[1] * i + b[1] * j;
+        const oz = z + dz + a[2] * i + b[2] * j;
+        const ao = emissive ? 1
+          : AO_CURVE[occlusion(solid, x + dx, y + dy, z + dz, a, b, i, j)];
+        g.position.push(
+          x + dx * (0.5 + bump) + a[0] * i * 0.5 + b[0] * j * 0.5,
+          y + dy * (0.5 + bump) + a[1] * i * 0.5 + b[1] * j * 0.5,
+          z + dz * (0.5 + bump) + a[2] * i * 0.5 + b[2] * j * 0.5
+        );
+        g.normal.push(dx, dy, dz);
+        g.color.push(tint.r * ao, tint.g * ao, tint.b * ao);
+      }
+      g.index.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+  }
+  const meshes = groups.map((buf) => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(buf.position, 3));
+    geo.setAttribute("normal", new THREE.Float32BufferAttribute(buf.normal, 3));
+    geo.setAttribute("color", new THREE.Float32BufferAttribute(buf.color, 3));
+    geo.setIndex(buf.index);
+    geo.computeBoundingSphere();
+    return geo;
+  });
+  return { meshes, faceCount };
+}
+
+function makeBuf() { return { position: [], normal: [], color: [], index: [] }; }
+
+/* classic three-neighbour voxel occlusion: two edges and the corner between
+ * them, all sampled in the layer the face is looking out across */
+function occlusion(solid, px, py, pz, a, b, i, j) {
+  const s1 = solid(px + a[0] * i, py + a[1] * i, pz + a[2] * i) ? 1 : 0;
+  const s2 = solid(px + b[0] * j, py + b[1] * j, pz + b[2] * j) ? 1 : 0;
+  if (s1 && s2) return 3;
+  const c = solid(px + a[0] * i + b[0] * j, py + a[1] * i + b[1] * j, pz + a[2] * i + b[2] * j) ? 1 : 0;
+  return s1 + s2 + c;
+}
+
+/* one Mesh per material group, so a whole world is a single draw call */
+function makeVoxelMesh(container, cells) {
+  const solid = (x, y, z) => container.get(x, y, z) !== T.AIR;
+  const { meshes, faceCount } = voxelGeometry(cells, solid);
+  const [solidGeo, glowGeo] = meshes;
+  const solidMat = new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: 0.86, metalness: 0.04, flatShading: true,
+  });
+  const glowMat = new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: true });
+  const mesh = new THREE.Mesh(solidGeo, solidMat);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  const glow = new THREE.Mesh(glowGeo, glowMat);
+  glow.frustumCulled = false;
+  mesh.add(glow);
+  return { mesh, glow, faceCount };
+}
+
+/* A dragon is three separate meshes so the wings can hinge: body, and two
+ * wing groups keyed to their shoulder. AO is baked only against the dragon
+ * itself - the cliff it stands on does not shadow it, and getting that
+ * would mean re-baking the world every time the beast moved. */
+function buildDragon(dragon, at, yaw, scale) {
+  const group = new THREE.Group();
+  const wings = [];
+  let blocks = 0;
+  for (const [bag, key, offset] of [
+    [dragon.body, "body", [0, 0, 0]],
+    [dragon.wingL, "wingL", [3, 2, 2]],
+    [dragon.wingR, "wingR", [3, 2, -2]],
+  ]) {
+    const cells = bag.cells();
+    blocks += cells.length;
+    const { mesh } = makeVoxelMesh(bag, cells);
+    if (key === "body") {
+      group.add(mesh);
+      continue;
+    }
+    // the hinge is the shoulder, so the wing mesh is offset into a pivot group
+    const pivot = new THREE.Group();
+    pivot.position.set(...offset);
+    pivot.add(mesh);
+    group.add(pivot);
+    wings.push(pivot);
+  }
+  group.position.set(at[0], at[1], at[2]);
+  group.rotation.y = yaw;
+  group.scale.setScalar(scale);
+  return { group, wingL: wings[0], wingR: wings[1], blocks, flying: false };
+}

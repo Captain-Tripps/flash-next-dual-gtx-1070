@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-15
+
+- **Added a sample scene: `projects/dragon-rider-aerie/`.** A self-contained Three.js voxel
+  aerie on a sea stack, 1,658 lines in one 66 KB `index.html`, authored end to end by
+  Qwen3.8-Flash-Next at the 128K window this repo measures. Three.js core only (no
+  `examples/jsm` addons), hand-written orbit rig, 45,981 blocks, 25,644 merged faces, 37-44
+  draw calls, 60 fps on the page's own counter at a 1264x625 window. The folder carries the
+  authored fragments,
+  `build.ps1 -Check` as the joiner, and two `agent-browser` scripts that assert the rendered
+  end state instead of reading screenshots.
+
 ## 2026-11-03
 
 - **Upgraded to Strata engine 0.1.56 / Control 0.1.56** (was 0.1.46). Fixed a crash-loop from four stale

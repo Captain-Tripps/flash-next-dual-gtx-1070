@@ -1,0 +1,203 @@
+
+/* ------------------------------------------------------------------ *
+ * Rope windlass. A shore capstan hauls cargo up a diagonal lift line to
+ * the derrick on the landing deck - you cannot walk a load up a vertical
+ * cliff. The load rides a travelling cradle on the line.
+ * ---------------------------------------------------------------- */
+
+function buildQuay() {
+  // stone pier out to the tideline, deck one lift over the sea, iron bollards
+  world.block([24, 5, 9], [26, 6, 15], T.HEWN);
+  world.block([24, 7, 9], [27, 7, 15], T.PAVE);
+  for (const z of [9, 12, 15]) world.fill(24, 8, z, T.IRON);
+  for (const x of [25, 26]) world.fill(x, 8, 9, T.IRON);
+
+  // beach ramp up to the dune, and a boat shed up on the grass
+  world.strand(28, 7, 12, 32, 8, 12, T.SAND);
+  world.block([31, 8, 15], [33, 9, 18], T.BEAM);
+  world.block([31, 10, 15], [33, 10, 18], T.SLATE);
+  world.carve(32, 32, 8, 9, 16, 18);
+  world.fill(31, 8, 17, T.CRATE);
+}
+
+function buildWindlass() {
+  // capstan frame, drum, ratchet pawl and the bar sweep the watchers shove
+  for (const z of [10, 13]) {
+    world.column(25, z, 8, 11, T.BEAM);
+    world.fill(26, 8, z, T.BRACE);
+    world.fill(24, 11, z, T.BEAM);
+  }
+  world.strand(25, 11, 10, 25, 11, 13, T.BEAM);       // drum axle
+  world.fill(25, 10, 11, T.ROPE);
+  world.fill(25, 10, 12, T.ROPE);
+  world.strand(26, 11, 13, 27, 12, 14, T.BEAM);       // pawl
+  world.strand(24, 12, 11, 24, 13, 13, T.BEAM);       // bar sweep
+
+  // lift line: capstan head up to the derrick's yard arm, standing clear
+  // outboard of the deck rail, load riding the lower span on a cradle
+  world.fill(25, 12, 10, T.IRON);                     // snatch block on the drum
+  world.fill(24, 19, 0, T.IRON);                      // whisker at the yard arm
+  world.strand(25, 12, 10, 24, 19, 0, T.ROPE, 2);
+  world.fill(25, 13, 8, T.BEAM);                      // travelling cradle
+  world.fill(25, 12, 8, T.ROPE);                      // strop
+  world.block([24, 10, 7], [26, 11, 9], T.CRATE);     // cargo sling below
+  world.fill(27, 8, 13, T.IRON);                      // quarter deck cleat
+  world.blob(26, 8, 11, 1, 0.4, 1, T.ROPE);           // spare coil
+}
+
+/* ------------------------------------------------------------------ *
+ * Boathouse: stone piers standing in the sea, a placked floor two lifts
+ * over the water, three timber walls, and the south end open to the swell
+ * so the cutter rides the flooded slip. The stair door is in the north
+ * wall, at the foot of the switchback.
+ * ---------------------------------------------------------------- */
+
+function buildBoathouse() {
+  const floorY = 9;
+  const x0 = 13, x1 = 18, z0 = 10, z1 = 15;
+
+  for (const [px, pz] of [[x0, z0], [x1, z0], [x0, z1], [x1, z1], [x1 - 3, z1]])
+    world.block([px, 5, pz], [px + 1, 8, pz + 1], T.HEWN);
+
+  world.block([x0, floorY, z0], [x1, floorY, z1], T.PLANK);
+  world.carve(16, 17, 6, 8, 13, 15);                  // flooded slip
+  for (const x of [16, 17]) world.strand(x, 6, 16, x, 8, 16, T.HEWN);
+
+  world.block([x0, floorY + 1, z0], [x1, floorY + 3, z0], T.BEAM);
+  world.block([x0, floorY + 1, z0], [x0, floorY + 3, z1], T.BEAM);
+  world.block([x1, floorY + 1, z0], [x1, floorY + 3, z1], T.BEAM);
+  world.carve(14, 15, floorY, floorY + 1, z0, z0);    // stair door
+  world.carve(16, 17, floorY + 1, floorY + 2, z1, z1);
+
+  world.block([x0, 13, z0], [x1, 13, z1], T.SLATE);
+  world.block([x0 + 1, 14, z0 + 1], [x1 - 1, 14, z1 - 1], T.SLATE);
+  world.fill(x1 - 1, floorY + 2, z1, T.FLAME);
+  world.fill(x1 - 1, floorY + 1, z1, T.IRON);
+
+  buildBoats();
+  buildBoatGear();
+}
+
+function buildBoats() {
+  // a cutter in the flooded slip: hull, gunwale, mast stowed against the wall
+  const bz = 14;
+  world.blob(16, 7, bz, 1.2, 0.9, 1.8, T.PLANK);
+  world.carve(16, 16, 7, 8, bz, bz);
+  world.strand(16, 8, bz - 1, 16, 8, bz + 1, T.BONE);
+  world.strand(16, 8, bz, 16, 11, bz, T.BEAM);
+  world.fill(15, 7, bz, T.BEAM);
+
+  // a dinghy on the beach below the quay, oars shipped
+  world.blob(23, 7, 17, 1.2, 0.7, 1, T.PLANK);
+  world.strand(22, 8, 16, 24, 8, 18, T.BEAM);
+}
+
+function buildBoatGear() {
+  // crates, tarps, barrels, a net of fish under the low beams
+  world.block([14, 10, 12], [15, 11, 13], T.CRATE);
+  world.fill(14, 12, 12, T.CRATE);
+  world.block([17, 10, 11], [18, 10, 12], T.HIDE);
+  world.blob(13, 10, 11, 1, 0.5, 1, T.ROPE);
+  for (const [x, z] of [[17, 13], [18, 14]]) world.fill(x, 10, z, T.IRON);
+}
+
+/* ------------------------------------------------------------------ *
+ * Switchback stairs. Seven landings zig-zag down the carved throat, each
+ * flight raked against the rock, every landing carried on timber needles
+  * driven into the cliff and standing in the sea.
+ * ---------------------------------------------------------------- */
+
+const STAIRS = [
+  { x0: 13, x1: 16, z0: 3, z1: 5, y: 21 },   // mouth, level with the plaza
+  { x0: 12, x1: 15, z0: 6, z1: 8, y: 19 },
+  { x0: 14, x1: 16, z0: 5, z1: 7, y: 17 },   // lands at the landing deck
+  { x0: 12, x1: 15, z0: 3, z1: 5, y: 15 },
+  { x0: 14, x1: 16, z0: 6, z1: 8, y: 13 },
+  { x0: 13, x1: 15, z0: 3, z1: 5, y: 11 },
+  { x0: 13, x1: 16, z0: 6, z1: 8, y: 9 },    // foot, at the boathouse door
+];
+
+function buildStairs() {
+  for (const l of STAIRS) {
+    world.block([l.x0, l.y, l.z0], [l.x1, l.y, l.z1], T.PLANK);
+    world.block([l.x0, l.y - 1, l.z0], [l.x1, l.y - 1, l.z1], T.BRACE);
+    world.rim(l.x0, l.x1, l.z1, l.z1, l.y + 1, T.BEAM);      // outer handrail
+    world.fill(l.x0, l.y + 1, l.z0, T.BEAM);
+    world.clear(l.x1, l.y + 1, l.z1);                        // gate where the flight lands
+  }
+
+  for (let i = 0; i + 1 < STAIRS.length; i++) buildFlight(STAIRS[i], STAIRS[i + 1]);
+
+  // needles: each landing sits on a pair of them, foot to the sea or the rock
+  for (const l of STAIRS) {
+    for (const [px, pz] of [[l.x0, l.z0], [l.x1, l.z1]]) {
+      world.column(px, pz, 6, l.y - 1, T.BEAM);
+      world.fill(px + 1, l.y - 2, pz, T.BRACE);
+      world.fill(px, l.y - 2, pz + 1, T.BRACE);
+    }
+  }
+
+  // sill at the throat mouth, and the footbridge over to the boathouse door
+  world.strand(11, PLAZA_Y, 4, 13, STAIRS[0].y, 4, T.PAVE);
+  world.block([13, STAIRS[6].y, 9], [16, STAIRS[6].y, 9], T.PLANK);
+
+  /* Torch posts on alternate landings. They are not decoration: a switchback
+   * in a narrow slot reads as a dark crack from outside, and the line of
+   * glowing dots down the throat is what tells the reader the crack is a stair
+   * and which way it goes. */
+  for (const l of [STAIRS[0], STAIRS[2], STAIRS[4], STAIRS[6]]) {
+    const px = l.x1, pz = l.z1;
+    world.column(px, pz, l.y + 1, l.y + 2, T.BEAM);
+    world.fill(px, l.y + 3, pz, T.EMBER);
+  }
+}
+
+/* one flight: a stepped mass of plank treads three tiles wide, braced
+ * underneath, running down the shared edge between two landings. A single
+ * tread between two landings two lifts apart is invisible from every level the
+ * aerie is judged at, and a stair you cannot see is a throat you cannot read.
+ * Newel posts on the seaward edge mark the pitch. */
+function buildFlight(upper, lower) {
+  const sx = midpoint(upper.x0, upper.x1, lower.x0, lower.x1);
+  const sz = midpoint(upper.z0, upper.z1, lower.z0, lower.z1);
+  // the run direction: whichever axis the two landing centres differ on
+  const runsZ = Math.abs(upper.z0 + upper.z1 - lower.z0 - lower.z1)
+    >= Math.abs(upper.x0 + upper.x1 - lower.x0 - lower.x1);
+  for (let i = 1; i < upper.y - lower.y; i++) {
+    const y = upper.y - i;
+    if (runsZ) {
+      world.block([sx - 1, y, sz], [sx + 1, y, sz], T.PLANK);
+      world.block([sx - 1, y - 1, sz], [sx + 1, y - 1, sz], T.BRACE);
+      world.fill(sx - 1, y + 1, sz, T.BEAM);
+      world.fill(sx + 1, y + 1, sz, T.BEAM);
+    } else {
+      world.block([sx, y, sz - 1], [sx, y, sz + 1], T.PLANK);
+      world.block([sx, y - 1, sz - 1], [sx, y - 1, sz + 1], T.BRACE);
+      world.fill(sx, y + 1, sz - 1, T.BEAM);
+      world.fill(sx, y + 1, sz + 1, T.BEAM);
+    }
+  }
+}
+
+function midpoint(a0, a1, b0, b1) {
+  return Math.round((Math.max(a0, b0) + Math.min(a1, b1)) / 2);
+}
+
+/* ------------------------------------------------------------------ *
+ * Riders: block figures - a watchman at the quay head, a man shoving the
+ * capstan bar, a tier at the stair mouth, a carer on the landing deck.
+ * ---------------------------------------------------------------- */
+
+function buildFigures() {
+  for (const [x, y, z, body, head] of [
+    [27, 8, 11, T.HIDE, T.BONE],
+    [24, 12, 12, T.PLANK, T.BONE],
+    [10, PLAZA_Y + 1, 6, T.HIDE, T.BONE],
+    [19, 18, 3, T.PLANK, T.BONE],
+    [15, 10, 12, T.PLANK, T.BONE],
+  ]) {
+    world.fill(x, y, z, body);
+    world.fill(x, y + 1, z, body);
+    world.fill(x, y + 2, z, head);
+  }
+}

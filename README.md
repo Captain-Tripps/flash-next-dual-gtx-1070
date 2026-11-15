@@ -106,3 +106,12 @@ Details: [`hardware.json`](hardware.json).
 Gotchas we hit along the way are listed in [NOTES.md](NOTES.md).
 
 This is one machine and one model. Expect different `--pcie-frac` winners with a different CPU or PCIe generation.
+
+## Sample scene
+
+[`projects/dragon-rider-aerie/`](projects/dragon-rider-aerie/) is a self-contained Three.js voxel
+scene - a dragonrider's aerie on a sea stack, 1,658 lines in one 66 KB `index.html`, written end to
+end by this model in this 128K window with nothing beyond three.js core. It is the only thing in
+this repo that shows what the rig is good at *producing*, rather than only how fast it reads
+tokens: 45,981 voxel blocks, 25,644 merged faces, 37-44 draw calls, 60 fps in the browser. Open
+`index.html`, no build step.

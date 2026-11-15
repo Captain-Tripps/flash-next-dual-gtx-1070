@@ -1,0 +1,93 @@
+
+/* ------------------------------------------------------------------ *
+ * Dragons. Built as block stacks in sparse Bags rather than in the world
+ * field: a dragon is a unit, it has to move, and its wings need to move
+ * independently of its body. Each dragon therefore gets three Bags -
+ * body, left wing, right wing - and the wings are keyed around their
+ * shoulder joint so the hinge sits where the geometry joins it.
+ *
+ * Local frame for every beast: head along +x, tail along -x, left wing toward
+ * +z, lift +y. A beast with no yaw therefore faces due east; yaw +PI/2 turns
+ * its head to -z, which is outward on the north perch.
+ * ---------------------------------------------------------------- */
+
+const DRAGON_SHAPES = {
+  /* Chunky on purpose: a 1-block-thick body reads as a line from the level view
+   * the aerie is watched from, so the barrel is five blocks through and the
+   * limbs are two. Compact overall, so a perched beast still fits its perch. */
+  body(bag) {
+    // trunk: barrel, ribbed belly, dorsal plate
+    bag.box(-3, 3, -2, 2, -2, 2, T.SCALE_A);
+    bag.box(-3, 3, -2, -1, -2, 2, T.SCALE_B);
+    bag.box(-3, 3, 2, 2, -1, 1, T.SCALE_B);
+
+    // shoulder mass, then neck raked up to the head
+    bag.box(4, 4, -1, 2, -2, 2, T.SCALE_A);
+    bag.box(5, 7, 0, 3, -1, 1, T.SCALE_A);
+    bag.box(8, 10, 2, 4, -1, 1, T.SCALE_A);
+    bag.box(11, 12, 2, 3, -1, 1, T.SCALE_A);
+    bag.fill(9, 4, -1, T.EYE);
+    bag.fill(9, 4, 1, T.EYE);
+    bag.strand(9, 5, -1, 10, 6, -1, T.BONE);          // horns
+    bag.strand(9, 5, 1, 10, 6, 1, T.BONE);
+    bag.fill(12, 4, 0, T.BONE);                        // nose plate
+
+    // tail: thick at the root, tapering, ending in a raked fluke
+    bag.strand(-4, -1, 0, -7, 0, 0, T.SCALE_A, 2);
+    bag.strand(-7, 0, 0, -10, 1, 0, T.SCALE_A, 1);
+    bag.fill(-11, 1, 0, T.WEB);
+    bag.fill(-11, 2, 0, T.WEB);
+    bag.fill(-10, 2, 0, T.WEB);
+    bag.strand(-11, 1, -1, -11, 3, -1, T.BONE);
+    bag.strand(-11, 1, 1, -11, 3, 1, T.BONE);
+
+    // spine ridge: a fin of spikes down the back
+    for (let x = -3; x <= 4; x += 2) {
+      bag.fill(x, 3, 0, T.SCALE_B);
+      if (x % 4 === 1) bag.fill(x, 4, 0, T.SCALE_B);
+    }
+
+    // limbs, folded with the claws tucked against the flanks
+    for (const x of [3, -2]) {
+      bag.box(x, x, -2, -3, -2, -1, T.SCALE_A);
+      bag.strand(x, -3, -1, x, -4, 1, T.SCALE_A);
+      bag.fill(x, -4, 1, T.BONE);
+    }
+    return bag;
+  },
+
+  /* wing keyed to (0,0,0) at its shoulder; fingers run out along -z and +z */
+  wing(bag, mirror) {
+    const s = mirror ? -1 : 1;
+    bag.strand(0, 0, s * 1, 2, 1, s * 7, T.SCALE_A);          // leading arm
+    bag.strand(2, 1, s * 7, -1, 0, s * 9, T.BONE);            // outer finger
+    bag.strand(0, 0, s * 1, -3, 0, s * 5, T.BONE);            // radial
+    for (let z = 1; z <= 8; z++) {
+      const lean = Math.max(-3, Math.min(1, Math.round(z * 0.35) - 2));
+      for (let x = lean; x <= 2; x++) bag.fill(x, 0, s * z, T.WEB);
+    }
+    for (let z = 1; z <= 7; z++) bag.fill(2, 1, s * z, T.WEB);  // scalloped top
+    return bag;
+  },
+};
+
+/* Each beast is the authored shape with a pelt swap: SCALE_A/SCALE_B are the
+ * body colours, so one map per kind gives three clearly different animals
+ * without three copies of the shape. Membranes stay WEB for all of them, which
+ * is what makes the wing outline read against any pelt. */
+const DRAGON_PELTS = {
+  copper: [],
+  gold: [[T.SCALE_A, T.SCALE_C], [T.SCALE_B, T.EGG]],
+  broadwing: [[T.SCALE_A, T.EGG], [T.SCALE_B, T.BONE]],
+  charcoal: [[T.SCALE_A, T.SOOT], [T.SCALE_B, T.IRON]],
+};
+
+function makeDragon(kind) {
+  const body = new Bag();
+  DRAGON_SHAPES.body(body);
+  for (const [from, to] of DRAGON_PELTS[kind] || [])
+    for (const [x, y, z, t] of body.cells()) if (t === from) body.set(x, y, z, to);
+  const wingL = DRAGON_SHAPES.wing(new Bag(), false);
+  const wingR = DRAGON_SHAPES.wing(new Bag(), true);
+  return { body, wingL, wingR };
+}
