@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LGA 3647 Socket — mechanical showcase</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d10; overflow: hidden; }
+  #viewport { display: block; width: 100vw; height: 100vh; }
+  #error-overlay {
+    position: fixed; inset: 0; display: none; place-content: center;
+    padding: 2rem; font: 500 1rem/1.5 system-ui, sans-serif; color: #f2d9a0;
+    background: #14171c; white-space: pre-wrap;
+  }
+  #error-overlay.visible { display: grid; }
+</style>
+</head>
+<body>
+<canvas id="viewport"></canvas>
+<div id="error-overlay"></div>
+<script type="module">
+"use strict";
+
+const MAX_FRAME_MS = 50; // a backgrounded tab hands us 1 Hz deltas; never let them through
+
+const canvas = document.getElementById("viewport");
+const overlay = document.getElementById("error-overlay");
+
+function reportFailure(cause, detail) {
+  overlay.textContent = detail;
+  overlay.classList.add("visible");
+  window.__scene = {
+    ok: false, cause, parts: {}, programs: {}, frames: 0,
+    padCount: 0, plateAngleDeg: 0, azimuthDeg: 0,
+  };
+}
+
+function boot() {
+  const gl = canvas.getContext("webgl2", { antialias: true });
+  if (!gl) {
+    reportFailure("webgl2-unavailable", "WebGL2 is not available in this browser.\n" +
+      "The socket render needs WebGL2 (antialias). Check that hardware acceleration is on.");
+    return;
+  }
+
+  const scene = {
+    ok: true, cause: "", parts: {}, programs: {}, frames: 0,
+    padCount: 0, plateAngleDeg: 0, azimuthDeg: 0,
+  };
+  window.__scene = scene;
+
+  gl.clearColor(0.05, 0.06, 0.07, 1);
+  gl.enable(gl.DEPTH_TEST);
+
+  let last = performance.now();
+  const frame = (now) => {
+    const dtMs = Math.min(Math.max(now - last, 0), MAX_FRAME_MS);
+    last = now;
+    scene.frames++;
+    scene.azimuthDeg = (scene.azimuthDeg + dtMs * 0.004) % 360;
+
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}
+
+boot();
+</script>
+</body>
+</html>
