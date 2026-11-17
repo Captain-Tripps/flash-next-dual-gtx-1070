@@ -87,6 +87,40 @@ check("no_console_errors", () => {
   if (serious.length) throw new Error(serious.slice(0, 5).join("\n      "));
 });
 
+// --------------------------------------------- shader + pixel end-state probes
+check("every_shader_program_compiles_and_links_clean", () => {
+  const progs = evalJs("return JSON.stringify((window.__scene && window.__scene.programs) || {});");
+  const names = Object.keys(progs);
+  if (names.length < 2) throw new Error(`no programs in __scene.programs (have [${names}])`);
+  for (const required of ["std", "pad"]) {
+    if (!progs[required]) throw new Error(`no "${required}" program (have [${names}])`);
+  }
+  for (const [name, p] of Object.entries(progs)) {
+    if (p.compiled === false) throw new Error(`${name} failed to compile: ${p.infoLog}`);
+    if (p.linked !== true) throw new Error(`${name} failed to link: ${p.infoLog}`);
+    if ((p.infoLog || "") !== "") throw new Error(`${name} reported a log: ${p.infoLog}`);
+  }
+  return names.join(", ");
+});
+
+const frameStats = () => evalJs("return JSON.stringify(window.__api.frameStats({ step: 3 }));");
+
+check("the_socket_covers_at_least_25_percent_of_the_view", () => {
+  const s = frameStats();
+  if (!(s.nonBackgroundRatio >= 0.25)) {
+    throw new Error(`coverage ${(s.nonBackgroundRatio * 100).toFixed(1)}% of ${s.sampled} px (maxLuma ${s.maxLuma})`);
+  }
+  return `coverage ${(s.nonBackgroundRatio * 100).toFixed(1)}%`;
+});
+
+check("at_least_3_percent_of_pixels_are_gold_pads", () => {
+  const s = frameStats();
+  if (!(s.goldRatio >= 0.03)) {
+    throw new Error(`gold ${(s.goldRatio * 100).toFixed(2)}% (samples: gold ${s.goldCount} / ${s.sampled})`);
+  }
+  return `gold ${(s.goldRatio * 100).toFixed(2)}% of ${s.sampled} px`;
+});
+
 if (process.argv.includes("--shot")) {
   const out = process.argv[process.argv.indexOf("--shot") + 1] || join(HERE, "render.png");
   run(["screenshot", out]);

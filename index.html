@@ -561,6 +561,7 @@ function buildParts() {
   const BR_Y = SUB_T + 0.05;            // ILS plate rides on the substrate
   const HINGE_Y = BR_Y + 3.4;           // hinge rod sits above the screw bosses
   const HINGE_Z = HZ + 3.5;             // rod line lies outside the envelope
+  const PLATE_OPEN_DEG = 105;           // showcase default, see loadPlate below
 
   // Keying corner: corner 3's quarter fillet becomes a 45deg straight cut, so
   // the package reads as oriented (and the load plate's corner notch has a mate).
@@ -585,9 +586,15 @@ function buildParts() {
   padField.instanceCount = layout.instanceCount;
   padField.instances = layout.data;
 
+  // The ILS is a frame, not a solid lid: a real lid carries a window over the
+  // pad field, and a showcase model that hides all 3,647 contacts behind a
+  // plate shows nothing worth showcasing. Window leaves the perimeter band and
+  // the four corner bosses standing.
   const bracket = [
-    extrudeProfile(rectProfile(-33, -24.5, 33, 24.5), { depth: BR_T, chamfer: 0.12 }),
-    extrudeProfile(rectProfile(-4, -30.5, 4, 30.5), { depth: BR_T, chamfer: 0.1 }),
+    extrudeProfile(rectProfile(-33, -24.5, 33, 24.5),
+      { depth: BR_T, chamfer: 0.12, hole: rectProfile(-29.5, -21, 29.5, 21) }),
+    extrudeProfile(rectProfile(-37.2, -28.8, -33, 28.8), { depth: BR_T, chamfer: 0.1 }),
+    extrudeProfile(rectProfile(33, -28.8, 37.2, 28.8), { depth: BR_T, chamfer: 0.1 }),
     ...[-30, 30].flatMap((x) => [-27, 27].map((z) =>
       extrudeProfile(translatedProfile(circleProfile(3, 10), x, z), { depth: 2.4 }))),
   ];
@@ -596,9 +603,17 @@ function buildParts() {
 
   // Load plate: hinge edge at local z=0, body spans toward -z (latch side).
   // Positive local X rotation at the hinge rod lifts the far end (Task 7).
+  //
+  // The showcase default is hinged open: closed, the plate buries the entire land
+  // grid behind steel, so the one feature worth showcasing on an LGA socket - the
+  // 3,647-contact field - never reaches the camera.
   const loadPlate = makePart("loadPlate",
     [extrudeProfile(rectProfile(-33, -68, 33, 1.5), { depth: PLATE_T, chamfer: 0.2 })],
-    { pos: [0, HINGE_Y + 0.8, HINGE_Z], rot: {}, scale: 1 });
+    {
+      pos: [0, HINGE_Y + 0.8, HINGE_Z],
+      rot: { x: (PLATE_OPEN_DEG * Math.PI) / 180, y: 0, z: 0 },
+      scale: 1,
+    });
 
   // Rod extruded along its profile +Y, then z-rolled onto the world X axis:
   // rot.z=-pi/2 maps +Y to +X, which is where a hinge line belongs.
@@ -621,28 +636,697 @@ function buildParts() {
   return { substrate, frame, padField, brBracket, loadPlate, hingeBar, latchLever, stiffenRing };
 }
 
+// ---------------------------------------------------------------- materials & lights
+/*
+ * One studio rig, hand-lit: key (warm, raking), rim (cool, back-left), fill
+ * (soft bounce from under the socket). Directions are normalised on the JS side
+ * and baked into the shaders as consts, so the lighting is part of the model
+ * rather than a per-frame uniform shuffle. Down-vector lights were tried and
+ * rejected: they blow the anodized frame out and flatten the gold field.
+ */
+const LIGHTS = [
+  { name: "KEY", dir: norm3([0.45, 0.80, 0.35]), color: [1.30, 1.22, 1.14] },
+  { name: "RIM", dir: norm3([-0.72, 0.24, -0.60]), color: [0.52, 0.64, 0.95] },
+  { name: "FILL", dir: norm3([-0.25, -0.55, 0.78]), color: [0.34, 0.32, 0.30] },
+];
+
+/*
+ * Physically-ish material parameters. Gold's F0 is the real IOR-fresnello
+ * reflectance of the alloy (1.00, 0.766, 0.336); metals get their colour from
+ * F0, so their albedo is the same tint multiplied down a hair.
+ *
+ * The substrate is dark: a real LGA substrate is near-black ceramic, and a light
+ * grey one shows between the pads and washes the whole field out, which both
+ * reads wrong and costs the probe its gold ratio. Gold is deliberately rough -
+ * immersion-gold plating is microscopically matte, and a mirror finish would
+ * blow the key light into a white streak down the middle of the field.
+ */
+const MATERIALS = {
+  gold: { base: [0.86, 0.66, 0.30], f0: [1.0, 0.766, 0.336], rough: 0.40, metal: 1.0 },
+  steel: { base: [0.68, 0.70, 0.74], f0: [0.92, 0.93, 0.95], rough: 0.22, metal: 1.0 },
+  brass: { base: [0.78, 0.58, 0.26], f0: [0.96, 0.72, 0.30], rough: 0.30, metal: 1.0 },
+  anodize: { base: [0.085, 0.09, 0.105], f0: [0.55, 0.56, 0.60], rough: 0.40, metal: 0.85 },
+  ceramic: { base: [0.13, 0.135, 0.15], f0: [0.05, 0.05, 0.05], rough: 0.60, metal: 0.0 },
+};
+
+const PART_MATERIAL = {
+  substrate: "ceramic", frame: "anodize", padField: "gold", brBracket: "steel",
+  loadPlate: "steel", hingeBar: "brass", latchLever: "brass", stiffenRing: "steel",
+};
+
+function norm3(v) {
+  const len = Math.hypot(v[0], v[1], v[2]);
+  return [v[0] / len, v[1] / len, v[2] / len];
+}
+
+// ---------------------------------------------------------------- shaders
+// Shared BRDF code, GLSL-compiled into both programs. Nothing here is a texture
+// or a light-list: the environment is analytic, so one file stays one file.
+const GLSL_BxDF = `
+const float PI = 3.141592653589793;
+const vec3 SKY_TINT = vec3(0.30, 0.36, 0.46);
+const vec3 GROUND_TINT = vec3(0.17, 0.13, 0.10);
+const float AMBIENT = 0.14;
+const float SKY_SPEC = 0.45;
+
+vec3 fresnelSchlick(vec3 f0, float u) {
+  return mix(f0, vec3(1.0), pow(1.0 - clamp(u, 0.0, 1.0), 5.0));
+}
+
+float ggxD(float NoH, float a2) {
+  float d = NoH * NoH * (a2 - 1.0) + 1.0;
+  return a2 / (PI * d * d);
+}
+
+float smithVisibility(float NoV, float NoL, float a2) {
+  float lambdaV = NoL * sqrt(NoV * NoV * (1.0 - a2) + a2);
+  float lambdaL = NoV * sqrt(NoL * NoL * (1.0 - a2) + a2);
+  return 0.5 / max(lambdaV + lambdaL, 1e-6);
+}
+
+vec3 lightContribution(vec3 N, vec3 V, vec3 L, vec3 LC, vec3 albedo, vec3 f0,
+                       float rough, float metal) {
+  float NoL = max(dot(N, L), 0.0);
+  if (NoL <= 0.0) return vec3(0.0);
+  float NoV = max(dot(N, V), 1e-4);
+  vec3 H = normalize(L + V);
+  float NoH = max(dot(N, H), 0.0);
+  float VoH = clamp(dot(V, H), 0.0, 1.0);
+  float a = clamp(rough, 0.04, 1.0);
+  float a2 = a * a; a2 *= a2;
+  vec3 F = fresnelSchlick(f0, VoH);
+  vec3 spec = vec3(ggxD(NoH, a2) * smithVisibility(NoV, NoL, a2)) * F;
+  vec3 diffW = (vec3(1.0) - F) * (1.0 - metal);
+  return (albedo * diffW + spec) * (NoL * LC);
+}
+
+vec3 shadeSurface(vec3 N, vec3 V, vec3 albedo, vec3 f0, float rough, float metal, float ao) {
+  vec3 col = vec3(0.0);
+  col += lightContribution(N, V, KEY_DIR, KEY_COLOR, albedo, f0, rough, metal);
+  col += lightContribution(N, V, RIM_DIR, RIM_COLOR, albedo, f0, rough, metal);
+  col += lightContribution(N, V, FILL_DIR, FILL_COLOR, albedo, f0, rough, metal);
+
+  // Analytic hemisphere environment: no IBL probe in a one-file build, so the
+  // ambient is a two-tint lerp over the normal and the sky gloss is a pow.
+  vec3 hemi = mix(GROUND_TINT, SKY_TINT, 0.5 + 0.5 * N.y);
+  col += albedo * hemi * AMBIENT * ao * (vec3(1.0) - f0 * 0.35);
+  vec3 R = reflect(-V, N);
+  float skyUp = clamp(R.y * 0.5 + 0.5, 0.0, 1.0);
+  float gloss = mix(1.0, 14.0, 1.0 - clamp(rough, 0.0, 1.0));
+  col += f0 * SKY_SPEC * pow(skyUp, gloss) * ao;
+  return col;
+}
+
+// Fake contact shadow: a surface sitting on a plane gets its ambient pulled
+// down as it approaches that plane, hemispherical-ish, cheap, no shadow map.
+float contactAO(float worldY, float planeY, float facingUp) {
+  float h = max(worldY - planeY, 0.0);
+  float t = 1.0 - exp(-h * 1.1);
+  float facing = 0.5 + 0.5 * max(facingUp, 0.0);
+  return mix(1.0 - 0.45 * facing, 1.0, t);
+}
+
+vec3 tonemapACES(vec3 x) {
+  const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+`;
+
+// The light rig baked into every shading program as constants (see LIGHTS):
+// normalised in JS, so the numbers in the GLSL are honest vectors.
+const GLSL_LIGHT_CONSTANTS = LIGHTS.map((l) =>
+  `const vec3 ${l.name}_DIR = vec3(${l.dir.map((v) => v.toFixed(5)).join(", ")});\n` +
+  `const vec3 ${l.name}_COLOR = vec3(${l.color.map((v) => v.toFixed(5)).join(", ")});`
+).join("\n");
+
+// Only the lens falloff is needed by the backdrop; the full BRDF is for the
+// shaded parts. Keeping them apart stops the backdrop dragging a light rig and
+// a BRDF into a program that draws one triangle.
+const GLSL_VIGNETTE = `
+// Studio lens falloff in shader space: multiply by this, don't subtract.
+float vignetteFactor(vec2 ndcFromCentre, float strength) {
+  float r = length(ndcFromCentre);
+  return clamp(1.0 - strength * r * r, 0.0, 1.0);
+}
+`;
+
+const GLSL_SHADING = `${GLSL_LIGHT_CONSTANTS}\n${GLSL_BxDF}\n${GLSL_VIGNETTE}`;
+
+const VS_STD = `#version 300 es
+precision highp float;
+uniform mat4 u_viewProj;
+uniform mat4 u_model;
+uniform mat3 u_normalMat;
+in vec3 a_pos;
+in vec3 a_normal;
+out vec3 v_worldPos;
+out vec3 v_normal;
+void main() {
+  vec4 world = u_model * vec4(a_pos, 1.0);
+  v_worldPos = world.xyz;
+  v_normal = u_normalMat * a_normal;
+  gl_Position = u_viewProj * world;
+}`;
+
+const FS_STD = `#version 300 es
+precision highp float;
+in vec3 v_worldPos;
+in vec3 v_normal;
+uniform vec3 u_camPos;
+uniform vec3 u_base;
+uniform vec3 u_f0;
+uniform float u_rough;
+uniform float u_metal;
+uniform float u_contactY;
+uniform float u_exposure;
+uniform vec2 u_resolution;
+out vec4 outColor;
+${GLSL_SHADING}
+void main() {
+  vec3 N = normalize(v_normal);
+  vec3 toEye = u_camPos - v_worldPos;
+  float eyeDist = length(toEye);
+  vec3 V = eyeDist > 1e-4 ? toEye / eyeDist : vec3(0.0, 1.0, 0.0);
+  float ao = contactAO(v_worldPos.y, u_contactY, N.y);
+  vec3 col = shadeSurface(N, V, u_base, u_f0, u_rough, u_metal, ao) * u_exposure;
+  col = pow(tonemapACES(col), vec3(1.0 / 2.2));
+  vec2 ndc = (gl_FragCoord.xy / u_resolution) * 2.0 - 1.0;
+  col *= vignetteFactor(ndc, 0.28);
+  outColor = vec4(col, 1.0);
+}`;
+
+const VS_PAD = `#version 300 es
+precision highp float;
+uniform mat4 u_viewProj;
+uniform mat4 u_model;
+uniform mat3 u_normalMat;
+uniform float u_time;
+in vec3 a_pos;
+in vec3 a_normal;
+in vec3 a_padXZ;
+in vec2 a_padTone;
+out vec3 v_worldPos;
+out vec3 v_normal;
+out float v_tone;
+out float v_shimmer;
+void main() {
+  vec3 p = a_pos + vec3(a_padXZ.x, 0.0, a_padXZ.y);
+  vec4 world = u_model * vec4(p, 1.0);
+  v_worldPos = world.xyz;
+  v_normal = u_normalMat * a_normal;
+  v_tone = a_padTone.x;
+  // The field twinkles because each pad has its own phase: a slow sine, scaled
+  // to a few percent of brightness, never a full-blown strobe.
+  v_shimmer = 1.0 + 0.07 * sin(a_padTone.y + u_time * 0.6);
+  gl_Position = u_viewProj * world;
+}`;
+
+const FS_PAD = `#version 300 es
+precision highp float;
+in vec3 v_worldPos;
+in vec3 v_normal;
+in float v_tone;
+in float v_shimmer;
+uniform vec3 u_camPos;
+uniform vec3 u_base;
+uniform vec3 u_f0;
+uniform float u_rough;
+uniform float u_metal;
+uniform float u_contactY;
+uniform float u_exposure;
+uniform vec2 u_resolution;
+out vec4 outColor;
+${GLSL_SHADING}
+void main() {
+  vec3 N = normalize(v_normal);
+  vec3 toEye = u_camPos - v_worldPos;
+  float eyeDist = length(toEye);
+  vec3 V = eyeDist > 1e-4 ? toEye / eyeDist : vec3(0.0, 1.0, 0.0);
+  // Per-instance tone: roughness spreads over a 0.10 range, and the hue leans
+  // warmer/cool-er so the field shimmers as the camera moves instead of
+  // reading like one flat paint job.
+  float rough = u_rough + (v_tone - 0.5) * 0.10;
+  vec3 base = u_base * mix(vec3(1.0), vec3(1.04, 0.94, 0.84), v_tone - 0.5);
+  vec3 f0 = u_f0;
+  float ao = contactAO(v_worldPos.y, u_contactY, N.y);
+  vec3 col = shadeSurface(N, V, base, f0, rough, u_metal, ao) * u_exposure * v_shimmer;
+  col = pow(tonemapACES(col), vec3(1.0 / 2.2));
+  vec2 ndc = (gl_FragCoord.xy / u_resolution) * 2.0 - 1.0;
+  col *= vignetteFactor(ndc, 0.28);
+  outColor = vec4(col, 1.0);
+}`;
+
+// Studio backdrop: a vertical gradient with a radial falloff, dark enough that
+// the harness can tell part-from-backdrop with one threshold.
+const VS_BG = `#version 300 es
+precision highp float;
+in vec2 a_ndc;
+void main() { gl_Position = vec4(a_ndc, 0.5, 1.0); }`;
+
+const FS_BG = `#version 300 es
+precision highp float;
+uniform vec2 u_resolution;
+out vec4 outColor;
+${GLSL_VIGNETTE}
+void main() {
+  vec2 uv = gl_FragCoord.xy / u_resolution;
+  vec3 top = vec3(0.075, 0.085, 0.105);
+  vec3 bottom = vec3(0.020, 0.023, 0.030);
+  vec3 c = mix(bottom, top, smoothstep(0.0, 1.0, uv.y));
+  vec2 ndc = uv * 2.0 - 1.0;
+  c *= vignetteFactor(ndc, 0.85);
+  outColor = vec4(c, 1.0);
+}`;
+
+const PROGRAM_UNIFORM_NAMES = {
+  std: ["u_viewProj", "u_model", "u_normalMat", "u_camPos", "u_base", "u_f0",
+        "u_rough", "u_metal", "u_contactY", "u_exposure", "u_resolution"],
+  pad: ["u_viewProj", "u_model", "u_normalMat", "u_camPos", "u_base", "u_f0",
+        "u_rough", "u_metal", "u_contactY", "u_exposure", "u_resolution", "u_time"],
+  bg: ["u_resolution"],
+};
+
+const PROGRAM_ATTRIB_NAMES = {
+  std: ["a_pos", "a_normal"],
+  pad: ["a_pos", "a_normal", "a_padXZ", "a_padTone"],
+  bg: ["a_ndc"],
+};
+
+/**
+ * Compiles and links one program, publishing a diagnostics entry the harness
+ * reads directly (`compiled`/`linked`/`infoLog`) instead of trusting GL state.
+ * A compile failure becomes a thrown Error, because a black frame is a worse
+ * failure than a loud one.
+ */
+function createProgramRecord(gl, name) {
+  const sources = { std: [VS_STD, FS_STD], pad: [VS_PAD, FS_PAD], bg: [VS_BG, FS_BG] }[name];
+  const report = {
+    name,
+    compiled: true, linked: true, infoLog: "",
+    vertexSource: sources[0], fragmentSource: sources[1],
+    lights: LIGHTS.map((l) => ({ name: l.name, dir: l.dir, color: l.color })),
+  };
+  const shaders = [];
+  const shaderPairs = [[gl.VERTEX_SHADER, sources[0]], [gl.FRAGMENT_SHADER, sources[1]]];
+  for (const [type, src] of shaderPairs) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      report.compiled = false;
+      report.infoLog = `${name}: ${gl.getShaderInfoLog(sh)}`;
+      throw Object.assign(new Error(report.infoLog), { programReport: report });
+    }
+    shaders.push(sh);
+  }
+  const program = gl.createProgram();
+  for (const sh of shaders) gl.attachShader(program, sh);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    report.linked = false;
+    report.infoLog = `${name}: ${gl.getProgramInfoLog(program)}`;
+    throw Object.assign(new Error(report.infoLog), { programReport: report });
+  }
+  report.infoLog = gl.getProgramInfoLog(program) || "";
+
+  const uniforms = {}, attribs = {};
+  for (const n of PROGRAM_UNIFORM_NAMES[name]) uniforms[n] = gl.getUniformLocation(program, n);
+  for (const n of PROGRAM_ATTRIB_NAMES[name]) attribs[n] = gl.getAttribLocation(program, n);
+  return { program, uniforms, attribs, report };
+}
+
+// ---------------------------------------------------------------- renderer
+/*
+ * One interleaved VBO per part: position (float3) then normal (float3), a
+ * 24-byte stride. The harness pins STRIDE_BYTES, so changing the layout has to
+ * touch the harness too.
+ */
+const STRIDE_BYTES = 24;
+const INSTANCE_STRIDE_BYTES = 16; // 4 floats per pad: x, z, tone, phase
+
+function interleavedGeometry(geom) {
+  const vertexCount = geom.pos.length / 3;
+  const badIndex = geom.idx.find((i) => i >= vertexCount);
+  if (badIndex !== undefined) {
+    throw new RangeError(`index ${badIndex} out of range for ${vertexCount} vertices`);
+  }
+  const floats = new Float32Array(vertexCount * 6);
+  floats.set(geom.pos, 0);
+  floats.set(geom.nrm, geom.pos.length);
+  return floats;
+}
+
+/*
+ * Uint16 indices unless a part genuinely needs more than 65k vertices. The GL
+ * enum is read from the context rather than hardcoded, so a future context with
+ * OES_element_index_uint disabled still fails loudly instead of drawing noise.
+ */
+function indexBufferFor(gl, geom) {
+  const vertexCount = geom.pos.length / 3;
+  return vertexCount > 0xffff
+    ? { data: new Uint32Array(geom.idx), glType: gl.UNSIGNED_INT }
+    : { data: new Uint16Array(geom.idx), glType: gl.UNSIGNED_SHORT };
+}
+
+/**
+ * Uploads one part into a VAO the draw path only has to bind. Attribute
+ * pointers are wired from the program record at upload time, so the VAO and the
+ * shader agree on locations by construction and the per-frame path never
+ * re-derives them.
+ */
+function uploadPartToGpu(gl, part, rec) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  const vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, interleavedGeometry(part.geometry), gl.STATIC_DRAW);
+  bindInterleavedAttribs(gl, rec, [
+    [rec.attribs.a_pos, 3, 0],
+    [rec.attribs.a_normal, 3, 12],
+  ]);
+
+  let instanceBuffer = null;
+  if (part.instances) {
+    // The instance stream has to be the bound ARRAY_BUFFER while the pointers
+    // are set, or they silently point at the vertex VBO. That ordering bug drew
+    // 3,647 copies of pad zero, which looked almost plausible.
+    instanceBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, part.instances, gl.STATIC_DRAW);
+    bindInterleavedAttribs(gl, rec, [
+      [rec.attribs.a_padXZ, 3, 0],
+      [rec.attribs.a_padTone, 2, 12],
+    ], INSTANCE_STRIDE_BYTES, 1);
+  }
+
+  const indexBuf = indexBufferFor(gl, part.geometry);
+  const ibo = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indexBuf.data, gl.STATIC_DRAW);
+
+  gl.bindVertexArray(null);
+  return {
+    part, vao, vbo, ibo, instanceBuffer,
+    indexCount: part.geometry.idx.length,
+    indexType: indexBuf.glType,
+    modelMatrix: mat4.identity(),
+  };
+}
+
+function bindInterleavedAttribs(gl, rec, entries, stride = STRIDE_BYTES, divisor = 0) {
+  for (const [attrib, size, offset] of entries) {
+    if (attrib < 0) continue; // optimised away by the linker: still legal, skip it
+    gl.enableVertexAttribArray(attrib);
+    gl.vertexAttribPointer(attrib, size, gl.FLOAT, false, stride, offset);
+    if (divisor) gl.vertexAttribDivisor(attrib, divisor);
+  }
+}
+
+/** A fullscreen triangle for the backdrop: two clipped corners and one big tri. */
+function uploadBackdropToGpu(gl, rec) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  bindInterleavedAttribs(gl, rec, [[rec.attribs.a_ndc, 2, 0]], 0);
+  gl.bindVertexArray(null);
+  return { vao, vbo };
+}
+
+/*
+ * The showcase pose: looking down the socket's face rather than across it. A
+ * grazing 35deg elevation made the whole assembly read as a thin sliver, and the
+ * pad field - the one thing worth showcasing on an LGA socket - was edge-on.
+ * ~56deg elevation keeps the land grid facing the camera while still showing the
+ * frame wall and hinge rod.
+ */
+const VIEW = { azDeg: 34, elevDeg: 56, dist: 100, target: [0, 3, 0] };
+const EXPOSURE = 1.18;
+const FOV_DEG = 30;
+
+const cameraState = {
+  eye: [0, 0, 0],
+  view: mat4.identity(),
+  projection: mat4.identity(),
+  viewProj: mat4.identity(),
+};
+const scratch = { normalMat: new Float32Array(9), pixels: null };
+
+/** Builds eye + view + viewProj from orbit parameters. No allocation per call. */
+function updateCamera({
+  azDeg = VIEW.azDeg, elevDeg = VIEW.elevDeg, dist = VIEW.dist, target = VIEW.target,
+} = {}) {
+  const az = (azDeg * Math.PI) / 180;
+  const el = (elevDeg * Math.PI) / 180;
+  cameraState.eye = [
+    dist * Math.cos(el) * Math.sin(az),
+    dist * Math.sin(el),
+    dist * Math.cos(el) * Math.cos(az),
+  ];
+  mat4.lookAt(cameraState.view, cameraState.eye, target, [0, 1, 0]);
+  mat4.perspective(cameraState.projection, {
+    fovyDeg: FOV_DEG,
+    aspect: canvas.width / Math.max(canvas.height, 1),
+    near: 1,
+    far: 4000,
+  });
+  mat4.multiply(cameraState.viewProj, cameraState.projection, cameraState.view);
+  return cameraState;
+}
+
+/**
+ * One studio frame: backdrop, seven shaded parts, then the 3,647 pads in a
+ * single instanced draw. Returns the number of draw calls issued.
+ */
+function drawScene(viewProj, timeMs, camPos = cameraState.eye) {
+  if (!activeRenderer) throw new Error("drawScene called before boot(): no renderer to draw with");
+  return activeRenderer.draw(viewProj, timeMs, camPos);
+}
+
+const LUMA = [0.2126, 0.7152, 0.0722];
+
+/*
+ * Frame analysis, kept GL-free so the thresholds are unit-testable against a
+ * synthetic frame. "Gold-ish" means red dominates blue with green bright enough
+ * to be a lit pad rather than a shaded brown one; non-background is any pixel
+ * brighter than the backdrop or carrying real chroma.
+ */
+function analysePixels(pixels, width, height, { step = 1 } = {}) {
+  if (!(width > 0) || !(height > 0)) throw new RangeError(`bad frame size ${width}x${height}`);
+  if (pixels.length < width * height * 4) {
+    throw new RangeError(`buffer holds ${pixels.length / 4} pixels, fewer than ${width * height}`);
+  }
+  const s = Math.max(1, Math.round(step));
+  let sampled = 0, goldCount = 0, nonBackgroundCount = 0, maxLuma = 0;
+  for (let y = 0; y < height; y += s) {
+    for (let x = 0; x < width; x += s) {
+      const i = (y * width + x) * 4;
+      const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+      const luma = LUMA[0] * r + LUMA[1] * g + LUMA[2] * b;
+      const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+      sampled++;
+      if (luma > maxLuma) maxLuma = luma;
+      if (luma > 60 || chroma > 14) nonBackgroundCount++;
+      if (r > b + 20 && g > 60) goldCount++;
+    }
+  }
+  return {
+    sampled, goldCount, nonBackgroundCount, maxLuma,
+    goldRatio: goldCount / sampled,
+    nonBackgroundRatio: nonBackgroundCount / sampled,
+  };
+}
+
+/**
+ * Reads the drawing buffer back and reports coverage. The caller has to draw a
+ * frame first: with preserveDrawingBuffer off, reading after the frame has
+ * presented hands back an unspecified buffer, so the probe redraws by default.
+ */
+function frameStats({ step = 1, drawFirst = true } = {}) {
+  if (!activeRenderer) throw new Error("frameStats called before boot(): no renderer to read");
+  if (drawFirst) drawScene(cameraState.viewProj, lastFrameTimeMs, cameraState.eye);
+  const gl = activeRenderer.gl;
+  const w = canvas.width, h = canvas.height;
+  if (!scratch.pixels || scratch.pixels.length !== w * h * 4) {
+    scratch.pixels = new Uint8Array(w * h * 4);
+  }
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, scratch.pixels);
+  return analysePixels(scratch.pixels, w, h, { step });
+}
+
+/** Sizes the backing store to the CSS box, DPR capped at 2 for the iGPU budget. */
+function resizeCanvas(gl, size = canvas) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const cssW = size.clientWidth || size.width || 1;
+  const cssH = size.clientHeight || size.height || 1;
+  const w = Math.max(1, Math.round(cssW * dpr));
+  const h = Math.max(1, Math.round(cssH * dpr));
+  if (size.width !== w) size.width = w;
+  if (size.height !== h) size.height = h;
+  gl.viewport(0, 0, w, h);
+  return { width: w, height: h, dpr };
+}
+
+let activeRenderer = null;
+let lastFrameTimeMs = 0;
+
+function createRenderer(gl, parts) {
+  const records = {};
+  const programs = {};
+  for (const name of ["bg", "std", "pad"]) {
+    const rec = createProgramRecord(gl, name);
+    records[name] = rec;
+    programs[name] = rec.report;
+  }
+
+  const gpuParts = Object.entries(parts)
+    .filter(([name]) => name !== "padField")
+    .map(([, part]) => uploadPartToGpu(gl, part, records.std));
+  const padGpu = uploadPartToGpu(gl, parts.padField, records.pad);
+  const backdrop = uploadBackdropToGpu(gl, records.bg);
+
+  function drawShadedParts(std, viewProj, camPos, resolution) {
+    let drawCalls = 0;
+    gl.useProgram(std.program);
+    gl.uniformMatrix4fv(std.uniforms.u_viewProj, false, viewProj);
+    gl.uniform3fv(std.uniforms.u_camPos, camPos);
+    gl.uniform2f(std.uniforms.u_resolution, resolution[0], resolution[1]);
+    gl.uniform1f(std.uniforms.u_exposure, EXPOSURE);
+    for (const entry of gpuParts) {
+      const mat = MATERIALS[PART_MATERIAL[entry.part.name]];
+      entry.part.node.world(entry.modelMatrix);
+      // The model matrices here are rigid (uniform scale, no shear), so the
+      // upper-left 3x3 is already the correct normal basis. If Task 7 ever
+      // scales a part non-uniformly, this becomes an inverse-transpose.
+      mat4.toMat3(scratch.normalMat, entry.modelMatrix);
+      gl.bindVertexArray(entry.vao);
+      gl.uniformMatrix4fv(std.uniforms.u_model, false, entry.modelMatrix);
+      gl.uniformMatrix3fv(std.uniforms.u_normalMat, false, scratch.normalMat);
+      gl.uniform3fv(std.uniforms.u_base, mat.base);
+      gl.uniform3fv(std.uniforms.u_f0, mat.f0);
+      gl.uniform1f(std.uniforms.u_rough, mat.rough);
+      gl.uniform1f(std.uniforms.u_metal, mat.metal);
+      // A part rests on its own lowest point, so the fake contact AO starts
+      // darkening there instead of needing a shadow map.
+      gl.uniform1f(std.uniforms.u_contactY, entry.part.bbox.min[1]);
+      gl.drawElements(gl.TRIANGLES, entry.indexCount, entry.indexType, 0);
+      drawCalls++;
+    }
+    return drawCalls;
+  }
+
+  function drawPadField(pad, viewProj, timeMs, camPos, resolution) {
+    const mat = MATERIALS[PART_MATERIAL.padField];
+    padGpu.part.node.world(padGpu.modelMatrix);
+    mat4.toMat3(scratch.normalMat, padGpu.modelMatrix);
+    gl.useProgram(pad.program);
+    gl.bindVertexArray(padGpu.vao);
+    gl.uniformMatrix4fv(pad.uniforms.u_viewProj, false, viewProj);
+    gl.uniformMatrix4fv(pad.uniforms.u_model, false, padGpu.modelMatrix);
+    gl.uniformMatrix3fv(pad.uniforms.u_normalMat, false, scratch.normalMat);
+    gl.uniform3fv(pad.uniforms.u_camPos, camPos);
+    gl.uniform2f(pad.uniforms.u_resolution, resolution[0], resolution[1]);
+    gl.uniform1f(pad.uniforms.u_exposure, EXPOSURE);
+    gl.uniform1f(pad.uniforms.u_time, timeMs / 1000);
+    gl.uniform3fv(pad.uniforms.u_base, mat.base);
+    gl.uniform3fv(pad.uniforms.u_f0, mat.f0);
+    gl.uniform1f(pad.uniforms.u_rough, mat.rough);
+    gl.uniform1f(pad.uniforms.u_metal, mat.metal);
+    gl.uniform1f(pad.uniforms.u_contactY, padGpu.part.bbox.min[1]);
+    // WebGL2 instancing is core: no ANGLE_instanced_arrays hunt, and exactly
+    // one call for the whole 3,647-pad field.
+    gl.drawElementsInstanced(gl.TRIANGLES, padGpu.indexCount, padGpu.indexType, 0,
+      padGpu.part.instanceCount);
+    return 1;
+  }
+
+  function draw(viewProj, timeMs, camPos) {
+    const { std, pad, bg } = records;
+    const resolution = [canvas.width, canvas.height];
+
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(true);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    // Backdrop first, depth writes off: it never occludes geometry and never
+    // burns a fragment invocation on what is drawn after it.
+    gl.depthMask(false);
+    gl.useProgram(bg.program);
+    gl.bindVertexArray(backdrop.vao);
+    gl.uniform2f(bg.uniforms.u_resolution, resolution[0], resolution[1]);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    gl.depthMask(true);
+    const calls = drawShadedParts(std, viewProj, camPos, resolution)
+      + drawPadField(pad, viewProj, timeMs, camPos, resolution);
+
+    gl.bindVertexArray(null);
+    return calls;
+  }
+
+  return { gl, records, programs, gpuParts, padGpu, backdrop, draw };
+}
+
 window.__api = {
   mat4, Node, earClip, bboxOf, buildParts,
   roundedRectProfile, circleProfile, rectProfile, translatedProfile, withKeyingCut, extrudeProfile,
   LAND_GRID, composeLayout, padMeshGeometry,
+  MATERIALS, LIGHTS, PART_MATERIAL, VIEW,
+  analysePixels, frameStats, drawScene, updateCamera, resizeCanvas, createRenderer,
+  interleavedGeometry, STRIDE_BYTES,
 };
 
 const MAX_FRAME_MS = 50; // a backgrounded tab hands us 1 Hz deltas; never let them through
+const ORBIT_DEG_PER_MS = 0.004; // 360 deg in 100 s: slow enough to read the machining
 
 const canvas = document.getElementById("viewport");
 const overlay = document.getElementById("error-overlay");
 
+/**
+ * A failure the harness can assert on: the overlay is what a human sees, the
+ * __scene record is what the tests read. A silent black screen would let a
+ * broken render look like a passing one.
+ */
 function reportFailure(cause, detail) {
   overlay.textContent = detail;
   overlay.classList.add("visible");
   window.__scene = {
     ok: false, cause, parts: {}, programs: {}, frames: 0,
-    padCount: 0, plateAngleDeg: 0, azimuthDeg: 0,
+    padCount: 0, padsDrawn: 0, plateAngleDeg: 0, azimuthDeg: 0, drawCalls: 0,
   };
 }
 
+/*
+ * The animation loop. dtMs is clamped so a hidden-tab 1 s delta cannot jump the
+ * camera 20 deg in one frame; the clamp is what keeps the showcase honest about
+ * its own speed.
+ */
+function startRenderLoop(gl, scene, socketRoot) {
+  let last = performance.now();
+  let elapsedMs = 0;
+  const frame = (now) => {
+    const dtMs = Math.min(Math.max(now - last, 0), MAX_FRAME_MS);
+    last = now;
+    elapsedMs += dtMs;
+    scene.frames++;
+
+    resizeCanvas(gl);
+    // Task 6 turns this orbit into a tested API; until then the azimuth is just
+    // elapsed time, so the clamp above is the only thing steering the spin.
+    scene.azimuthDeg = (VIEW.azDeg + elapsedMs * ORBIT_DEG_PER_MS) % 360;
+    updateCamera({ azDeg: scene.azimuthDeg, elevDeg: VIEW.elevDeg });
+    lastFrameTimeMs = now;
+    scene.drawCalls = drawScene(cameraState.viewProj, now, cameraState.eye);
+    scene.padsDrawn = scene.padCount;
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}
+
 function boot() {
-  const gl = canvas.getContext("webgl2", { antialias: true });
+  const gl = canvas.getContext("webgl2", { antialias: true, alpha: false });
   if (!gl) {
     reportFailure("webgl2-unavailable", "WebGL2 is not available in this browser.\n" +
       "The socket render needs WebGL2 (antialias). Check that hardware acceleration is on.");
@@ -651,7 +1335,7 @@ function boot() {
 
   const scene = {
     ok: true, cause: "", parts: {}, programs: {}, frames: 0,
-    padCount: 0, plateAngleDeg: 0, azimuthDeg: 0, drawCalls: 0,
+    padCount: 0, padsDrawn: 0, plateAngleDeg: 0, azimuthDeg: VIEW.azDeg, drawCalls: 0,
   };
   window.__scene = scene;
 
@@ -668,28 +1352,41 @@ function boot() {
     };
   }
   scene.padCount = parts.padField.instanceCount;
-  scene.drawCalls = Object.keys(scene.parts).length;
+  // The diagnostics report the pose the node actually carries, rather than a
+  // hardcoded number that could drift away from the geometry.
+  scene.plateAngleDeg = (parts.loadPlate.node.local.rot.x * 180) / Math.PI;
   window.__sceneParts = parts;
   window.__socketRoot = socketRoot;
 
-  gl.clearColor(0.05, 0.06, 0.07, 1);
+  try {
+    const renderer = createRenderer(gl, parts);
+    activeRenderer = renderer;
+  } catch (err) {
+    // A shader that fails to compile is the loudest failure the page can have:
+    // a black screen would otherwise look like a successful render.
+    const report = err.programReport || {};
+    reportFailure("shader-compile", `Shader compile/link failed:\n${report.infoLog || err.message}`);
+    if (report.name) window.__scene.programs = { [report.name]: report };
+    return;
+  }
+  scene.programs = activeRenderer.programs;
+
+  // One frame synchronously, so a harness reading __scene immediately after
+  // boot sees a populated diagnostics object, not a clear-colour promise.
+  resizeCanvas(gl);
+  updateCamera();
+  gl.clearColor(0.03, 0.035, 0.045, 1);
   gl.enable(gl.DEPTH_TEST);
+  lastFrameTimeMs = performance.now();
+  scene.drawCalls = drawScene(cameraState.viewProj, lastFrameTimeMs, cameraState.eye);
+  scene.padsDrawn = scene.padCount;
+  scene.frames = 1;
 
-  let last = performance.now();
-  const frame = (now) => {
-    const dtMs = Math.min(Math.max(now - last, 0), MAX_FRAME_MS);
-    last = now;
-    scene.frames++;
-    scene.azimuthDeg = (scene.azimuthDeg + dtMs * 0.004) % 360;
-
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    requestAnimationFrame(frame);
-  };
-  requestAnimationFrame(frame);
+  startRenderLoop(gl, scene, socketRoot);
 }
 
 boot();
+
 </script>
 </body>
 </html>

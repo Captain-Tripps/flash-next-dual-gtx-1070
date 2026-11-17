@@ -41,6 +41,11 @@ function makeSandbox({ glFactory = () => null } = {}) {
   });
   const canvas = makeNode("canvas");
   canvas.getContext = (kind) => (kind === "webgl2" ? glFactory() : null);
+  // A stub drawing buffer the harness controls: Task 5's frameStats probe reads
+  // it back through the stub's synthetic fill, so the pixel maths is testable
+  // without a GPU.
+  canvas.width = 200;
+  canvas.height = 100;
   nodes.set("#viewport", canvas);
   nodes.set("#error-overlay", makeNode("div"));
 
@@ -95,6 +100,19 @@ export function stubGL() {
       getProgramParameter: () => true,
       getProgramInfoLog: () => "",
       getShaderInfoLog: () => "",
+      getError: () => 0,
+      // A deterministic "studio frame": 4 % gold, 26 % lit steel, rest the
+      // background gradient. Lets the pixel-analysis tests run against a fake GPU.
+      readPixels: (_x, _y, w, h, _fmt, _type, pixels) => {
+        for (let p = 0; p < w * h; p++) {
+          const i = p * 4;
+          const band = p % 50;
+          if (band < 2) { pixels[i] = 210; pixels[i + 1] = 175; pixels[i + 2] = 95; }
+          else if (band < 15) { pixels[i] = 190; pixels[i + 1] = 196; pixels[i + 2] = 205; }
+          else { pixels[i] = 26; pixels[i + 1] = 28; pixels[i + 2] = 33; }
+          pixels[i + 3] = 255;
+        }
+      },
       canvas: null,
     },
     {
@@ -443,6 +461,110 @@ test("boot_withWebGL2_reportsPadCountFromTheLayout", () => {
   if (scene.padCount !== pageApi.composeLayout().instanceCount) {
     throw new Error(`__scene.padCount is ${scene.padCount}, want ${pageApi.composeLayout().instanceCount}`);
   }
+});
+
+// ------------------------------------------------ materials & shaders (Task 5)
+const renderApi = () => {
+  const a = api();
+  for (const fn of ["analysePixels", "drawScene", "frameStats"]) {
+    if (typeof a[fn] !== "function") throw new Error(`window.__api.${fn} is not a function`);
+  }
+  return a;
+};
+
+/** Builds a RGBA framebuffer where `pred(x, y)` decides which pixels are lit. */
+function syntheticFrame(width, height, pred) {
+  const px = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const gold = pred(x, y) === "gold";
+      const lit = pred(x, y) === true || gold;
+      if (gold) { px[i] = 210; px[i + 1] = 170; px[i + 2] = 90; }
+      else if (lit) { px[i] = 200; px[i + 1] = 205; px[i + 2] = 210; }
+      else { px[i] = 30; px[i + 1] = 32; px[i + 2] = 36; }
+      px[i + 3] = 255;
+    }
+  }
+  return px;
+}
+
+test("analysePixels_allBackground_countsNoCoverageOrGold", () => {
+  const px = syntheticFrame(20, 10, () => false);
+  const s = renderApi().analysePixels(px, 20, 10);
+  if (s.nonBackgroundCount !== 0 || s.goldCount !== 0) {
+    throw new Error(`dark frame reported coverage ${s.nonBackgroundRatio}, gold ${s.goldRatio}`);
+  }
+  if (s.sampled !== 200) throw new Error(`sampled ${s.sampled}, want 200`);
+});
+
+test("analysePixels_withAMixedFrame_reportsCoverageAndGoldRatios", () => {
+  // 20x10 = 200 pixels: half lit, one in ten gold.
+  const px = syntheticFrame(20, 10, (x, y) => (x < 10 ? (x === 0 ? "gold" : true) : false));
+  const s = renderApi().analysePixels(px, 20, 10);
+  if (s.nonBackgroundCount !== 100) throw new Error(`coverage count ${s.nonBackgroundCount}, want 100`);
+  if (Math.abs(s.nonBackgroundRatio - 0.5) > 1e-6) throw new Error(`coverage ratio ${s.nonBackgroundRatio}, want 0.5`);
+  if (s.goldCount !== 10) throw new Error(`gold count ${s.goldCount}, want 10`);
+  if (Math.abs(s.goldRatio - 0.05) > 1e-6) throw new Error(`gold ratio ${s.goldRatio}, want 0.05`);
+});
+
+test("analysePixels_goldRule_rejectsBlueAndMutedReds", () => {
+  // The hue rule is r > b + 20 && g > 60: blues, near-white greys and dark reds
+  // must not pass, otherwise the probe would count the wrong thing gold.
+  const width = 5, height = 1;
+  const px = new Uint8Array(width * height * 4);
+  const cases = [
+    [40, 60, 200, false],  // blue
+    [200, 200, 200, false], // neutral grey
+    [100, 40, 40, false],  // dark red (g too low)
+    [120, 90, 60, true],   // muted gold, still gold
+    [250, 200, 120, true], // bright gold
+  ];
+  cases.forEach(([r, g, b], idx) => {
+    px[idx * 4] = r; px[idx * 4 + 1] = g; px[idx * 4 + 2] = b; px[idx * 4 + 3] = 255;
+  });
+  const s = renderApi().analysePixels(px, width, height);
+  if (s.sampled !== cases.length) {
+    throw new Error(`frame holds ${s.sampled} pixels but the test wrote ${cases.length} cases`);
+  }
+  const wantGold = cases.filter((c) => c[3]).length;
+  if (s.goldCount !== wantGold) throw new Error(`gold ${s.goldCount} of ${cases.length}, want ${wantGold}`);
+});
+
+test("analysePixels_samplesEveryNthPixel_whenStepGiven", () => {
+  const px = syntheticFrame(20, 10, () => false);
+  const s = renderApi().analysePixels(px, 20, 10, { step: 2 });
+  if (s.sampled !== 50) throw new Error(`step 2 sampled ${s.sampled}, want 50 (10 x 5 grid)`);
+});
+
+test("boot_withWebGL2_recordsCompileAndLinkStatusForTheStdAndPadPrograms", () => {
+  const { scene } = boot({ glFactory: () => stubGL() });
+  const programs = scene.programs || {};
+  for (const name of ["std", "pad"]) {
+    const p = programs[name];
+    if (!p) throw new Error(`no program diagnostics for "${name}" (have [${Object.keys(programs)}])`);
+    if (p.linked !== true || p.linked !== true) throw new Error(`${name} did not link: ${JSON.stringify(p)}`);
+    if ((p.infoLog || "") !== "") throw new Error(`${name} info log: ${p.infoLog}`);
+  }
+});
+
+test("boot_withWebGL2_drawScene_countsOneDrawPerPartPlusTheInstancedPadField", () => {
+  const { scene, api: pageApi } = boot({ glFactory: () => stubGL() });
+  const viewProj = pageApi.mat4.identity();
+  pageApi.drawScene(viewProj, 0);
+  const wantParts = Object.keys(scene.parts).length;
+  if (scene.drawCalls < wantParts) throw new Error(`drawCalls ${scene.drawCalls}, want >= ${wantParts}`);
+  if (scene.padsDrawn !== scene.padCount) throw new Error(`padsDrawn ${scene.padsDrawn}, want ${scene.padCount}`);
+});
+
+test("frameStats_withStubbedReadPixels_reportsTheSyntheticFrameRatios", () => {
+  // The stub fills its 200x100 buffer with 30 % lit pixels, 4 % gold-ish.
+  const { api: pageApi } = boot({ glFactory: () => stubGL() });
+  pageApi.drawScene(pageApi.mat4.identity(), 0);
+  const s = pageApi.frameStats();
+  if (Math.abs(s.nonBackgroundRatio - 0.3) > 1e-6) throw new Error(`coverage ${s.nonBackgroundRatio}, want 0.3`);
+  if (Math.abs(s.goldRatio - 0.04) > 1e-6) throw new Error(`gold ${s.goldRatio}, want 0.04`);
+  if (!(s.maxLuma > 100)) throw new Error(`maxLuma ${s.maxLuma}`);
 });
 
 let failed = 0;

@@ -1,5 +1,9 @@
-// Throwaway probe: prints the exact instance count and the row/cutout shape
-// the layout produces, so the "exactly 3,647" claim can be checked by hand.
+// Diagnostic report, not a test: prints the layout's count and row shape so the
+// cutout areas can be re-tuned against the 3,647-contact budget by hand.
+// Usage: node verify/layout-report.mjs
+import { readFileSync } from "node:fs";
+import { createContext, runInNewContext } from "node:vm";
+
 import { readFileSync } from "node:fs";
 import { createContext, runInNewContext } from "node:vm";
 
