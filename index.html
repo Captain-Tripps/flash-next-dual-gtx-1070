@@ -21,6 +21,139 @@
 <script type="module">
 "use strict";
 
+// ---------------------------------------------------------------- math
+// Column-major, same layout WebGL consumes, so matrices go straight to
+// gl.uniformMatrix4fv with transpose=false. No allocation in the per-frame path:
+// every node owns its matrices and writes into them.
+
+const mat4 = {
+  identity() {
+    const m = new Float32Array(16);
+    m[0] = m[5] = m[10] = m[15] = 1;
+    return m;
+  },
+
+  // out = a * b ("apply b first, then a", column-major convention).
+  multiply(out, a, b) {
+    for (let c = 0; c < 4; c++) {
+      for (let r = 0; r < 4; r++) {
+        out[c * 4 + r] =
+          a[0 * 4 + r] * b[c * 4 + 0] +
+          a[1 * 4 + r] * b[c * 4 + 1] +
+          a[2 * 4 + r] * b[c * 4 + 2] +
+          a[3 * 4 + r] * b[c * 4 + 3];
+      }
+    }
+    return out;
+  },
+
+  transformPoint(out, m, p) {
+    const [x, y, z] = p;
+    out[0] = m[0] * x + m[4] * y + m[8] * z + m[12];
+    out[1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+    out[2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+    return out;
+  },
+
+  // Translate * Rotate * Scale, rotation applied Y then X then Z (socket parts
+  // yaw about the vertical axis; the plate tips about its local X).
+  trs(out, { pos = [0, 0, 0], rot, scale = 1 }) {
+    const sx = typeof scale === "number" ? scale : scale.x;
+    const rx = rot?.x || 0, ry = rot?.y || 0, rz = rot?.z || 0;
+    const cx = Math.cos(rx), sxn = Math.sin(rx);
+    const cy = Math.cos(ry), syn = Math.sin(ry);
+    const cz = Math.cos(rz), snz = Math.sin(rz);
+    // Ry * Rx * Rz
+    const r00 = cy * cz - syn * sxn * snz, r01 = -cy * snz - syn * sxn * cz, r02 = syn * cx;
+    const r10 = snz * cx, r11 = cx * cz, r12 = -sxn;
+    const r20 = -syn * cz - cy * sxn * snz, r21 = syn * snz - cy * sxn * cz, r22 = cy * cx;
+    out[0] = r00 * sx; out[1] = r10 * sx; out[2] = r20 * sx; out[3] = 0;
+    out[4] = r01 * sx; out[5] = r11 * sx; out[6] = r21 * sx; out[7] = 0;
+    out[8] = r02 * sx; out[9] = r12 * sx; out[10] = r22 * sx; out[11] = 0;
+    out[12] = pos[0]; out[13] = pos[1]; out[14] = pos[2]; out[15] = 1;
+    return out;
+  },
+
+  perspective(out, { fovyDeg, aspect, near, far }) {
+    const f = 1 / Math.tan((fovyDeg * Math.PI) / 360);
+    const nf = 1 / (near - far);
+    out.fill(0);
+    out[0] = f / aspect;
+    out[5] = f;
+    out[10] = (far + near) * nf;
+    out[11] = -1;
+    out[14] = 2 * far * near * nf;
+    return out;
+  },
+
+  // View space: camera at origin looking down -Z, so the forward basis is -Z.
+  lookAt(out, eye, target, up) {
+    let zx = eye[0] - target[0], zy = eye[1] - target[1], zz = eye[2] - target[2];
+    let len = Math.hypot(zx, zy, zz) || 1;
+    zx /= len; zy /= len; zz /= len;
+    let xx = up[1] * zz - up[2] * zy, xy = up[2] * zx - up[0] * zz, xz = up[0] * zy - up[1] * zx;
+    len = Math.hypot(xx, xy, xz) || 1;
+    xx /= len; xy /= len; xz /= len;
+    const yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+    out[0] = xx; out[1] = yx; out[2] = zx; out[3] = 0;
+    out[4] = xy; out[5] = yy; out[6] = zy; out[7] = 0;
+    out[8] = xz; out[9] = yz; out[10] = zz; out[11] = 0;
+    out[12] = -(xx * eye[0] + xy * eye[1] + xz * eye[2]);
+    out[13] = -(yx * eye[0] + yy * eye[1] + yz * eye[2]);
+    out[14] = -(zx * eye[0] + zy * eye[1] + zz * eye[2]);
+    out[15] = 1;
+    return out;
+  },
+
+  // Upper-left 3x3 of a mat4, written column-major into a length-9 array.
+  toMat3(out9, m) {
+    out9[0] = m[0]; out9[1] = m[1]; out9[2] = m[2];
+    out9[3] = m[4]; out9[4] = m[5]; out9[5] = m[6];
+    out9[6] = m[8]; out9[7] = m[9]; out9[8] = m[10];
+    return out9;
+  },
+};
+
+// ---------------------------------------------------------------- scene graph
+class Node {
+  constructor(name) {
+    this.name = name;
+    this.local = { pos: [0, 0, 0], rot: { x: 0, y: 0, z: 0 }, scale: 1 };
+    this.children = [];
+    this.parent = null;
+    this._localMatrix = mat4.identity();
+    this._parentWorld = mat4.identity();
+    this._worldMatrix = mat4.identity();
+  }
+
+  add(child) {
+    child.parent = this;
+    this.children.push(child);
+    return child;
+  }
+
+  // Allocation-free: this node owns its matrices; the parent chain is written
+  // into the child's own scratch (a different array on purpose, because
+  // multiply(out, a, b) with out === a === b would alias mid-write).
+  world(out) {
+    mat4.trs(this._localMatrix, this.local);
+    if (this.parent) {
+      this.parent.world(this._parentWorld);
+      mat4.multiply(this._worldMatrix, this._parentWorld, this._localMatrix);
+    } else {
+      this._worldMatrix.set(this._localMatrix);
+    }
+    out.set(this._worldMatrix);
+    return out;
+  }
+
+  worldMatrix() {
+    return this.world(mat4.identity());
+  }
+}
+
+window.__api = { mat4, Node };
+
 const MAX_FRAME_MS = 50; // a backgrounded tab hands us 1 Hz deltas; never let them through
 
 const canvas = document.getElementById("viewport");

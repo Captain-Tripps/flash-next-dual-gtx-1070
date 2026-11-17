@@ -81,7 +81,7 @@ export function boot({ glFactory } = {}) {
   const src = inlineModuleSource(html);
   const { sandbox, canvas, nodes } = makeSandbox({ glFactory });
   runInNewContext(src, createContext(sandbox), { filename: "index.html" });
-  return { scene: sandbox.window.__scene, canvas, nodes, source: src, html };
+  return { scene: sandbox.window.__scene, api: sandbox.window.__api, canvas, nodes, source: src, html };
 }
 
 /** A WebGL2 stub: every method is a no-op, every constant is a number. */
@@ -140,6 +140,67 @@ test("boot_withWebGL2_publishesDiagnosticsAndClearsFrame", () => {
   }
 });
 
+const near = (actual, expected, what) => {
+  const tol = 1e-6;
+  const a = [...actual].map(Number);
+  const b = [...expected].map(Number);
+  const bad = a.findIndex((v, i) => !Number.isFinite(v) || Math.abs(v - b[i]) > tol);
+  if (bad >= 0) throw new Error(`${what}: got [${a.join(", ")}], want [${b.join(", ")}]`);
+};
+
+/** The page's pure-function API (math, scene graph, layout, pose). */
+const api = () => {
+  const { api: a } = boot({ glFactory: () => stubGL() });
+  if (!a) throw new Error("window.__api was not published: page must expose its pure functions");
+  return a;
+};
+
+test("mat4_multiply_yRotation90_mapsLocalPlusXToNegZ", () => {
+  const { mat4 } = api();
+  const m = mat4.trs(mat4.identity(), { pos: [0, 0, 0], rot: { y: Math.PI / 2 }, scale: 1 });
+  const p = mat4.transformPoint(new Float64Array(3), m, [1, 0, 0]);
+  near(p, [0, 0, -1], "rotate 90 about Y of local +X");
+});
+
+test("mat4_trs_rotatesLocalPointThenTranslates", () => {
+  const { mat4 } = api();
+  const m = mat4.trs(mat4.identity(), { pos: [10, 0, 0], rot: { y: Math.PI / 2 }, scale: 2 });
+  const p = mat4.transformPoint(new Float64Array(3), m, [0, 0, 5]);
+  near(p, [20, 0, 0], "scale 2, rotate 90 about Y, then translate +10x");
+});
+
+test("node_world_parentRotated90AboutY_placesChildAtLocalPlusZ_inParentSpace", () => {
+  // This is the load-plate hinge case for real: a child offset along the parent's
+  // local +Z must land in the parent's rotated frame, not the world's.
+  const { Node, mat4 } = api();
+  const parent = new Node("hingePivot");
+  parent.local = { pos: [10, 0, 0], rot: { y: Math.PI / 2 }, scale: 1 };
+  const child = new Node("loadPlate");
+  child.local = { pos: [0, 0, 5], scale: 1 };
+  parent.add(child);
+  near(mat4point(mat4, parent.world(new Float32Array(16)), [0, 0, 0]), [10, 0, 0], "parent world origin");
+  near(mat4point(mat4, child.world(new Float32Array(16)), [0, 0, 0]), [15, 0, 0], "child world origin");
+  if (child.parent !== parent || child.name !== "loadPlate") throw new Error("add() lost the name/parent");
+});
+
+const mat4point = (mat4, m, v) => mat4.transformPoint(new Float64Array(3), m, v);
+
+test("mat4_perspective_aspectHalf_isFiniteAndScalesXByAspect", () => {
+  const { mat4 } = api();
+  const m = mat4.perspective(mat4.identity(), { fovyDeg: 45, aspect: 0.5, near: 0.1, far: 100 });
+  if (!m.every((v) => Number.isFinite(v))) throw new Error("non-finite matrix entry");
+  if (!(m[0] > 0 && m[5] > 0)) throw new Error(`diag signs m00=${m[0]} m11=${m[5]}`);
+  if (Math.abs(m[0] * 0.5 - m[5]) > 1e-6) throw new Error(`m00*m11 ratio must carry aspect: ${m[0]} vs ${m[5]}`);
+});
+
+test("mat4_lookAt_backwardsEye_buildsNegatedZForwardBasis", () => {
+  const { mat4 } = api();
+  const view = mat4.lookAt(mat4.identity(), [0, 0, 5], [0, 0, 0], [0, 1, 0]);
+  near([view[2], view[6], view[10]], [0, 0, 1], "view-space +Z axis (camera looks down -Z)");
+  // A world point in front of the camera must land at negative view Z.
+  near(mat4point(mat4, view, [0, 0, 4]), [0, 0, -1], "point ahead of camera");
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
   try {
@@ -148,6 +209,7 @@ for (const { name, fn } of tests) {
   } catch (err) {
     failed++;
     console.log(`FAIL  ${name}\n      ${err.message}`);
+    if (!err.message.includes("want [")) console.log(err.stack.split("\n").slice(1, 4).join("\n      "));
   }
 }
 console.log(`\n${tests.length - failed}/${tests.length} unit tests passed`);
