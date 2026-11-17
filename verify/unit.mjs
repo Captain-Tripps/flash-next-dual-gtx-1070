@@ -201,6 +201,118 @@ test("mat4_lookAt_backwardsEye_buildsNegatedZForwardBasis", () => {
   near(mat4point(mat4, view, [0, 0, 4]), [0, 0, -1], "point ahead of camera");
 });
 
+// ------------------------------------------------------- geometry (Task 3)
+const geometryApi = () => {
+  const a = api();
+  for (const fn of ["buildParts", "extrudeProfile", "roundedRectProfile"]) {
+    if (typeof a[fn] !== "function") throw new Error(`window.__api.${fn} is not a function`);
+  }
+  return a;
+};
+
+const allFinite = (arr) => arr.every((v) => Number.isFinite(v));
+
+test("buildParts_exposesExactlyTheEightNamedSocketParts", () => {
+  const a = geometryApi();
+  const parts = a.buildParts();
+  const want = ["substrate", "frame", "padField", "brBracket", "loadPlate", "hingeBar", "latchLever", "stiffenRing"];
+  const got = Object.keys(parts).sort();
+  if (got.join() !== want.slice().sort().join()) throw new Error(`got [${got}]`);
+  for (const name of want) if (!(parts[name].node instanceof a.Node)) throw new Error(`${name} has no Node`);
+});
+
+test("buildParts_substrateFootprintMatchesLGA3647Envelope", () => {
+  const { bbox } = geometryApi().buildParts().substrate;
+  const x = bbox.max[0] - bbox.min[0];
+  const z = bbox.max[2] - bbox.min[2];
+  const near1 = (a, b, what) => { if (Math.abs(a - b) > b * 0.01) throw new Error(`${what}: ${a} != ${b}`); };
+  near1(x, 75.9, "land-grid envelope X");
+  near1(z, 61.4, "land-grid envelope Z");
+});
+
+test("buildParts_everyPart_isIndexedFiniteGeometryWithUnitNormals", () => {
+  const parts = geometryApi().buildParts();
+  for (const [name, part] of Object.entries(parts)) {
+    const { pos, nrm, idx } = part.geometry;
+    if (!idx.length) throw new Error(`${name}: empty index buffer`);
+    if (pos.length % 3 !== 0) throw new Error(`${name}: pos not a vertex triple`);
+    if (pos.length / 3 !== part.vertexCount) throw new Error(`${name}: vertexCount mismatch`);
+    if (nrm.length !== pos.length) throw new Error(`${name}: normals missing for some vertices`);
+    if (!allFinite(pos) || !allFinite(nrm) || !allFinite(idx)) throw new Error(`${name}: NaN geometry`);
+    for (let i = 0; i < nrm.length; i += 3) {
+      const len = Math.hypot(nrm[i], nrm[i + 1], nrm[i + 2]);
+      if (len < 0.99 || len > 1.01) throw new Error(`${name}: normal ${i / 3} not unit (${len})`);
+    }
+    if (Math.max(...idx) >= pos.length / 3) throw new Error(`${name}: index out of range`);
+  }
+});
+
+test("roundedRectProfile_with4Segments_buildsFourQuarterArcsOf5PointsEach", () => {
+  // segs divisions per corner -> segs+1 points per corner (both tangent points
+  // included), so the flat edges stay flat instead of being chorded into a cut.
+  // 6 x 1.7 with r=0.8: corner centres at (+-2.2, +-0.05), extents exactly +-3, +-0.85.
+  const pts = geometryApi().roundedRectProfile(6, 1.7, 0.8, 4);
+  if (pts.length !== 4 * 5 * 2) throw new Error("expected 20 points, got " + (pts.length / 2));
+  const xs = pts.filter((_, i) => i % 2 === 0), zs = pts.filter((_, i) => i % 2 === 1);
+  if (Math.max(...xs) !== 3 || Math.min(...xs) !== -3) throw new Error("x extent is not 6");
+  if (Math.max(...zs) !== 0.85 || Math.min(...zs) !== -0.85) throw new Error("z extent is not 1.7");
+  // Every point must sit on some corner arc: a chord across a fillet lands
+  // inside the arc, which is exactly how a sheared outline gets born.
+  const centres = [[2.2, 0.05], [-2.2, 0.05], [-2.2, -0.05], [2.2, -0.05]];
+  for (let i = 0; i < pts.length; i += 2) {
+    const onArc = centres.some(([cx, cz]) => Math.abs(Math.hypot(pts[i] - cx, pts[i + 1] - cz) - 0.8) < 1e-9);
+    if (!onArc) throw new Error(`point ${i / 2} (${pts[i]},${pts[i + 1]}) is off the corner arcs`);
+  }
+  for (let i = 0; i < pts.length; i += 2) {
+    const nx = (i + 2) % pts.length;
+    if (Math.hypot(pts[i] - pts[nx], pts[i + 1] - pts[nx + 1]) < 1e-9) throw new Error("duplicated consecutive point");
+  }
+});
+
+test("withKeyingCut_replacesCorner3ArcPointsWithOneDiagonalEdgeKeepsTangents", () => {
+  const segs = 4;
+  const cut = geometryApi().withKeyingCut(geometryApi().roundedRectProfile(6, 1.7, 0.8, segs), segs);
+  if (cut.length / 2 !== 4 * (segs + 1) - (segs - 1)) throw new Error(`expected 17 points, got ${cut.length / 2}`);
+  const ring = [];
+  for (let i = 0; i < cut.length; i += 2) ring.push([cut[i], cut[i + 1]]);
+  const diagonalEdges = ring.filter(([x, z], i) => {
+    const [x2, z2] = ring[(i + 1) % ring.length];
+    return Math.abs(Math.abs(x2 - x) - 0.8) < 1e-9 && Math.abs(Math.abs(z2 - z) - 0.8) < 1e-9;
+  }).length;
+  if (diagonalEdges !== 1) throw new Error(`expected exactly one 45deg key edge, got ${diagonalEdges}`);
+  const onCorner3Arc = ring.filter(([x, z]) => Math.abs(Math.hypot(x - 2.2, z + 0.05) - 0.8) < 1e-9).length;
+  if (onCorner3Arc !== 2) throw new Error(`${onCorner3Arc} points on corner 3's arc, want its 2 tangent points`);
+});
+
+test("extrudeProfile_buildsChamferedSlabWithTopAndBottomFaces", () => {
+  const sq = [-1, -1, 1, -1, 1, 1, -1, 1]; // CCW square in XZ
+  const g = geometryApi().extrudeProfile(sq, { depth: 0.6, chamfer: 0.1 });
+  if (!g.idx.length || !g.pos.length) throw new Error("empty extrusion");
+  const ys = g.pos.filter((_, i) => i % 3 === 1);
+  const lo = Math.min(...ys), hi = Math.max(...ys);
+  if (Math.abs(hi - lo - 0.6) > 1e-9) throw new Error(`slab height ${hi - lo}`);
+  if (Math.abs(lo) > 1e-9) throw new Error("extrusion should start at y=0");
+  const upNormals = g.nrm.filter((_, i) => i % 3 === 1).filter((n) => n > 0.9).length;
+  if (upNormals < 2) throw new Error("no top-facing normals");
+});
+
+test("circleProfile_extrudedPrism_everyNormalIsACapOrAWallNotTilted", () => {
+  // The hinge bar is a circle profile extruded along Y: caps point along +-Y,
+  // walls point sideways. Any tilted normal means a profile/axis mixup or an
+  // accidental taper in the wall band.
+  const g = geometryApi().extrudeProfile(geometryApi().circleProfile(2, 12), { depth: 3 });
+  let caps = 0, walls = 0;
+  for (let i = 0; i < g.nrm.length; i += 3) {
+    const y = Math.abs(g.nrm[i + 1]);
+    if (y > 0.999) caps++;
+    else if (y < 1e-9) walls++;
+    else throw new Error(`tilted normal at vertex ${i / 3}: ${g.nrm[i]},${g.nrm[i + 1]},${g.nrm[i + 2]}`);
+  }
+  if (!caps || !walls) throw new Error(`caps=${caps} walls=${walls}: a closed prism needs both`);
+  const ys = g.pos.filter((_, i) => i % 3 === 1);
+  if (Math.max(...ys) - Math.min(...ys) !== 3) throw new Error("prism not 3mm deep along Y");
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
   try {

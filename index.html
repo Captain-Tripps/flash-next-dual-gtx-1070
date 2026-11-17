@@ -152,7 +152,350 @@ class Node {
   }
 }
 
-window.__api = { mat4, Node };
+// ---------------------------------------------------------------- geometry
+// Every part is a flat XZ profile extruded along +Y, generated in code. Caps
+// are ear-clipped or quad-stripped (rings), side walls are per-face quads with
+// flat normals, so chamfered steel reads as machined metal, not smooth plastic.
+
+const signedArea2 = (pts) => {
+  let sum = 0;
+  for (let i = 0; i < pts.length; i += 2) {
+    const j = (i + 2) % pts.length;
+    sum += pts[i] * pts[j + 1] - pts[j] * pts[i + 1];
+  }
+  return sum;
+};
+
+const crossXZ = (a, b, c) =>
+  (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+
+/**
+ * Ear-clipping for a simple (non-self-intersecting) XZ polygon; non-convex
+ * outlines included. Returns vertex triples [x,z], CCW in xz — the extruder
+ * orients each cap triangle to the facing it wants, so winding here is a
+ * starting point, not a promise.
+ */
+function earClip(pts) {
+  const poly = [];
+  for (let i = 0; i < pts.length; i += 2) poly.push([pts[i], pts[i + 1]]);
+  if (poly.length < 3) throw new Error("polygon needs at least 3 points");
+  if (signedArea2(pts) < 0) poly.reverse();
+  const tris = [];
+  const ring = poly.slice();
+  while (ring.length > 3) {
+    let earAt = -1;
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length], c = ring[(i + 2) % ring.length];
+      if (crossXZ(a, b, c) <= 1e-12) continue; // reflex or collinear: not an ear
+      let coversAnother = false;
+      for (const p of ring) {
+        if (p === a || p === b || p === c) continue;
+        if (crossXZ(a, b, p) > -1e-12 && crossXZ(b, c, p) > -1e-12 && crossXZ(c, a, p) > -1e-12) {
+          coversAnother = true;
+          break;
+        }
+      }
+      if (!coversAnother) { earAt = i; break; }
+    }
+    if (earAt < 0) throw new Error("ear clip stalled: self-intersecting profile?");
+    tris.push(ring[earAt], ring[earAt + 1], ring[earAt + 2]);
+    ring.splice(earAt + 1, 1);
+  }
+  tris.push(ring[0], ring[1], ring[2]);
+  return tris;
+}
+
+/**
+ * Rounded-rectangle XZ profile, CCW, extents exactly w x h. Each quarter corner
+ * is sampled with `segs` arc divisions (segs+1 points, both tangent points
+ * included), so the flat edges between corners stay flat instead of getting
+ * chorded into a chamfer — a sheared substrate outline would be a sin against
+ * the whole point of this exercise.
+ */
+function roundedRectProfile(w, h, r, segs) {
+  if (!(r > 0) || 2 * r >= Math.min(w, h)) throw new Error(`corner radius ${r} won't fit ${w}x${h}`);
+  if (!(segs >= 1)) throw new Error("segs must be >= 1");
+  const hx = w / 2 - r, hz = h / 2 - r;
+  const centres = [[hx, hz, 0], [-hx, hz, Math.PI / 2], [-hx, -hz, Math.PI], [hx, -hz, (3 * Math.PI) / 2]];
+  const pts = [];
+  for (const [cx, cz, a0] of centres) {
+    for (let i = 0; i <= segs; i++) {
+      const a = a0 + (i * Math.PI) / (2 * segs);
+      pts.push(cx + r * Math.cos(a), cz + r * Math.sin(a));
+    }
+  }
+  return pts;
+}
+
+/**
+ * Drops corner 3's interior arc points, keeping its two tangent points: the
+ * quarter fillet becomes a straight 45deg cut. LGA 3647 is a keyed package —
+ * the cut corner is what the load plate's orientation reads on screen. The
+ * extents survive because the surviving tangent points own them.
+ */
+function withKeyingCut(pts, segs) {
+  const cornerStart = 3 * (segs + 1) * 2;
+  const cut = pts.slice();
+  cut.splice(cornerStart + 2, (segs - 1) * 2);
+  return cut;
+}
+
+/** Regular closed polygon in XZ, CCW, centred on the origin. Hinge rods, screw bosses. */
+function circleProfile(radius, segs) {
+  const pts = [];
+  for (let i = 0; i < segs; i++) {
+    const a = (i * 2 * Math.PI) / segs;
+    pts.push(radius * Math.cos(a), radius * Math.sin(a));
+  }
+  return pts;
+}
+
+const rectProfile = (x0, z0, x1, z1) => [x0, z0, x1, z0, x1, z1, x0, z1];
+
+function translatedProfile(pts, dx, dz) {
+  const out = [];
+  for (let i = 0; i < pts.length; i += 2) out.push(pts[i] + dx, pts[i + 1] + dz);
+  return out;
+}
+
+function reverseContour(pts) {
+  const out = [];
+  for (let i = pts.length - 2; i >= 0; i -= 2) out.push(pts[i], pts[i + 1]);
+  return out;
+}
+
+/**
+ * Approximate parallel inset for chamfer bands: scale toward the centroid.
+ * A mitred offset would be proper, but for 0.15 mm bevels on convex-ish
+ * contours the difference is sub-pixel, and every band normal is recomputed
+ * from the actual face anyway.
+ */
+function insetContour(pts, amount) {
+  let cx = 0, cz = 0;
+  for (let i = 0; i < pts.length; i += 2) { cx += pts[i]; cz += pts[i + 1]; }
+  const n = pts.length / 2;
+  cx /= n; cz /= n;
+  let span = 0;
+  for (let i = 0; i < pts.length; i += 2) span = Math.max(span, Math.hypot(pts[i] - cx, pts[i + 1] - cz));
+  const t = Math.min(amount / span, 0.999);
+  const out = [];
+  for (let i = 0; i < pts.length; i += 2) {
+    out.push(pts[i] + (cx - pts[i]) * t, pts[i + 1] + (cz - pts[i + 1]) * t);
+  }
+  return out;
+}
+
+/** Flat-shaded triangle push: winds toward `want`, normal from the actual face. */
+function pushTri(mesh, a, b, c, want) {
+  const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+  let nx = e1[1] * e2[2] - e1[2] * e2[1];
+  let ny = e1[2] * e2[0] - e1[0] * e2[2];
+  let nz = e1[0] * e2[1] - e1[1] * e2[0];
+  const len = Math.hypot(nx, ny, nz);
+  if (len < 1e-12) return; // sliver: degenerate corners drop, they never ship
+  nx /= len; ny /= len; nz /= len;
+  if (nx * want[0] + ny * want[1] + nz * want[2] < 0) {
+    [nx, ny, nz] = [-nx, -ny, -nz];
+    const t = b; b = c; c = t;
+  }
+  const base = mesh.pos.length / 3;
+  for (const p of [a, b, c]) {
+    mesh.pos.push(p[0], p[1], p[2]);
+    mesh.nrm.push(nx, ny, nz);
+  }
+  mesh.idx.push(base, base + 1, base + 2);
+}
+
+const yRing = (pts, y) => {
+  const out = [];
+  for (let i = 0; i < pts.length; i += 2) out.push([pts[i], y, pts[i + 1]]);
+  return out;
+};
+
+/**
+ * Extrude a closed XZ profile from y=0 to y=depth. Optional `hole` contour
+ * cuts a ring (needs aligned point counts with the outer contour — both come
+ * from roundedRectProfile with the same segs, so they do). A nonzero chamfer
+ * bevels the top rim: the side walls stay vertical, only the visible rim is
+ * cut. Holes never chamfer, they're too thin to matter.
+ */
+function extrudeProfile(outerContour, { depth, chamfer = 0, hole = null } = {}) {
+  if (!(depth > 0)) throw new Error("extrusion needs a positive depth");
+  const orientCCW = (contour) => (signedArea2(contour) >= 0 ? contour : reverseContour(contour));
+  const outer = orientCCW(outerContour);
+  // Holes keep the outer's angular order: the ring caps pair contour point i of
+  // the outer with point i of the hole, so reversing the winding would twist
+  // every quad in that strip. Facing is handled by flipping `want` instead.
+  const inner = hole ? orientCCW(hole) : null;
+  const c = chamfer > 0 ? Math.min(chamfer, depth / 2) : 0;
+  const ys = c > 0 ? [0, depth - c, depth] : [0, depth];
+
+  const contourAt = (i) => (c > 0 && i === ys.length - 1 ? insetContour(outer, c) : outer);
+  const outerLevels = ys.map((y, i) => yRing(contourAt(i), y));
+  const holeLevels = inner ? ys.map((y) => yRing(inner, y)) : null;
+
+  const mesh = { pos: [], nrm: [], idx: [] };
+
+  // Walls. The facing is the edge tangent rotated -90deg in XZ (outward for a
+  // CCW loop); a bore's visible side faces into the bore, so holes get `flip`.
+  const emitWalls = (levels, flip = false) => {
+    for (let lv = 0; lv + 1 < levels.length; lv++) {
+      const lo = levels[lv], hi = levels[lv + 1];
+      for (let i = 0; i < lo.length; i++) {
+        const p = lo[i], q = lo[(i + 1) % lo.length];
+        const want = [q[2] - p[2], 0, p[0] - q[0]];
+        const L = Math.hypot(want[0], want[2]) || 1;
+        want[0] = (want[0] / L) * (flip ? -1 : 1);
+        want[2] = (want[2] / L) * (flip ? -1 : 1);
+        pushTri(mesh, p, q, hi[i], want);
+        pushTri(mesh, q, hi[(i + 1) % hi.length], hi[i], want);
+      }
+    }
+  };
+  emitWalls(outerLevels);
+  if (holeLevels) emitWalls(holeLevels, true);
+
+  // Caps. Rings get a quad strip between aligned contours (earClip can't handle
+  // two contours as one polygon); single contours get ear-clipped per rim, the
+  // chamfered top rim clipping its own inset contour.
+  const bottom = outerLevels[0], top = outerLevels[outerLevels.length - 1];
+  if (inner) {
+    const hb = holeLevels[0], ht = holeLevels[holeLevels.length - 1];
+    if (hb.length !== bottom.length) throw new Error("ring caps need aligned outer/hole counts");
+    for (let i = 0; i < bottom.length; i++) {
+      const o1 = bottom[i], o2 = bottom[(i + 1) % bottom.length];
+      const h1 = hb[i], h2 = hb[(i + 1) % hb.length];
+      pushTri(mesh, o1, o2, h2, [0, -1, 0]);
+      pushTri(mesh, o1, h2, h1, [0, -1, 0]);
+      const t1 = top[i], t2 = top[(i + 1) % top.length];
+      const u1 = ht[i], u2 = ht[(i + 1) % ht.length];
+      pushTri(mesh, t1, u1, u2, [0, 1, 0]);
+      pushTri(mesh, t1, u2, t2, [0, 1, 0]);
+    }
+  } else {
+    const clipCap = (contour, y, wantY) => {
+      const tris = earClip(contour);
+      for (let i = 0; i < tris.length; i += 3) {
+        const a = tris[i], b = tris[i + 1], c3 = tris[i + 2];
+        pushTri(mesh, [a[0], y, a[1]], [b[0], y, b[1]], [c3[0], y, c3[1]], wantY);
+      }
+    };
+    clipCap(contourAt(0), ys[0], [0, -1, 0]);
+    clipCap(contourAt(ys.length - 1), ys[ys.length - 1], [0, 1, 0]);
+  }
+  return mesh;
+}
+
+function bboxOf(geometries) {
+  const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+  for (const g of geometries) {
+    for (let i = 0; i < g.pos.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        min[k] = Math.min(min[k], g.pos[i + k]);
+        max[k] = Math.max(max[k], g.pos[i + k]);
+      }
+    }
+  }
+  return { min, max };
+}
+
+/**
+ * One part, one buffer: a bracket plate plus its screw bosses collapse into a
+ * single VBO/IBO so the GL layer draws each part exactly once instead of
+ * re-binding attributes per batch. pushTri already duplicates vertices per
+ * face, so merging is a copy plus an index offset.
+ */
+function mergeGeometries(geos) {
+  const merged = { pos: [], nrm: [], idx: [] };
+  for (const g of geos) {
+    const offset = merged.pos.length / 3;
+    for (const v of g.pos) merged.pos.push(v);
+    for (const v of g.nrm) merged.nrm.push(v);
+    for (const i of g.idx) merged.idx.push(i + offset);
+  }
+  return merged;
+}
+
+function makePart(name, geometries, local) {
+  const node = new Node(name);
+  node.local = local;
+  const geometry = mergeGeometries(geometries);
+  return {
+    name, node, geometry,
+    vertexCount: geometry.pos.length / 3,
+    bbox: bboxOf([geometry]),
+  };
+}
+
+/**
+ * The socket, in millimetres, origin at the substrate centre: the land-grid
+ * envelope is the XZ bbox of the substrate. Eight named parts; the pad field
+ * is a placeholder slab until Task 4 instances its 3.6k gold pads.
+ */
+function buildParts() {
+  const HZ = 61.4 / 2; // land-grid half-depth
+  const SUB_T = 0.8, BR_T = 0.5, PLATE_T = 1.6;
+  const BR_Y = SUB_T + 0.05;            // ILS plate rides on the substrate
+  const HINGE_Y = BR_Y + 3.4;           // hinge rod sits above the screw bosses
+  const HINGE_Z = HZ + 3.5;             // rod line lies outside the envelope
+
+  // Keying corner: corner 3's quarter fillet becomes a 45deg straight cut, so
+  // the package reads as oriented (and the load plate's corner notch has a mate).
+  const outline = withKeyingCut(roundedRectProfile(75.9, 61.4, 4.5, 4), 4);
+
+  const substrate = makePart("substrate",
+    [extrudeProfile(outline, { depth: SUB_T, chamfer: 0.15 })],
+    { pos: [0, 0, 0], rot: {}, scale: 1 });
+
+  const frame = makePart("frame",
+    [extrudeProfile(roundedRectProfile(79.3, 64.8, 6, 4),
+      { depth: 4.2, chamfer: 0.3, hole: roundedRectProfile(70.5, 55.9, 3, 4) })],
+    { pos: [0, -0.2, 0], rot: {}, scale: 1 });
+
+  // Placeholder slab covering the pad region: Task 4 replaces this with the
+  // instanced gold field, keeping the node and the padCount diagnostic.
+  const padField = makePart("padField",
+    [extrudeProfile(rectProfile(-34.5, -26.6, 34.5, 26.6), { depth: 0.05 })],
+    { pos: [0, SUB_T + 0.02, 0], rot: {}, scale: 1 });
+
+  const bracket = [
+    extrudeProfile(rectProfile(-33, -24.5, 33, 24.5), { depth: BR_T, chamfer: 0.12 }),
+    extrudeProfile(rectProfile(-4, -30.5, 4, 30.5), { depth: BR_T, chamfer: 0.1 }),
+    ...[-30, 30].flatMap((x) => [-27, 27].map((z) =>
+      extrudeProfile(translatedProfile(circleProfile(3, 10), x, z), { depth: 2.4 }))),
+  ];
+  const brBracket = makePart("brBracket", bracket,
+    { pos: [0, BR_Y, 0], rot: {}, scale: 1 });
+
+  // Load plate: hinge edge at local z=0, body spans toward -z (latch side).
+  // Positive local X rotation at the hinge rod lifts the far end (Task 7).
+  const loadPlate = makePart("loadPlate",
+    [extrudeProfile(rectProfile(-33, -68, 33, 1.5), { depth: PLATE_T, chamfer: 0.2 })],
+    { pos: [0, HINGE_Y + 0.8, HINGE_Z], rot: {}, scale: 1 });
+
+  // Rod extruded along its profile +Y, then z-rolled onto the world X axis:
+  // rot.z=-pi/2 maps +Y to +X, which is where a hinge line belongs.
+  const hingeBar = makePart("hingeBar",
+    [extrudeProfile(circleProfile(1.5, 12), { depth: 79 })],
+    { pos: [-39.5, HINGE_Y, HINGE_Z], rot: { x: 0, y: 0, z: -Math.PI / 2 }, scale: 1 });
+
+  const latchLever = makePart("latchLever",
+    [extrudeProfile(rectProfile(-2.2, -1.2, 2.2, 4.8), { depth: 3.4, chamfer: 0.15 })],
+    { pos: [34, BR_Y + 1.4, -HZ - 3.5], rot: {}, scale: 1 });
+
+  const stiffenRing = makePart("stiffenRing",
+    [extrudeProfile(roundedRectProfile(75.0, 60.5, 3.4, 4),
+      { depth: 0.7, chamfer: 0.1, hole: roundedRectProfile(70.5, 56.0, 2.4, 4) })],
+    { pos: [0, SUB_T - 0.02, 0], rot: {}, scale: 1 });
+
+  return { substrate, frame, padField, brBracket, loadPlate, hingeBar, latchLever, stiffenRing };
+}
+
+window.__api = {
+  mat4, Node, earClip, bboxOf, buildParts,
+  roundedRectProfile, circleProfile, rectProfile, translatedProfile, withKeyingCut, extrudeProfile,
+};
 
 const MAX_FRAME_MS = 50; // a backgrounded tab hands us 1 Hz deltas; never let them through
 
