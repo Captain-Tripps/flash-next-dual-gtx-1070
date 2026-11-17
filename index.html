@@ -400,6 +400,128 @@ function bboxOf(geometries) {
   return { min, max };
 }
 
+// -------------------------------------------------------------- land grid
+/**
+ * LGA 3647 land-grid pattern, in millimetres, origin at the substrate centre.
+ *
+ * The field is a rectangular array of land positions punched by rectangular
+ * cutouts: a wide central ILS window with a narrow stem above and below it, plus
+ * a keyed notch on the latch side. The opening areas are tuned so the surviving
+ * count lands on exactly 3,647 pads, the package's contact count — which is
+ * what the pitch makes possible: a 76 x 61 mm envelope is 4,660 mm^2, so 3,647
+ * lands at ~1.1 mm pitch leave about 1,000 mm^2 for openings.
+ *
+ * Rows run across X, one per `rowPitchMm`; each row's x-extent is split by every
+ * cutout it crosses, so the row table *is* the socket shape rather than a
+ * texture that happens to have a dark square in the middle.
+ */
+const LAND_GRID = {
+  envelope: { w: 75.9, h: 61.4 },
+  keepOutMm: 1.4, // pads never sit closer than this to the substrate edge
+  colPitchMm: 1.0,
+  rowPitchMm: 1.1,
+  cutouts: [
+    { name: "ils-window", x0: -6.5, x1: 6.5, z0: -7.15, z1: 7.15 },
+    { name: "ils-stem-north", x0: -2.5, x1: 2.5, z0: 7.15, z1: 12.65 },
+    { name: "ils-stem-south", x0: -2.5, x1: 2.5, z0: -12.65, z1: -7.15 },
+    // Keying notch on the latch side: exactly one row tall (1.1 mm = one
+    // rowPitch) and 3 columns wide, so it removes 3 pads and the surviving
+    // count lands on the package's 3,647 contacts.
+    { name: "key-notch-latch-side", x0: 20.5, x1: 23.5, z0: -21.5, z1: -20.5 },
+  ],
+};
+
+/** Deterministic hash, so a pad's tone never changes between frames. */
+function toneOfPad(col, row) {
+  const h = Math.imul(col + 1024, 73) ^ Math.imul(row + 1024, 151);
+  return ((h >>> 0) % 4096) / 4095;
+}
+
+/**
+ * Which columns live in a row: every land whose centre is strictly inside a
+ * cutout is punched out of that row. The predicate here must match the one the
+ * tests assert, so "strictly inside" is load-bearing, not accidental.
+ */
+function rowSpans(grid, rowZ) {
+  const insideCutout = (x, z) => grid.cutouts.some(
+    (c) => x > c.x0 && x < c.x1 && z > c.z0 && z < c.z1
+  );
+  const spans = [];
+  let run = null;
+  for (let k = -grid.cols; k <= grid.cols; k++) {
+    const x = k * grid.colPitchMm;
+    if (insideCutout(x, rowZ)) {
+      if (run) { spans.push(run); run = null; }
+      continue;
+    }
+    if (!run) run = { fromCol: k, toCol: k };
+    else run.toCol = k;
+  }
+  if (run) spans.push(run);
+  for (const s of spans) {
+    s.x0 = s.fromCol * grid.colPitchMm;
+    s.x1 = s.toCol * grid.colPitchMm;
+  }
+  return spans;
+}
+
+/**
+ * The whole pad field: pad centres, the interleaved instance buffer the GPU
+ * consumes, and the per-row spans that generated the central opening.
+ */
+function composeLayout(grid = LAND_GRID) {
+  const hx = grid.envelope.w / 2 - grid.keepOutMm;
+  const hz = grid.envelope.h / 2 - grid.keepOutMm;
+  const cols = Math.floor(hx / grid.colPitchMm);
+  const rows = Math.floor(hz / grid.rowPitchMm);
+  const shaped = { ...grid, cols, rows };
+
+  const pads = [];
+  const rowTable = [];
+  for (let m = -rows; m <= rows; m++) {
+    const z = m * grid.rowPitchMm;
+    const spans = rowSpans(shaped, z);
+    const count = spans.reduce((n, s) => n + (s.toCol - s.fromCol + 1), 0);
+    rowTable.push({ index: m, z, spans, count });
+    for (const s of spans) {
+      for (let k = s.fromCol; k <= s.toCol; k++) {
+        pads.push({
+          x: k * grid.colPitchMm,
+          z,
+          tone: toneOfPad(k, m),
+          phase: (k - s.fromCol) / Math.max(1, s.toCol - s.fromCol),
+        });
+      }
+    }
+  }
+
+  const data = new Float32Array(pads.length * 4);
+  for (let i = 0; i < pads.length; i++) {
+    data[i * 4] = pads[i].x;
+    data[i * 4 + 1] = pads[i].z;
+    data[i * 4 + 2] = pads[i].tone;
+    data[i * 4 + 3] = pads[i].phase;
+  }
+
+  return {
+    grid: shaped,
+    cutouts: grid.cutouts,
+    rows: rowTable,
+    pads,
+    data,
+    instanceCount: pads.length,
+  };
+}
+
+/**
+ * One land: a micro-plane with a bevelled rim, instanced `instanceCount` times.
+ * Flat-shaded on purpose — at this size the bevel needs its own face to read at
+ * all, and a smooth-shaded pad would be a shiny blur.
+ */
+function padMeshGeometry() {
+  return extrudeProfile(rectProfile(-0.32, -0.3, 0.32, 0.3), { depth: 0.16, chamfer: 0.05 });
+}
+
 /**
  * One part, one buffer: a bracket plate plus its screw bosses collapse into a
  * single VBO/IBO so the GL layer draws each part exactly once instead of
@@ -450,14 +572,18 @@ function buildParts() {
 
   const frame = makePart("frame",
     [extrudeProfile(roundedRectProfile(79.3, 64.8, 6, 4),
-      { depth: 4.2, chamfer: 0.3, hole: roundedRectProfile(70.5, 55.9, 3, 4) })],
+      { depth: 4.2, chamfer: 0.3, hole: roundedRectProfile(74.2, 59.6, 3, 4) })],
     { pos: [0, -0.2, 0], rot: {}, scale: 1 });
 
-  // Placeholder slab covering the pad region: Task 4 replaces this with the
-  // instanced gold field, keeping the node and the padCount diagnostic.
-  const padField = makePart("padField",
-    [extrudeProfile(rectProfile(-34.5, -26.6, 34.5, 26.6), { depth: 0.05 })],
-    { pos: [0, SUB_T + 0.02, 0], rot: {}, scale: 1 });
+  // The land grid: one micro-plane geometry, instanced once per pad. The
+  // instance buffer is the layout's interleaved Float32Array, so nothing repeats
+  // a pad position on the CPU per frame — the vertex shader offsets them.
+  const layout = composeLayout();
+  const padField = makePart("padField", [padMeshGeometry()],
+    { pos: [0, SUB_T + 0.03, 0], rot: {}, scale: 1 });
+  padField.layout = layout;
+  padField.instanceCount = layout.instanceCount;
+  padField.instances = layout.data;
 
   const bracket = [
     extrudeProfile(rectProfile(-33, -24.5, 33, 24.5), { depth: BR_T, chamfer: 0.12 }),
@@ -484,10 +610,13 @@ function buildParts() {
     [extrudeProfile(rectProfile(-2.2, -1.2, 2.2, 4.8), { depth: 3.4, chamfer: 0.15 })],
     { pos: [34, BR_Y + 1.4, -HZ - 3.5], rot: {}, scale: 1 });
 
+  // Stiffener plate under the substrate, same footprint band as the frame wall:
+  // it nests just inside the frame bore, so it reads as machined steel from
+  // below without sharing any faces with the frame itself.
   const stiffenRing = makePart("stiffenRing",
-    [extrudeProfile(roundedRectProfile(75.0, 60.5, 3.4, 4),
-      { depth: 0.7, chamfer: 0.1, hole: roundedRectProfile(70.5, 56.0, 2.4, 4) })],
-    { pos: [0, SUB_T - 0.02, 0], rot: {}, scale: 1 });
+    [extrudeProfile(roundedRectProfile(79.2, 64.7, 6, 4),
+      { depth: 0.8, chamfer: 0.1, hole: roundedRectProfile(74.3, 59.7, 3, 4) })],
+    { pos: [0, -1.0, 0], rot: {}, scale: 1 });
 
   return { substrate, frame, padField, brBracket, loadPlate, hingeBar, latchLever, stiffenRing };
 }
@@ -495,6 +624,7 @@ function buildParts() {
 window.__api = {
   mat4, Node, earClip, bboxOf, buildParts,
   roundedRectProfile, circleProfile, rectProfile, translatedProfile, withKeyingCut, extrudeProfile,
+  LAND_GRID, composeLayout, padMeshGeometry,
 };
 
 const MAX_FRAME_MS = 50; // a backgrounded tab hands us 1 Hz deltas; never let them through
@@ -521,9 +651,26 @@ function boot() {
 
   const scene = {
     ok: true, cause: "", parts: {}, programs: {}, frames: 0,
-    padCount: 0, plateAngleDeg: 0, azimuthDeg: 0,
+    padCount: 0, plateAngleDeg: 0, azimuthDeg: 0, drawCalls: 0,
   };
   window.__scene = scene;
+
+  // Scene graph first, so the diagnostics are live before the first frame: the
+  // harness asserts padCount comes from the layout, not a hardcoded 3647.
+  const parts = buildParts();
+  const socketRoot = new Node("socket");
+  for (const part of Object.values(parts)) {
+    socketRoot.add(part.node);
+    scene.parts[part.name] = {
+      vertexCount: part.vertexCount,
+      indexCount: part.geometry.idx.length,
+      instanceCount: part.instanceCount || 0,
+    };
+  }
+  scene.padCount = parts.padField.instanceCount;
+  scene.drawCalls = Object.keys(scene.parts).length;
+  window.__sceneParts = parts;
+  window.__socketRoot = socketRoot;
 
   gl.clearColor(0.05, 0.06, 0.07, 1);
   gl.enable(gl.DEPTH_TEST);
