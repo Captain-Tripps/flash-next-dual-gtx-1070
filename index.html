@@ -13,10 +13,28 @@
     background: #14171c; white-space: pre-wrap;
   }
   #error-overlay.visible { display: grid; }
+  /*
+   * The HUD sits over the canvas rather than beside it: the viewport is the
+   * whole page, and a readout that took layout space would shrink the socket.
+   */
+  #hud {
+    position: fixed; left: 14px; bottom: 14px; z-index: 2;
+    display: grid; grid-template-columns: auto auto; gap: 2px 10px;
+    padding: 8px 11px; border-radius: 6px; pointer-events: none;
+    background: rgba(12, 15, 20, 0.58); color: #9fb2c6;
+    font: 500 12px/1.55 ui-monospace, "Cascadia Mono", monospace;
+  }
+  #hud b { font-weight: 500; color: #6b7f93; text-transform: uppercase; letter-spacing: 0.06em; }
+  #hud span { text-align: right; }
 </style>
 </head>
 <body>
 <canvas id="viewport"></canvas>
+<div id="hud" aria-live="polite">
+  <b>phase</b><span id="phase">closed</span>
+  <b>azimuth</b><span id="azimuth">0.0°</span>
+  <b>contacts</b><span id="padCount">0</span>
+</div>
 <div id="error-overlay"></div>
 <script type="module">
 "use strict";
@@ -561,7 +579,6 @@ function buildParts() {
   const BR_Y = SUB_T + 0.05;            // ILS plate rides on the substrate
   const HINGE_Y = BR_Y + 3.4;           // hinge rod sits above the screw bosses
   const HINGE_Z = HZ + 3.5;             // rod line lies outside the envelope
-  const PLATE_OPEN_DEG = 105;           // showcase default, see loadPlate below
 
   // Keying corner: corner 3's quarter fillet becomes a 45deg straight cut, so
   // the package reads as oriented (and the load plate's corner notch has a mate).
@@ -601,29 +618,38 @@ function buildParts() {
   const brBracket = makePart("brBracket", bracket,
     { pos: [0, BR_Y, 0], rot: {}, scale: 1 });
 
-  // Load plate: hinge edge at local z=0, body spans toward -z (latch side).
-  // Positive local X rotation at the hinge rod lifts the far end (Task 7).
+  // The hinge pivot is a transform node, not a part: no geometry, just the
+  // rotation the plate cycle drives. The load plate and the rod collar hang off
+  // it, so one rotation moves both and they cannot disagree about the angle.
+  // The pivot sits on the rod centreline, which is also the plate's own origin,
+  // so the hinge line stays put through the whole swing (tested).
+  const hingePivot = makePart("hingePivot", [],
+    { pos: [0, HINGE_Y, HINGE_Z], rot: { x: 0, y: 0, z: 0 }, scale: 1 });
+
+  // Load plate: hinge edge at the node origin, body spans toward -z (latch
+  // side). Rotation about the pivot's local +X lifts the far end.
   //
-  // The showcase default is hinged open: closed, the plate buries the entire land
-  // grid behind steel, so the one feature worth showcasing on an LGA socket - the
-  // 3,647-contact field - never reaches the camera.
+  // The plate starts closed and the cycle opens it later, so the first frame of
+  // the showcase is the assembled socket; the land grid reaches the camera when
+  // the cycle reaches its open hold.
   const loadPlate = makePart("loadPlate",
     [extrudeProfile(rectProfile(-33, -68, 33, 1.5), { depth: PLATE_T, chamfer: 0.2 })],
-    {
-      pos: [0, HINGE_Y + 0.8, HINGE_Z],
-      rot: { x: (PLATE_OPEN_DEG * Math.PI) / 180, y: 0, z: 0 },
-      scale: 1,
-    });
+    { pos: [0, 0, 0], rot: { x: 0, y: 0, z: 0 }, scale: 1 });
 
   // Rod extruded along its profile +Y, then z-rolled onto the world X axis:
   // rot.z=-pi/2 maps +Y to +X, which is where a hinge line belongs.
   const hingeBar = makePart("hingeBar",
     [extrudeProfile(circleProfile(1.5, 12), { depth: 79 })],
-    { pos: [-39.5, HINGE_Y, HINGE_Z], rot: { x: 0, y: 0, z: -Math.PI / 2 }, scale: 1 });
+    { pos: [-39.5, 0, 0], rot: { x: 0, y: 0, z: -Math.PI / 2 }, scale: 1 });
 
+  hingePivot.node.add(loadPlate.node);
+  hingePivot.node.add(hingeBar.node);
+
+  // The latch lever stays on the ILS side of the hinge: it swings on its own
+  // post, not on the rod, so it is not a child of the pivot.
   const latchLever = makePart("latchLever",
     [extrudeProfile(rectProfile(-2.2, -1.2, 2.2, 4.8), { depth: 3.4, chamfer: 0.15 })],
-    { pos: [34, BR_Y + 1.4, -HZ - 3.5], rot: {}, scale: 1 });
+    { pos: [34, BR_Y + 1.4, -HZ - 3.5], rot: { x: 0, y: 0, z: 0 }, scale: 1 });
 
   // Stiffener plate under the substrate, same footprint band as the frame wall:
   // it nests just inside the frame bore, so it reads as machined steel from
@@ -633,7 +659,7 @@ function buildParts() {
       { depth: 0.8, chamfer: 0.1, hole: roundedRectProfile(74.3, 59.7, 3, 4) })],
     { pos: [0, -1.0, 0], rot: {}, scale: 1 });
 
-  return { substrate, frame, padField, brBracket, loadPlate, hingeBar, latchLever, stiffenRing };
+  return { substrate, frame, padField, brBracket, hingePivot, loadPlate, hingeBar, latchLever, stiffenRing };
 }
 
 // ---------------------------------------------------------------- materials & lights
@@ -1242,6 +1268,100 @@ function advanceOrbitClock(dtMs) {
   return step;
 }
 
+/*
+ * The load plate hinge cycle: a keyframe table, not per-frame accumulators.
+ * Everything downstream reads it as a function of elapsed time, so a harness can
+ * scrub it to any t and get the same pose every time - and so a paused clock
+ * resumes where it was instead of re-running the swing.
+ *
+ * A keyframe's `phase` labels the span it opens, and its deg values are the
+ * values AT that keyframe; the span interpolates toward the next keyframe's
+ * values. The final keyframe is the wrap sentinel: it must equal the first, so
+ * t = cycleMs reads identical to t = 0.
+ */
+const PLATE_MAX_DEG = 105;   // a real LGA load plate swings open past vertical
+const PLATE_LATCH_DEG = 18;  // the lever clears its hook roughly a quarter turn
+const PLATE_CYCLE = {
+  cycleMs: 19600,
+  maxDeg: PLATE_MAX_DEG,
+  keyframes: [
+    { atMs: 0, phase: "closed", plateDeg: 0, latchDeg: 0 },
+    { atMs: 6000, phase: "unlatching", plateDeg: 0, latchDeg: 0 },
+    { atMs: 7600, phase: "opening", plateDeg: 0, latchDeg: PLATE_LATCH_DEG },
+    { atMs: 10800, phase: "open", plateDeg: PLATE_MAX_DEG, latchDeg: PLATE_LATCH_DEG },
+    { atMs: 16800, phase: "closing", plateDeg: PLATE_MAX_DEG, latchDeg: PLATE_LATCH_DEG },
+    { atMs: 19600, phase: "closed", plateDeg: 0, latchDeg: 0 },
+  ],
+};
+
+const easeInOut = (h) => h * h * (3 - 2 * h);
+
+/**
+ * The plate pose at one point in the cycle. `plateOverride.deg` (set through
+ * setPlateOverride, e.g. by the Space key) pins a pose and lets the clock keep
+ * running, so unpinning returns to the identical frame it was on.
+ */
+function platePose(elapsedMs) {
+  if (plateOverride.deg !== null) {
+    const deg = plateOverride.deg;
+    return {
+      phase: deg <= 0.01 ? "closed" : deg >= PLATE_MAX_DEG - 0.01 ? "open" : "holding",
+      plateAngleDeg: deg,
+      latchAngleDeg: 0,
+    };
+  }
+  const { cycleMs, keyframes: ks } = PLATE_CYCLE;
+  const local = ((elapsedMs % cycleMs) + cycleMs) % cycleMs;
+  let i = 0;
+  while (i < ks.length - 2 && ks[i + 1].atMs <= local) i++;
+  const from = ks[i], to = ks[i + 1];
+  const span = to.atMs - from.atMs;
+  const h = span <= 0 ? 0 : (local - from.atMs) / span;
+  const e = easeInOut(h);
+  return {
+    phase: from.phase,
+    plateAngleDeg: from.plateDeg + (to.plateDeg - from.plateDeg) * e,
+    latchAngleDeg: from.latchDeg + (to.latchDeg - from.latchDeg) * e,
+  };
+}
+
+/*
+ * null means "follow the cycle". The sentinel is null rather than any falsy
+ * value because 0 is a legitimate pin (plate closed), and 0 is falsy.
+ */
+const plateOverride = { deg: null };
+
+function setPlateOverride(deg) {
+  plateOverride.deg = deg === undefined ? null : deg;
+}
+
+/** Space: closed -> open -> back to the auto cycle, in that order. */
+function togglePlatePin() {
+  if (plateOverride.deg === null) plateOverride.deg = 0;
+  else if (plateOverride.deg < PLATE_MAX_DEG / 2) plateOverride.deg = PLATE_MAX_DEG;
+  else plateOverride.deg = null;
+}
+
+/** Writes a pose into the scene graph. Returns the pose for caller chaining. */
+function applyPlatePose(parts, pose) {
+  parts.hingePivot.node.local.rot.x = (pose.plateAngleDeg * Math.PI) / 180;
+  parts.latchLever.node.local.rot.y = (pose.latchAngleDeg * Math.PI) / 180;
+  return pose;
+}
+
+/** Keyboard shortcuts: Space pins the plate, A freezes the animation clock. */
+function handleKey(code) {
+  if (code === "Space") {
+    togglePlatePin();
+    return true;
+  }
+  if (code === "KeyA") {
+    orbitClock.paused = !orbitClock.paused;
+    return true;
+  }
+  return false;
+}
+
 
 /**
  * One studio frame: backdrop, seven shaded parts, then the 3,647 pads in a
@@ -1324,8 +1444,10 @@ function createRenderer(gl, parts) {
     programs[name] = rec.report;
   }
 
+  // Transform nodes carry no geometry, so there is nothing to upload for them:
+  // the hinge pivot exists only to rotate the plate and the rod collar.
   const gpuParts = Object.entries(parts)
-    .filter(([name]) => name !== "padField")
+    .filter(([, part]) => part.geometry.idx.length > 0 && part.name !== "padField")
     .map(([, part]) => uploadPartToGpu(gl, part, records.std));
   const padGpu = uploadPartToGpu(gl, parts.padField, records.pad);
   const backdrop = uploadBackdropToGpu(gl, records.bg);
@@ -1420,6 +1542,7 @@ window.__api = {
   ORBIT, CAMERA_LIMITS, cameraPose, orbit, zoom, fitViewport, attachCameraInput,
   cameraInput: inputState,
   orbitClock, advanceOrbitClock, MAX_FRAME_MS,
+  PLATE_CYCLE, PLATE_MAX_DEG, platePose, applyPlatePose, setPlateOverride, handleKey,
   analysePixels, frameStats, drawScene, updateCamera, resizeCanvas, createRenderer,
   interleavedGeometry, STRIDE_BYTES,
 };
@@ -1437,19 +1560,52 @@ function reportFailure(cause, detail) {
   overlay.classList.add("visible");
   window.__scene = {
     ok: false, cause, parts: {}, programs: {}, frames: 0,
-    padCount: 0, padsDrawn: 0, plateAngleDeg: 0, azimuthDeg: 0, cameraDist: 0, drawCalls: 0,
+    padCount: 0, padsDrawn: 0, plateAngleDeg: 0, platePhase: "closed", azimuthDeg: 0,
+    cameraDist: 0, drawCalls: 0,
   };
+}
+
+/**
+ * One frame of model state: the cycle clock feeds the plate pose straight into
+ * the scene graph. Because the pose is derived from the clock rather than
+ * accumulated per frame, a paused clock or a harness that pins elapsedMs both
+ * land on the pose they asked for.
+ */
+function applyFramePoses(scene, parts) {
+  const pose = applyPlatePose(parts, platePose(orbitClock.elapsedMs));
+  scene.plateAngleDeg = pose.plateAngleDeg;
+  scene.platePhase = pose.phase;
+  return pose;
+}
+
+/*
+ * The HUD is a diagnostic as much as a nicety: it is what makes a hinge cycle
+ * and a 3,647-pad count visible to a human without an eval, and the harness
+ * asserts on the same text it reads.
+ */
+function updateHud(scene) {
+  const texts = {
+    phase: scene.platePhase,
+    azimuth: `${scene.azimuthDeg.toFixed(1)}°`,
+    padCount: String(scene.padCount),
+  };
+  for (const [id, text] of Object.entries(texts)) {
+    const node = document.getElementById(id);
+    // Assigning every frame would blink the readout; text nodes compare cheaply
+    // and a changed string is the only reason to touch the DOM.
+    if (node && node.textContent !== text) node.textContent = text;
+  }
 }
 
 /*
  * The animation loop. dtMs is clamped by advanceOrbitClock so a hidden-tab 1 s
- * delta cannot jump the camera 20 deg in one frame; the clamp is what keeps the
- * showcase honest about its own speed.
+ * delta cannot jump the camera 20 deg or snap the plate cycle to its end pose;
+ * the clamp is what keeps the showcase honest about its own speed.
  */
-function startRenderLoop(gl, scene, socketRoot) {
+function startRenderLoop(gl, scene, parts) {
   let last = performance.now();
   const frame = (now) => {
-    const dtMs = advanceOrbitClock(now - last);
+    advanceOrbitClock(now - last);
     last = now;
     scene.frames++;
 
@@ -1459,6 +1615,8 @@ function startRenderLoop(gl, scene, socketRoot) {
     // Framing goes in the same record, so the harness can assert a wheel zoom
     // actually moved the camera rather than just swallowing the event.
     scene.cameraDist = pose.dist;
+    applyFramePoses(scene, parts);
+    updateHud(scene);
     updateCamera(pose, viewport);
     lastFrameTimeMs = now;
     scene.drawCalls = drawScene(cameraState.viewProj, now, cameraState.eye);
@@ -1478,7 +1636,8 @@ function boot() {
 
   const scene = {
     ok: true, cause: "", parts: {}, programs: {}, frames: 0,
-    padCount: 0, padsDrawn: 0, plateAngleDeg: 0, azimuthDeg: VIEW.azDeg, drawCalls: 0,
+    padCount: 0, padsDrawn: 0, plateAngleDeg: 0, platePhase: "closed",
+    azimuthDeg: VIEW.azDeg, cameraDist: VIEW.dist, drawCalls: 0,
   };
   window.__scene = scene;
 
@@ -1487,7 +1646,9 @@ function boot() {
   const parts = buildParts();
   const socketRoot = new Node("socket");
   for (const part of Object.values(parts)) {
-    socketRoot.add(part.node);
+    // Parts already hanging off the hinge pivot must not be re-parented onto the
+    // root, or the one rotation that drives the plate would hang nothing.
+    if (!part.node.parent) socketRoot.add(part.node);
     scene.parts[part.name] = {
       vertexCount: part.vertexCount,
       indexCount: part.geometry.idx.length,
@@ -1495,9 +1656,6 @@ function boot() {
     };
   }
   scene.padCount = parts.padField.instanceCount;
-  // The diagnostics report the pose the node actually carries, rather than a
-  // hardcoded number that could drift away from the geometry.
-  scene.plateAngleDeg = (parts.loadPlate.node.local.rot.x * 180) / Math.PI;
   window.__sceneParts = parts;
   window.__socketRoot = socketRoot;
 
@@ -1518,6 +1676,8 @@ function boot() {
   // boot sees a populated diagnostics object, not a clear-colour promise.
   resizeCanvas(gl);
   updateCamera();
+  applyFramePoses(scene, parts);
+  updateHud(scene);
   gl.clearColor(0.03, 0.035, 0.045, 1);
   gl.enable(gl.DEPTH_TEST);
   lastFrameTimeMs = performance.now();
@@ -1529,7 +1689,12 @@ function boot() {
   // orbit/zoom API the unit tests drive, so there is only one input path.
   attachCameraInput(canvas, { onCursor: (cursor) => { canvas.style.cursor = cursor; } });
 
-  startRenderLoop(gl, scene, socketRoot);
+  // Space pins the plate (closed, open, off), A freezes the whole animation.
+  window.addEventListener("keydown", (event) => {
+    if (handleKey(event.code)) event.preventDefault();
+  });
+
+  startRenderLoop(gl, scene, parts);
 }
 
 boot();

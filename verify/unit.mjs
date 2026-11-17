@@ -48,6 +48,9 @@ function makeSandbox({ glFactory = () => null } = {}) {
   canvas.height = 100;
   nodes.set("#viewport", canvas);
   nodes.set("#error-overlay", makeNode("div"));
+  // The HUD readouts the page writes every frame. The stub has to model them,
+  // or the page's own getElementById fallback would hide a missing element.
+  for (const id of ["#hud", "#phase", "#padCount", "#azimuth"]) nodes.set(id, makeNode("span"));
 
   const document = {
     readyState: "complete",
@@ -230,10 +233,10 @@ const geometryApi = () => {
 
 const allFinite = (arr) => arr.every((v) => Number.isFinite(v));
 
-test("buildParts_exposesExactlyTheEightNamedSocketParts", () => {
+test("buildParts_exposesTheSocketPartsAndTheirHingePivot", () => {
   const a = geometryApi();
   const parts = a.buildParts();
-  const want = ["substrate", "frame", "padField", "brBracket", "loadPlate", "hingeBar", "latchLever", "stiffenRing"];
+  const want = ["substrate", "frame", "padField", "brBracket", "loadPlate", "hingeBar", "latchLever", "stiffenRing", "hingePivot"];
   const got = Object.keys(parts).sort();
   if (got.join() !== want.slice().sort().join()) throw new Error(`got [${got}]`);
   for (const name of want) if (!(parts[name].node instanceof a.Node)) throw new Error(`${name} has no Node`);
@@ -252,7 +255,12 @@ test("buildParts_everyPart_isIndexedFiniteGeometryWithUnitNormals", () => {
   const parts = geometryApi().buildParts();
   for (const [name, part] of Object.entries(parts)) {
     const { pos, nrm, idx } = part.geometry;
-    if (!idx.length) throw new Error(`${name}: empty index buffer`);
+    if (!idx.length) {
+      // The hinge pivot is a transform node by design (a dedicated test asserts
+      // it carries no geometry); every other empty buffer is a bug.
+      if (name !== "hingePivot") throw new Error(`${name}: empty index buffer`);
+      continue;
+    }
     if (pos.length % 3 !== 0) throw new Error(`${name}: pos not a vertex triple`);
     if (pos.length / 3 !== part.vertexCount) throw new Error(`${name}: vertexCount mismatch`);
     if (nrm.length !== pos.length) throw new Error(`${name}: normals missing for some vertices`);
@@ -552,8 +560,15 @@ test("boot_withWebGL2_drawScene_countsOneDrawPerPartPlusTheInstancedPadField", (
   const { scene, api: pageApi } = boot({ glFactory: () => stubGL() });
   const viewProj = pageApi.mat4.identity();
   pageApi.drawScene(viewProj, 0);
-  const wantParts = Object.keys(scene.parts).length;
-  if (scene.drawCalls < wantParts) throw new Error(`drawCalls ${scene.drawCalls}, want >= ${wantParts}`);
+  // Only parts with geometry get a draw call; the hinge pivot rotates and
+  // nothing else, so counting scene.parts keys would expect a phantom draw.
+  const drawableParts = Object.values(scene.parts).filter((p) => p.indexCount > 0).length;
+  if (scene.parts.hingePivot && scene.parts.hingePivot.indexCount !== 0) {
+    throw new Error("the hinge pivot somehow carries geometry");
+  }
+  if (scene.drawCalls !== drawableParts) {
+    throw new Error(`drawCalls ${scene.drawCalls}, want one per drawable part (${drawableParts})`);
+  }
   if (scene.padsDrawn !== scene.padCount) throw new Error(`padsDrawn ${scene.padsDrawn}, want ${scene.padCount}`);
 });
 
@@ -725,6 +740,217 @@ test("advanceOrbitClock_whenPaused_withDelta_shouldNotAdvanceTheElapsedClock", (
     throw new Error("a paused clock still advanced the azimuth");
   }
   if (advanceOrbitClock(-25) !== 0) throw new Error("a negative delta must clamp to 0");
+});
+
+// ---------------------------------------------- load plate hinge cycle + HUD (Task 7)
+const plateApi = () => {
+  const a = api();
+  for (const fn of ["platePose", "applyPlatePose", "setPlateOverride", "handleKey"]) {
+    if (typeof a[fn] !== "function") throw new Error(`window.__api.${fn} is not a function`);
+  }
+  if (!a.PLATE_CYCLE) throw new Error("window.__api.PLATE_CYCLE is missing");
+  return a;
+};
+
+/*
+ * The hinge line of the model, in millimetres, as hard constants on purpose:
+ * a reparenting bug that moves the pivot silently moves the whole plate-and-rod
+ * assembly, and the only way to catch it is to compare against real numbers.
+ * HINGE_Y = substrate top (0.8) + ILS band (0.05) + rod riser (3.4); the rod
+ * centreline is the pivot, so the plate hangs from it with no local offset.
+ * HINGE_Z = land-grid half-depth (30.7) + rod offset (3.5).
+ */
+const HINGE_LINE = [0, 4.25, 34.2];
+
+test("platePose_atZeroElapsed_reportsTheClosedPhaseWithBothAnglesAtZero", () => {
+  const { platePose } = plateApi();
+  const pose = platePose(0);
+  if (pose.phase !== "closed") throw new Error(`phase at t=0 is "${pose.phase}", want closed`);
+  if (pose.plateAngleDeg !== 0) throw new Error(`plate angle ${pose.plateAngleDeg}, want 0`);
+  if (pose.latchAngleDeg !== 0) throw new Error(`latch angle ${pose.latchAngleDeg}, want 0`);
+});
+
+test("platePose_overOneFullCycle_visitsTheFiveNamedPhasesInOrder", () => {
+  const { platePose, PLATE_CYCLE } = plateApi();
+  const seen = [];
+  // Sampling past the wrap point on purpose: the cycle must re-enter "closed"
+  // at the end rather than jump from "closing" straight back to "opening".
+  for (let t = 0; t <= PLATE_CYCLE.cycleMs + 120; t += 120) {
+    const phase = platePose(t).phase;
+    if (seen[seen.length - 1] !== phase) seen.push(phase);
+  }
+  const want = ["closed", "unlatching", "opening", "open", "closing", "closed"];
+  if (seen.join(",") !== want.join(",")) throw new Error(`phases visited: ${seen.join(",")} (want ${want.join(",")})`);
+});
+
+test("platePose_atTheEndOfOpening_reachesAtLeast104DegreesAndHoldsItWhileOpen", () => {
+  const { platePose, PLATE_CYCLE } = plateApi();
+  const open = PLATE_CYCLE.keyframes.find((k) => k.phase === "open");
+  const at = platePose(open.atMs - 1).plateAngleDeg;
+  if (!(at >= 104)) throw new Error(`plate angle at the end of opening is ${at}, want >= 104`);
+  for (let t = open.atMs; t < open.atMs + 1500; t += 100) {
+    const p = platePose(t);
+    if (p.phase !== "open") throw new Error(`t=${t}: phase "${p.phase}", want open`);
+    if (p.plateAngleDeg < 104) throw new Error(`t=${t}: open phase dropped the plate to ${p.plateAngleDeg}`);
+  }
+});
+
+test("platePose_byTheEndOfClosing_backReturnsThePlateToZeroDegrees", () => {
+  const { platePose, PLATE_CYCLE } = plateApi();
+  const closing = PLATE_CYCLE.keyframes.find((k) => k.phase === "closing");
+  const next = PLATE_CYCLE.keyframes.find((k) => k.atMs > closing.atMs);
+  const at = platePose(next.atMs).plateAngleDeg;
+  if (Math.abs(at) > 1e-9) throw new Error(`plate angle after closing is ${at}, want 0`);
+});
+
+test("platePose_whileThePhaseIsClosed_latchAngleStaysAtZero", () => {
+  const { platePose, PLATE_CYCLE } = plateApi();
+  for (let t = 0; t < PLATE_CYCLE.cycleMs; t += 37) {
+    const p = platePose(t);
+    if (p.phase === "closed" && p.latchAngleDeg !== 0) {
+      throw new Error(`t=${t}: closed phase has a swung latch (${p.latchAngleDeg} deg)`);
+    }
+  }
+});
+
+test("platePose_atTheCycleWrap_andAtZero_shouldReturnIdenticalValues", () => {
+  const { platePose, PLATE_CYCLE } = plateApi();
+  const a = JSON.stringify(platePose(0));
+  const b = JSON.stringify(platePose(PLATE_CYCLE.cycleMs));
+  if (a !== b) throw new Error(`cycle does not wrap: ${a} vs ${b}`);
+});
+
+test("setPlateOverride_withZeroFalsyPin_andReleaseRestoresTheFreeCyclePose", () => {
+  const { platePose, setPlateOverride, PLATE_CYCLE } = plateApi();
+  const mid = PLATE_CYCLE.cycleMs / 2;
+  const free = JSON.stringify(platePose(mid));
+
+  // WHEN the pin is 0 (a falsy angle), THEN it must still pin the plate closed:
+  // the release sentinel has to be null, not "any falsy value".
+  setPlateOverride(0);
+  const pinned = platePose(mid);
+  if (pinned.plateAngleDeg !== 0) throw new Error(`falsy pin reported ${pinned.plateAngleDeg}, want 0`);
+  if (pinned.phase !== "closed") throw new Error(`falsy pin reported phase "${pinned.phase}"`);
+
+  // THEN releasing with null returns the identical cycle pose, unpinned.
+  setPlateOverride(null);
+  if (JSON.stringify(platePose(mid)) !== free) {
+    throw new Error(`release left the cycle at ${JSON.stringify(platePose(mid))}, was ${free}`);
+  }
+});
+
+test("applyPlatePose_at105Degrees_keepsTheHingeLineFixedAndLiftsThePlateTip", () => {
+  const { applyPlatePose, mat4, buildParts } = plateApi();
+  const parts = buildParts();
+  const worldOf = (part) => part.node.world(new Float32Array(16));
+  const pointAt = (m, p) => mat4.transformPoint(new Float64Array(3), m, p);
+
+  applyPlatePose(parts, { plateAngleDeg: 0, latchAngleDeg: 0 });
+  const closedOrigin = pointAt(worldOf(parts.loadPlate), [0, 0, 0]);
+  const closedTip = pointAt(worldOf(parts.loadPlate), [0, 0, -68]);
+
+  applyPlatePose(parts, { plateAngleDeg: 105, latchAngleDeg: 18 });
+  const openOrigin = pointAt(worldOf(parts.loadPlate), [0, 0, 0]);
+  const openTip = pointAt(worldOf(parts.loadPlate), [0, 0, -68]);
+
+  for (let i = 0; i < 3; i++) {
+    if (Math.abs(openOrigin[i] - closedOrigin[i]) > 1e-4) {
+      throw new Error(`hinge line drifted ${JSON.stringify(closedOrigin)} -> ${JSON.stringify(openOrigin)}`);
+    }
+    if (Math.abs(closedOrigin[i] - HINGE_LINE[i]) > 1e-3) {
+      throw new Error(`hinge line is ${JSON.stringify(closedOrigin)}, want ${JSON.stringify(HINGE_LINE)}`);
+    }
+  }
+  if (!(openTip[1] > closedTip[1] + 50)) {
+    throw new Error(`plate tip did not lift: y ${closedTip[1].toFixed(1)} -> ${openTip[1].toFixed(1)}`);
+  }
+  // 105deg leans the tip back past vertical and over the hinge side, so the tip
+  // ends up north of the socket rather than above the land grid.
+  if (!(openTip[2] > HINGE_LINE[2])) {
+    throw new Error(`plate tip stayed over the field at z=${openTip[2].toFixed(1)}, want past the hinge`);
+  }
+});
+
+// One rotation on the pivot must drive both the plate and the rod collar, so
+// they cannot disagree about how far the plate swung.
+test("buildParts_hingePivot_parentsTheLoadPlateAndHingeBarSoOneRotationDrivesBoth", () => {
+  const parts = plateApi().buildParts();
+  for (const name of ["loadPlate", "hingeBar"]) {
+    if (parts[name].node.parent !== parts.hingePivot.node) {
+      throw new Error(`${name} is not a child of the hinge pivot (${parts[name].node.parent && parts[name].node.parent.name})`);
+    }
+  }
+  if (parts.hingePivot.geometry.idx.length !== 0) {
+    throw new Error("the hinge pivot is a transform node: it must carry no geometry of its own");
+  }
+});
+
+test("handleKey_withSpace_pinsClosed_thenOpen_then_returnsToTheAutoCycle", () => {
+  const { handleKey, platePose, PLATE_CYCLE, setPlateOverride } = plateApi();
+  setPlateOverride(null);
+  const mid = PLATE_CYCLE.cycleMs / 2;
+  const free = JSON.stringify(platePose(mid));
+
+  if (!handleKey("Space")) throw new Error("Space was not handled at all");
+  const first = platePose(mid);
+  if (first.plateAngleDeg !== 0) throw new Error(`first Space pinned ${first.plateAngleDeg}, want 0 (closed)`);
+
+  handleKey("Space");
+  const second = platePose(mid);
+  if (!(second.plateAngleDeg > 100)) throw new Error(`second Space pinned ${second.plateAngleDeg}, want open`);
+
+  handleKey("Space");
+  if (JSON.stringify(platePose(mid)) !== free) {
+    throw new Error(`third Space did not return the auto cycle: ${JSON.stringify(platePose(mid))} (was ${free})`);
+  }
+});
+
+test("handleKey_withKeyA_freezesThenResumesTheAnimationClockWithoutMovingIt", () => {
+  const { handleKey, orbitClock } = plateApi();
+  orbitClock.paused = false;
+  const before = orbitClock.elapsedMs;
+
+  if (!handleKey("KeyA")) throw new Error("KeyA was not handled at all");
+  if (orbitClock.paused !== true) throw new Error("KeyA did not pause the auto-orbit");
+  if (orbitClock.elapsedMs !== before) throw new Error("pausing moved the clock instead of freezing it");
+
+  handleKey("KeyA");
+  if (orbitClock.paused !== false) throw new Error("second KeyA did not resume the auto-orbit");
+});
+
+// Review-focus invariant: a hidden tab that hands back a 5 s delta must not be
+// allowed to snap the cycle to its end pose, because the showcase would then
+// visibly jump rather than animate.
+test("advanceOrbitClock_withAHugeHiddenTabDelta_clampsTheStepSoThePlateCycleCannotSnapToItsEndPose", () => {
+  const { advanceOrbitClock, orbitClock, MAX_FRAME_MS, platePose } = plateApi();
+  orbitClock.paused = false;
+  orbitClock.elapsedMs = 0;
+
+  const step = advanceOrbitClock(5000);
+  if (step > MAX_FRAME_MS) throw new Error(`unclamped step ${step} ms exceeds MAX_FRAME_MS ${MAX_FRAME_MS}`);
+  if (orbitClock.elapsedMs > MAX_FRAME_MS) {
+    throw new Error(`clock jumped to ${orbitClock.elapsedMs} ms in one frame (max ${MAX_FRAME_MS})`);
+  }
+  const pose = platePose(orbitClock.elapsedMs);
+  if (pose.phase !== "closed") throw new Error(`one clamped frame landed in phase "${pose.phase}"`);
+  if (Math.abs(pose.plateAngleDeg) > 0.5) throw new Error(`one clamped frame opened the plate to ${pose.plateAngleDeg}`);
+});
+
+test("boot_withWebGL2_writesPhaseAzimuthAndPadCountIntoTheHudNodes", () => {
+  const { nodes } = boot({ glFactory: () => stubGL() });
+  const read = (id) => {
+    const node = nodes.get(id);
+    if (!node) throw new Error(`HUD node ${id} missing from the page markup`);
+    return node.textContent;
+  };
+  const phase = read("#phase");
+  const pads = read("#padCount");
+  const azimuth = read("#azimuth");
+  if (!["closed", "unlatching", "opening", "open", "closing"].includes(phase)) {
+    throw new Error(`#phase textContent is "${phase}"`);
+  }
+  if (pads !== String(3647)) throw new Error(`#padCount is "${pads}", want 3647`);
+  if (!/^-?\d+(\.\d+)?°$/.test(azimuth)) throw new Error(`#azimuth is "${azimuth}", want a degree readout`);
 });
 
 let failed = 0;

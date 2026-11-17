@@ -105,6 +105,48 @@ check("every_shader_program_compiles_and_links_clean", () => {
 
 const frameStats = () => evalJs("return JSON.stringify(window.__api.frameStats({ step: 3 }));");
 
+/*
+ * The hinge cycle in a real browser, driven by wall time rather than a pinned
+ * pose: the unit tests can prove platePose(t) is right, but only here can we see
+ * the render loop actually applying that pose to the scene graph. Sampling the
+ * diagnostics across 12 s is the drive-then-assert end state - and the closed /
+ * open pixel comparison proves the plate geometry moved in GL, not just in the
+ * diagnostics object.
+ */
+check("the_plate_cycle_sweeps_past_90_degrees_and_the_open_plate_reveals_the_gold", () => {
+  evalJs("window.__api.setPlateOverride(null); window.__api.orbitClock.paused = false; window.__api.orbitClock.elapsedMs = 0; return 1;");
+  run(["wait", "250"]);
+  const closed = evalJs("return JSON.stringify({ deg: window.__scene.plateAngleDeg, phase: window.__scene.platePhase, gold: window.__api.frameStats({ step: 3 }).goldRatio });");
+  if (closed.deg > 2) throw new Error(`clock at 0 still reported the plate at ${closed.deg} deg (phase ${closed.phase})`);
+
+  const angles = [], phases = new Set();
+  let framesEnd = 0;
+  for (let i = 0; i < 25; i++) {
+    run(["wait", "480"]);                     // 25 x 480 ms ~ one cycle sweep
+    const s = evalJs("return JSON.stringify({ deg: window.__scene.plateAngleDeg, phase: window.__scene.platePhase, frames: window.__scene.frames });");
+    angles.push(s.deg);
+    phases.add(s.phase);
+    framesEnd = s.frames;
+  }
+  const open = evalJs("return JSON.stringify({ deg: window.__scene.plateAngleDeg, phase: window.__scene.platePhase, gold: window.__api.frameStats({ step: 3 }).goldRatio });");
+
+  const maxDeg = Math.max(...angles), minDeg = Math.min(...angles);
+  if (!(maxDeg >= 90)) throw new Error(`sampled angles topped out at ${maxDeg.toFixed(1)} deg, want a 90 deg crossing`);
+  if (!(minDeg <= 2)) throw new Error(`sampled angles never started closed (${minDeg.toFixed(1)} deg)`);
+  if (!(framesEnd > 30)) throw new Error(`only ${framesEnd} frames rendered: the rAF loop is not running`);
+  if (!phases.has("open")) throw new Error(`phases seen: ${[...phases].join(", ")}`);
+  if (open.phase !== "open") throw new Error(`sample window ended in phase "${open.phase}", want open for the pixel probes`);
+  // Why the margin is only 1.2 points and not "obviously more": even with the
+  // plate closed, the ILS window in the middle of the land grid stays uncovered,
+  // so ~3 percent of the screen always reads gold. Full swing adds the rest of
+  // the pad field, worth ~2 points; measured deltas run 1.7-2.0. A plate frozen
+  // in place shows a delta of ~0, so 1.2 still catches the regression dead.
+  if (!(open.gold > closed.gold + 0.012)) {
+    throw new Error(`open plate gold ${(open.gold * 100).toFixed(2)}% vs closed ${(closed.gold * 100).toFixed(2)}%: the plate is not moving in GL`);
+  }
+  return `${minDeg.toFixed(0)}..${maxDeg.toFixed(0)} deg, phases ${[...phases].join("/")}, gold ${closed.gold.toFixed(3)} -> ${open.gold.toFixed(3)}`;
+});
+
 check("the_socket_covers_at_least_25_percent_of_the_view", () => {
   const s = frameStats();
   if (!(s.nonBackgroundRatio >= 0.25)) {
@@ -216,6 +258,10 @@ check("the_backing_store_follows_a_css_resize", () => {
 
 if (process.argv.includes("--shot")) {
   const out = process.argv[process.argv.indexOf("--shot") + 1] || join(HERE, "render.png");
+  // Pinning the pose makes a screenshot reproducible: the cycle would otherwise
+  // land anywhere between "plate closed over the gold" and mid-swing.
+  evalJs("window.__api.setPlateOverride(105); return 1;");
+  run(["wait", "400"]);                       // one frame for the pin to reach the scene graph
   run(["screenshot", out]);
   console.log(`  shot  ${out}`);
 }
