@@ -567,6 +567,166 @@ test("frameStats_withStubbedReadPixels_reportsTheSyntheticFrameRatios", () => {
   if (!(s.maxLuma > 100)) throw new Error(`maxLuma ${s.maxLuma}`);
 });
 
+// ------------------------------------------------ camera orbit + viewport (Task 6)
+const cameraApi = () => {
+  const a = api();
+  for (const fn of ["cameraPose", "orbit", "zoom", "fitViewport"]) {
+    if (typeof a[fn] !== "function") throw new Error(`window.__api.${fn} is not a function`);
+  }
+  for (const obj of ["ORBIT", "CAMERA_LIMITS"]) {
+    if (!a[obj]) throw new Error(`window.__api.${obj} is missing`);
+  }
+  return a;
+};
+
+test("cameraPose_atZeroElapsed_startsAtThePublishedShowcasePose", () => {
+  const { cameraPose, VIEW, CAMERA_LIMITS } = cameraApi();
+  const p = cameraPose(0);
+  if (p.azDeg !== VIEW.azDeg) throw new Error(`azimuth ${p.azDeg}, want ${VIEW.azDeg}`);
+  if (!(p.elevDeg >= CAMERA_LIMITS.minElevDeg && p.elevDeg <= CAMERA_LIMITS.maxElevDeg)) {
+    throw new Error(`elevation ${p.elevDeg} outside [${CAMERA_LIMITS.minElevDeg}, ${CAMERA_LIMITS.maxElevDeg}]`);
+  }
+  if (p.dist !== VIEW.dist) throw new Error(`dist ${p.dist}, want ${VIEW.dist}`);
+  if (!p.eye.every((v) => Number.isFinite(v))) throw new Error(`eye ${JSON.stringify(p.eye)} is not finite`);
+});
+
+test("cameraPose_overTenSeconds_advancesAzimuthByItsPublishedRateOfFourDegreesPerSecond", () => {
+  const { cameraPose, ORBIT } = cameraApi();
+  const delta = cameraPose(10_000).azDeg - cameraPose(0).azDeg;
+  const want = (ORBIT.degPerMs * 10_000);
+  if (Math.abs(delta - want) > 1e-6) throw new Error(`10 s advanced azimuth ${delta}, want ${want}`);
+  // Sanity: the plan's "slow" must still be a visible rotation. 30-60 deg per
+  // 10 s is the range the render probe needs for the pad field to shimmer.
+  if (!(delta >= 30 && delta <= 60)) throw new Error(`10 s advanced ${delta} deg, want 30-60 (visible rotation)`);
+});
+
+test("cameraPose_acrossAFullDriftPeriod_keepsElevationInsideTheLimits_andDriftsBackAndForth", () => {
+  const { cameraPose, ORBIT, CAMERA_LIMITS } = cameraApi();
+  const period = ORBIT.elevPeriodMs;
+  let min = Infinity, max = -Infinity;
+  for (let ms = 0; ms <= 3 * period; ms += 500) {
+    const e = cameraPose(ms).elevDeg;
+    if (e < min) min = e;
+    if (e > max) max = e;
+    if (!(e >= CAMERA_LIMITS.minElevDeg && e <= CAMERA_LIMITS.maxElevDeg)) {
+      throw new Error(`elevation ${e} at t=${ms} ms outside the limits`);
+    }
+  }
+  const swing = max - min;
+  if (swing <= 0) throw new Error(`elevation never drifted: min ${min} max ${max}`);
+  if (swing > 2 * ORBIT.elevAmplitudeDeg + 1e-9) {
+    throw new Error(`elevation swings ${swing} deg, want <= 2 x amplitude (${ORBIT.elevAmplitudeDeg})`);
+  }
+});
+
+test("orbit_withADragDelta_rollsAzimuthByItsPerPixelRate_andClampsElevationAfterAHugeDrag", () => {
+  const { orbit, cameraPose, ORBIT, CAMERA_LIMITS } = cameraApi();
+  const before = cameraPose(0).azDeg;
+  orbit(80, 0);
+  const after = cameraPose(0);
+  const delta = after.azDeg - before;
+  if (Math.abs(delta - 80 * ORBIT.dragDegPerPx) > 1e-6) {
+    throw new Error(`80 px advanced azimuth ${delta}, want ${80 * ORBIT.dragDegPerPx}`);
+  }
+  orbit(-1e6, -1e6); // drag far "up": elevation must saturate, not overshoot
+  const high = cameraPose(0);
+  if (high.elevDeg > CAMERA_LIMITS.maxElevDeg || high.elevDeg < CAMERA_LIMITS.minElevDeg) {
+    throw new Error(`after a huge drag: elevation ${high.elevDeg} outside the limits`);
+  }
+  orbit(1e6, 1e6); // and the other way
+  const low = cameraPose(0);
+  if (low.elevDeg > CAMERA_LIMITS.maxElevDeg || low.elevDeg < CAMERA_LIMITS.minElevDeg) {
+    throw new Error(`after the opposite drag: elevation ${low.elevDeg} outside the limits`);
+  }
+});
+
+test("zoom_withExtremeInwardAndOutwardInput_staysInsideRadiusLimits_andNeverReachesZero", () => {
+  const { zoom, cameraPose, CAMERA_LIMITS } = cameraApi();
+  const start = cameraPose(0).dist;
+  zoom(3);
+  const out = cameraPose(0).dist;
+  if (!(out > start)) throw new Error(`zoom(+3) moved dist ${start} -> ${out}, want it to increase`);
+  zoom(-1e6);
+  const minD = cameraPose(0).dist;
+  if (!(minD > 0)) throw new Error(`radius went to ${minD}`);
+  if (minD < CAMERA_LIMITS.minDist || minD > CAMERA_LIMITS.maxDist) {
+    throw new Error(`after zooming right in: dist ${minD} outside [${CAMERA_LIMITS.minDist}, ${CAMERA_LIMITS.maxDist}]`);
+  }
+  zoom(1e6);
+  const maxD = cameraPose(0).dist;
+  if (maxD > CAMERA_LIMITS.maxDist) throw new Error(`after zooming right out: dist ${maxD}`);
+});
+
+test("fitViewport_withZeroHeightOrAnExtremeBox_clampsAspectIntoTheRange", () => {
+  const { fitViewport, CAMERA_LIMITS } = cameraApi();
+  for (const [w, h] of [[1600, 0], [0, 900], [2560, 1080], [100, 100000], [100000, 100]]) {
+    const vp = fitViewport(w, h, 1);
+    if (!(vp.aspect >= CAMERA_LIMITS.minAspect && vp.aspect <= CAMERA_LIMITS.maxAspect)) {
+      throw new Error(`${w}x${h}: aspect ${vp.aspect} outside [${CAMERA_LIMITS.minAspect}, ${CAMERA_LIMITS.maxAspect}]`);
+    }
+    if (!(vp.width > 0 && vp.height > 0)) throw new Error(`${w}x${h}: backing ${vp.width}x${vp.height}`);
+  }
+});
+
+test("fitViewport_returnsAnAspectAStandardPerspectiveCanBeBuiltFrom", () => {
+  const { fitViewport, mat4 } = cameraApi();
+  const vp = fitViewport(2560, 1080, 1);
+  if (vp.width !== 2560 || vp.height !== 1080) throw new Error(`backing ${vp.width}x${vp.height}, want 2560x1080`);
+  const proj = mat4.perspective(mat4.identity(), { fovyDeg: 30, aspect: vp.aspect, near: 1, far: 4000 });
+  if (!proj.every((v) => Number.isFinite(v))) throw new Error(`non-finite perspective for ${JSON.stringify(vp)}`);
+});
+
+test("fitViewport_at4xDpr_capsTheDevicePixelRatioAndScalesTheCssBoxToTheBackingStore", () => {
+  const { fitViewport, CAMERA_LIMITS } = cameraApi();
+  const vp = fitViewport(1200, 800, 4);
+  if (vp.dpr > CAMERA_LIMITS.maxDpr) throw new Error(`dpr ${vp.dpr} above the cap ${CAMERA_LIMITS.maxDpr}`);
+  if (vp.width !== 1200 * CAMERA_LIMITS.maxDpr) throw new Error(`width ${vp.width}, want ${1200 * CAMERA_LIMITS.maxDpr}`);
+  if (vp.height !== 800 * CAMERA_LIMITS.maxDpr) throw new Error(`height ${vp.height}`);
+});
+
+test("resizeCanvas_withAStubCssBox_resizesTheCanvasBackingStoreToFitViewport", () => {
+  // Drive-then-assert: the end state is the canvas element's own width/height,
+  // not a return value nobody reads.
+  const { api: pageApi, canvas } = boot({ glFactory: () => stubGL() });
+  canvas.clientWidth = 400;
+  canvas.clientHeight = 250;
+  pageApi.resizeCanvas(stubGL(), canvas);
+  const vp = pageApi.fitViewport(400, 250, 1);
+  if (canvas.width !== vp.width || canvas.height !== vp.height) {
+    throw new Error(`backing store ${canvas.width}x${canvas.height}, want ${vp.width}x${vp.height}`);
+  }
+});
+
+test("advanceOrbitClock_withAFiveSecondHiddenTabDelta_stepsTheElapsedClockByAtMostMaxFrameMs", () => {
+  const { advanceOrbitClock, orbitClock, cameraPose, VIEW, ORBIT, MAX_FRAME_MS } = cameraApi();
+  const before = orbitClock.elapsedMs;
+  const step = advanceOrbitClock(5000);
+  if (step !== MAX_FRAME_MS) throw new Error(`returned delta ${step}, want the clamp ${MAX_FRAME_MS}`);
+  const advanced = orbitClock.elapsedMs - before;
+  if (advanced !== MAX_FRAME_MS) throw new Error(`clock advanced by ${advanced}, want ${MAX_FRAME_MS}`);
+  // And the pose itself must not have jumped the whole 5 s.
+  const jumped = cameraPose(orbitClock.elapsedMs).azDeg - (VIEW.azDeg + before * ORBIT.degPerMs);
+  if (Math.abs(jumped - MAX_FRAME_MS * ORBIT.degPerMs) > 1e-9) {
+    throw new Error(`azimuth moved ${jumped} deg, want ${MAX_FRAME_MS * ORBIT.degPerMs}`);
+  }
+});
+
+test("advanceOrbitClock_whenPaused_withDelta_shouldNotAdvanceTheElapsedClock", () => {
+  const { advanceOrbitClock, orbitClock, cameraPose } = cameraApi();
+  const frozen = cameraPose(orbitClock.elapsedMs).azDeg;
+  orbitClock.paused = true;
+  try {
+    advanceOrbitClock(1000);
+    advanceOrbitClock(1000);
+  } finally {
+    orbitClock.paused = false;
+  }
+  if (cameraPose(orbitClock.elapsedMs).azDeg !== frozen) {
+    throw new Error("a paused clock still advanced the azimuth");
+  }
+  if (advanceOrbitClock(-25) !== 0) throw new Error("a negative delta must clamp to 0");
+});
+
 let failed = 0;
 for (const { name, fn } of tests) {
   try {

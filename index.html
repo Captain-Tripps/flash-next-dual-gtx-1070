@@ -1055,16 +1055,101 @@ function uploadBackdropToGpu(gl, rec) {
   return { vao, vbo };
 }
 
+const EXPOSURE = 1.18;
+const FOV_DEG = 30;
+
 /*
  * The showcase pose: looking down the socket's face rather than across it. A
- * grazing 35deg elevation made the whole assembly read as a thin sliver, and the
- * pad field - the one thing worth showcasing on an LGA socket - was edge-on.
+ * grazing 35deg elevation made the whole assembly read as a thin sliver and hid
+ * the pad field, which is the one thing worth showcasing on an LGA socket.
  * ~56deg elevation keeps the land grid facing the camera while still showing the
  * frame wall and hinge rod.
  */
 const VIEW = { azDeg: 34, elevDeg: 56, dist: 100, target: [0, 3, 0] };
-const EXPOSURE = 1.18;
-const FOV_DEG = 30;
+
+/*
+ * Orbit rate and input scaling, in one place, so the harness can pin them and
+ * the render loop never has to know what "slow" means. One revolution in ~70 s
+ * looks static in a screenshot but reads as rotation in motion: fast enough that
+ * specular and the pad shimmer move, slow enough to inspect the machining.
+ */
+const ORBIT = {
+  degPerMs: 0.004, // 4 deg/s
+  elevAmplitudeDeg: 6,
+  elevPeriodMs: 45000, // one drift cycle: never repeats in a way the eye can follow
+  dragDegPerPx: 0.35,
+  zoomPerStep: 0.11, // 11 % per wheel notch, compounded in log space
+};
+
+const CAMERA_LIMITS = {
+  minDist: 45, maxDist: 280,
+  minElevDeg: 5, maxElevDeg: 75,
+  minAspect: 0.35, maxAspect: 3.2,
+  maxDpr: 2, // an iGPU at 4x DPR would fill-rate itself to death
+};
+
+/*
+ * User-input offsets live here rather than in the pose, so cameraPose() stays a
+ * pure function of (elapsedMs, input): a harness can pin or scrub the camera
+ * without unpicking an accumulator, and dragging never fights the auto-orbit.
+ */
+const inputState = { azOffsetDeg: 0, elevOffsetDeg: 0, zoomLog: 0 };
+
+const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
+const DEG_TO_RAD = Math.PI / 180;
+
+/**
+ * The orbit pose for a clock value, in degrees and mm. Returns a fresh object on
+ * purpose: a reused scratch record would break any caller that compares two
+ * poses, and one small record per frame is not a fill-rate concern.
+ */
+function cameraPose(elapsedMs = 0) {
+  const azDeg = VIEW.azDeg + elapsedMs * ORBIT.degPerMs + inputState.azOffsetDeg;
+  const drift = ORBIT.elevAmplitudeDeg * Math.sin((2 * Math.PI * elapsedMs) / ORBIT.elevPeriodMs);
+  const elevDeg = clamp(VIEW.elevDeg + drift + inputState.elevOffsetDeg,
+    CAMERA_LIMITS.minElevDeg, CAMERA_LIMITS.maxElevDeg);
+  // Radius is exp() of a log accumulator, so it can never reach or cross zero the
+  // way a per-frame multiply-with-clamp does: the clamp only bounds the framing.
+  const dist = clamp(VIEW.dist * Math.exp(inputState.zoomLog), CAMERA_LIMITS.minDist, CAMERA_LIMITS.maxDist);
+  const az = azDeg * DEG_TO_RAD;
+  const el = elevDeg * DEG_TO_RAD;
+  return {
+    azDeg, elevDeg, dist, target: VIEW.target,
+    eye: [
+      dist * Math.cos(el) * Math.sin(az),
+      dist * Math.sin(el),
+      dist * Math.cos(el) * Math.cos(az),
+    ],
+  };
+}
+
+/** Applies a pointer drag, in CSS pixels. Azimuth is unbounded; elevation saturates. */
+function orbit(dxPx, dyPx) {
+  inputState.azOffsetDeg += dxPx * ORBIT.dragDegPerPx;
+  inputState.elevOffsetDeg += dyPx * ORBIT.dragDegPerPx;
+  return inputState;
+}
+
+/** Positive steps move the camera away from the socket (wheel down = out). */
+function zoom(steps) {
+  inputState.zoomLog += steps * Math.log(1 + ORBIT.zoomPerStep);
+  return inputState;
+}
+
+/**
+ * Maps a CSS box to a drawing buffer. The aspect clamp is the important part:
+ * a window that is only a few pixels tall (or a browser reporting 0) would
+ * otherwise hand a division-by-one-zero straight into the projection matrix.
+ */
+function fitViewport(cssW, cssH, dpr = window.devicePixelRatio || 1) {
+  const d = clamp(dpr || 1, 0.5, CAMERA_LIMITS.maxDpr);
+  const width = Math.max(1, Math.round((cssW || 0) * d));
+  const height = Math.max(1, Math.round((cssH || 0) * d));
+  return {
+    width, height, dpr: d,
+    aspect: clamp(width / height, CAMERA_LIMITS.minAspect, CAMERA_LIMITS.maxAspect),
+  };
+}
 
 const cameraState = {
   eye: [0, 0, 0],
@@ -1074,27 +1159,89 @@ const cameraState = {
 };
 const scratch = { normalMat: new Float32Array(9), pixels: null };
 
-/** Builds eye + view + viewProj from orbit parameters. No allocation per call. */
-function updateCamera({
-  azDeg = VIEW.azDeg, elevDeg = VIEW.elevDeg, dist = VIEW.dist, target = VIEW.target,
-} = {}) {
-  const az = (azDeg * Math.PI) / 180;
-  const el = (elevDeg * Math.PI) / 180;
-  cameraState.eye = [
-    dist * Math.cos(el) * Math.sin(az),
-    dist * Math.sin(el),
-    dist * Math.cos(el) * Math.cos(az),
-  ];
-  mat4.lookAt(cameraState.view, cameraState.eye, target, [0, 1, 0]);
+/** Builds view + projection matrices from a pose and a viewport record. */
+function updateCamera(pose = cameraPose(0), viewport = fitViewport(canvas.clientWidth, canvas.clientHeight)) {
+  cameraState.eye[0] = pose.eye[0];
+  cameraState.eye[1] = pose.eye[1];
+  cameraState.eye[2] = pose.eye[2];
+  mat4.lookAt(cameraState.view, cameraState.eye, pose.target, [0, 1, 0]);
   mat4.perspective(cameraState.projection, {
     fovyDeg: FOV_DEG,
-    aspect: canvas.width / Math.max(canvas.height, 1),
+    aspect: viewport.aspect,
     near: 1,
     far: 4000,
   });
   mat4.multiply(cameraState.viewProj, cameraState.projection, cameraState.view);
   return cameraState;
 }
+
+/*
+ * Bonus interactivity (DESIGN.md's "user controls as a bonus"): pointer drag
+ * orbits, wheel zooms. Wheel is the one listener that needs preventDefault, so
+ * it is registered non-passive; a passive listener would let the page scroll
+ * underneath the canvas while the user was trying to zoom.
+ */
+function attachCameraInput(target, { onCursor } = {}) {
+  const drag = { pointerId: -1, lastX: 0, lastY: 0 };
+
+  target.addEventListener("pointerdown", (event) => {
+    if (drag.pointerId >= 0) return; // already dragging
+    drag.pointerId = event.pointerId;
+    drag.lastX = event.clientX;
+    drag.lastY = event.clientY;
+    try {
+      // Capturing keeps the drag alive when the pointer leaves the canvas. It
+      // throws on a pointer the browser never activated (a synthetic event, which
+      // the harness dispatches), so the capture is a nicety, not a requirement.
+      if (target.setPointerCapture) target.setPointerCapture(event.pointerId);
+    } catch (err) {
+      // No capture, no drag lock: the orbit still works.
+    }
+    if (onCursor) onCursor("grabbing");
+  });
+
+  target.addEventListener("pointermove", (event) => {
+    if (event.pointerId !== drag.pointerId) return;
+    const dx = event.clientX - drag.lastX;
+    const dy = event.clientY - drag.lastY;
+    drag.lastX = event.clientX;
+    drag.lastY = event.clientY;
+    orbit(dx, dy);
+  });
+
+  const stop = (event) => {
+    if (event.pointerId !== drag.pointerId) return;
+    drag.pointerId = -1;
+    if (onCursor) onCursor("grab");
+  };
+  target.addEventListener("pointerup", stop);
+  target.addEventListener("pointercancel", stop);
+
+  target.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    zoom(clamp(event.deltaY / 100, -3, 3));
+  }, { passive: false });
+
+  return inputState;
+}
+
+const MAX_FRAME_MS = 50; // a backgrounded tab hands us 1 Hz deltas; never let them through
+
+/*
+ * The orbit clock is a single accumulator, not a per-frame delta: the pose is
+ * always derived from it, so a harness can pin elapsedMs and get the same camera
+ * every time. Pausing freezes the clock rather than zeroing the pose, which is
+ * what keeps a resumed orbit from snapping back.
+ */
+const orbitClock = { elapsedMs: 0, paused: false };
+
+/** Returns the clamped delta so the caller can reuse it for plate/other clocks. */
+function advanceOrbitClock(dtMs) {
+  const step = clamp(dtMs, 0, MAX_FRAME_MS);
+  if (!orbitClock.paused) orbitClock.elapsedMs += step;
+  return step;
+}
+
 
 /**
  * One studio frame: backdrop, seven shaded parts, then the 3,647 pads in a
@@ -1156,17 +1303,13 @@ function frameStats({ step = 1, drawFirst = true } = {}) {
   return analysePixels(scratch.pixels, w, h, { step });
 }
 
-/** Sizes the backing store to the CSS box, DPR capped at 2 for the iGPU budget. */
+/** Sizes the backing store to the CSS box; the DPR cap lives in fitViewport. */
 function resizeCanvas(gl, size = canvas) {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const cssW = size.clientWidth || size.width || 1;
-  const cssH = size.clientHeight || size.height || 1;
-  const w = Math.max(1, Math.round(cssW * dpr));
-  const h = Math.max(1, Math.round(cssH * dpr));
-  if (size.width !== w) size.width = w;
-  if (size.height !== h) size.height = h;
-  gl.viewport(0, 0, w, h);
-  return { width: w, height: h, dpr };
+  const vp = fitViewport(size.clientWidth || size.width || 1, size.clientHeight || size.height || 1);
+  if (size.width !== vp.width) size.width = vp.width;
+  if (size.height !== vp.height) size.height = vp.height;
+  gl.viewport(0, 0, vp.width, vp.height);
+  return vp;
 }
 
 let activeRenderer = null;
@@ -1274,12 +1417,12 @@ window.__api = {
   roundedRectProfile, circleProfile, rectProfile, translatedProfile, withKeyingCut, extrudeProfile,
   LAND_GRID, composeLayout, padMeshGeometry,
   MATERIALS, LIGHTS, PART_MATERIAL, VIEW,
+  ORBIT, CAMERA_LIMITS, cameraPose, orbit, zoom, fitViewport, attachCameraInput,
+  cameraInput: inputState,
+  orbitClock, advanceOrbitClock, MAX_FRAME_MS,
   analysePixels, frameStats, drawScene, updateCamera, resizeCanvas, createRenderer,
   interleavedGeometry, STRIDE_BYTES,
 };
-
-const MAX_FRAME_MS = 50; // a backgrounded tab hands us 1 Hz deltas; never let them through
-const ORBIT_DEG_PER_MS = 0.004; // 360 deg in 100 s: slow enough to read the machining
 
 const canvas = document.getElementById("viewport");
 const overlay = document.getElementById("error-overlay");
@@ -1294,29 +1437,29 @@ function reportFailure(cause, detail) {
   overlay.classList.add("visible");
   window.__scene = {
     ok: false, cause, parts: {}, programs: {}, frames: 0,
-    padCount: 0, padsDrawn: 0, plateAngleDeg: 0, azimuthDeg: 0, drawCalls: 0,
+    padCount: 0, padsDrawn: 0, plateAngleDeg: 0, azimuthDeg: 0, cameraDist: 0, drawCalls: 0,
   };
 }
 
 /*
- * The animation loop. dtMs is clamped so a hidden-tab 1 s delta cannot jump the
- * camera 20 deg in one frame; the clamp is what keeps the showcase honest about
- * its own speed.
+ * The animation loop. dtMs is clamped by advanceOrbitClock so a hidden-tab 1 s
+ * delta cannot jump the camera 20 deg in one frame; the clamp is what keeps the
+ * showcase honest about its own speed.
  */
 function startRenderLoop(gl, scene, socketRoot) {
   let last = performance.now();
-  let elapsedMs = 0;
   const frame = (now) => {
-    const dtMs = Math.min(Math.max(now - last, 0), MAX_FRAME_MS);
+    const dtMs = advanceOrbitClock(now - last);
     last = now;
-    elapsedMs += dtMs;
     scene.frames++;
 
-    resizeCanvas(gl);
-    // Task 6 turns this orbit into a tested API; until then the azimuth is just
-    // elapsed time, so the clamp above is the only thing steering the spin.
-    scene.azimuthDeg = (VIEW.azDeg + elapsedMs * ORBIT_DEG_PER_MS) % 360;
-    updateCamera({ azDeg: scene.azimuthDeg, elevDeg: VIEW.elevDeg });
+    const viewport = resizeCanvas(gl);
+    const pose = cameraPose(orbitClock.elapsedMs);
+    scene.azimuthDeg = pose.azDeg;
+    // Framing goes in the same record, so the harness can assert a wheel zoom
+    // actually moved the camera rather than just swallowing the event.
+    scene.cameraDist = pose.dist;
+    updateCamera(pose, viewport);
     lastFrameTimeMs = now;
     scene.drawCalls = drawScene(cameraState.viewProj, now, cameraState.eye);
     scene.padsDrawn = scene.padCount;
@@ -1381,6 +1524,10 @@ function boot() {
   scene.drawCalls = drawScene(cameraState.viewProj, lastFrameTimeMs, cameraState.eye);
   scene.padsDrawn = scene.padCount;
   scene.frames = 1;
+
+  // Drag to orbit, wheel to zoom: pure bonus, but wired through the same tested
+  // orbit/zoom API the unit tests drive, so there is only one input path.
+  attachCameraInput(canvas, { onCursor: (cursor) => { canvas.style.cursor = cursor; } });
 
   startRenderLoop(gl, scene, socketRoot);
 }

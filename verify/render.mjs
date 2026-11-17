@@ -121,6 +121,99 @@ check("at_least_3_percent_of_pixels_are_gold_pads", () => {
   return `gold ${(s.goldRatio * 100).toFixed(2)}% of ${s.sampled} px`;
 });
 
+// ------------------------------------- camera interaction: drive the DOM, assert the pose
+// The unit tests can reach the pure camera API, but pointer and wheel handlers
+// only exist in a real browser, so this is where the input path gets verified.
+check("dragging_the_canvas_orbits_the_camera_by_its_published_per_pixel_rate", () => {
+  const want = evalJs(`
+    const api = window.__api;
+    api.orbitClock.paused = true;              // freeze the spin: drag becomes the only input
+    api.cameraInput.azOffsetDeg = 0;
+    api.cameraInput.elevOffsetDeg = 0;
+    const c = document.getElementById("viewport");
+    const r = c.getBoundingClientRect();
+    const x = r.left + 40, y = r.top + 40;
+    const fire = (type, dx, dy) => c.dispatchEvent(new PointerEvent(type, {
+      pointerId: 1, clientX: x + dx, clientY: y + dy, bubbles: true,
+    }));
+    fire("pointerdown", 0, 0);
+    fire("pointermove", 20, 10);               // 20 px right, 10 px down
+    fire("pointerup", 20, 10);
+    return JSON.stringify({
+      az0: window.__scene.azimuthDeg,
+      wantAz: 20 * api.ORBIT.dragDegPerPx,
+      wantElev: 10 * api.ORBIT.dragDegPerPx,
+    });
+  `);
+  run(["wait", 200]); // at least one frame for the loop to publish the pose
+  const got = evalJs(`
+    const api = window.__api;
+    return JSON.stringify({
+      azOffset: api.cameraInput.azOffsetDeg,
+      elevOffset: api.cameraInput.elevOffsetDeg,
+    });
+  `);
+  if (Math.abs(got.azOffset - want.wantAz) > 1e-6) {
+    throw new Error(`20 px drag rolled azimuth by ${got.azOffset}, want ${want.wantAz}`);
+  }
+  if (Math.abs(got.elevOffset - want.wantElev) > 1e-6) {
+    throw new Error(`10 px drag tilted elevation by ${got.elevOffset}, want ${want.wantElev}`);
+  }
+  evalJs("window.__api.orbitClock.paused = false; window.__api.cameraInput.azOffsetDeg = 0; window.__api.cameraInput.elevOffsetDeg = 0; return 1;");
+  return `az ${want.wantAz.toFixed(2)} deg, elev ${want.wantElev.toFixed(2)} deg`;
+});
+
+check("wheeling_the_canvas_zooms_and_prevents_the_page_scrolling", () => {
+  const before = evalJs("return JSON.stringify({ dist: window.__scene.cameraDist, zoomLog: window.__api.cameraInput.zoomLog });");
+  const prevented = evalJs(`
+    const c = document.getElementById("viewport");
+    const ev = new WheelEvent("wheel", { deltaY: 100, bubbles: true, cancelable: true });
+    c.dispatchEvent(ev);
+    return JSON.stringify({ defaultPrevented: ev.defaultPrevented });
+  `);
+  run(["wait", 200]);
+  const after = evalJs("return JSON.stringify({ dist: window.__scene.cameraDist, zoomLog: window.__api.cameraInput.zoomLog });");
+  if (prevented.defaultPrevented !== true) {
+    throw new Error("the wheel handler did not preventDefault: it is registered passive");
+  }
+  if (!(after.dist > before.dist)) throw new Error(`wheel out moved dist ${before.dist} -> ${after.dist}`);
+  if (!(after.zoomLog > before.zoomLog)) throw new Error(`zoomLog ${before.zoomLog} -> ${after.zoomLog}`);
+  evalJs("window.__api.cameraInput.zoomLog = 0; return 1;");
+  return `dist ${before.dist.toFixed(1)} -> ${after.dist.toFixed(1)} mm`;
+});
+
+check("the_backing_store_follows_a_css_resize", () => {
+  const before = evalJs("return JSON.stringify({ w: document.getElementById('viewport').width });");
+  evalJs(`
+    const c = document.getElementById("viewport");
+    c.style.width = "640px";
+    c.style.height = "400px";
+    window.dispatchEvent(new Event("resize"));
+    return 1;
+  `);
+  run(["wait", 300]); // the loop re-fits the viewport every frame
+  const after = evalJs(`
+    const c = document.getElementById("viewport");
+    const api = window.__api;
+    const dpr = Math.min(window.devicePixelRatio || 1, api.CAMERA_LIMITS.maxDpr);
+    return JSON.stringify({
+      w: c.width, h: c.height, cssW: c.clientWidth, cssH: c.clientHeight, dpr,
+    });
+  `);
+  const wantW = Math.round(after.cssW * after.dpr);
+  const wantH = Math.round(after.cssH * after.dpr);
+  if (Math.abs(after.w - wantW) > 1 || Math.abs(after.h - wantH) > 1) {
+    throw new Error(`backing store ${after.w}x${after.h}, want ${wantW}x${wantH} (css ${after.cssW}x${after.cssH} @${after.dpr}x)`);
+  }
+  if (after.w === before.w) throw new Error(`backing store never changed (${after.w})`);
+  evalJs(`
+    const c = document.getElementById("viewport");
+    c.style.width = ""; c.style.height = "";
+    return 1;
+  `);
+  return `${after.w}x${after.h} from css ${after.cssW}x${after.cssH} @${after.dpr}x`;
+});
+
 if (process.argv.includes("--shot")) {
   const out = process.argv[process.argv.indexOf("--shot") + 1] || join(HERE, "render.png");
   run(["screenshot", out]);
