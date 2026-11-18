@@ -1,0 +1,1997 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LGA 3647 Socket — mechanical showcase</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d10; overflow: hidden; }
+  #viewport { display: block; width: 100vw; height: 100vh; }
+  #error-overlay {
+    position: fixed; inset: 0; display: none; place-content: center;
+    padding: 2rem; font: 500 1rem/1.5 system-ui, sans-serif; color: #f2d9a0;
+    background: #14171c; white-space: pre-wrap;
+  }
+  #error-overlay.visible { display: grid; }
+  /*
+   * The HUD sits over the canvas rather than beside it: the viewport is the
+   * whole page, and a readout that took layout space would shrink the socket.
+   */
+  #hud {
+    position: fixed; left: 14px; bottom: 14px; z-index: 2;
+    display: grid; grid-template-columns: auto auto; gap: 2px 10px;
+    padding: 8px 11px; border-radius: 6px; pointer-events: none;
+    background: rgba(12, 15, 20, 0.58); color: #9fb2c6;
+    font: 500 12px/1.55 ui-monospace, "Cascadia Mono", monospace;
+  }
+  #hud b { font-weight: 500; color: #6b7f93; text-transform: uppercase; letter-spacing: 0.06em; }
+  #hud span { text-align: right; }
+  /*
+   * Cinema mode (?cinema=1) for the film driver: the HUD hides, and a black
+   * fade layer plus two cards sit over the canvas. Opacity rides the
+   * timeline in JS, never a CSS animation - a captured frame and its card
+   * state must not drift apart between wall clocks.
+   */
+  body.cinema #hud { display: none; }
+  #cinema-fade {
+    position: fixed; inset: 0; z-index: 3; background: #000;
+    opacity: 0; pointer-events: none;
+  }
+  #cinema-title, #cinema-credits {
+    position: fixed; inset: 0; z-index: 4;
+    display: none; place-content: center;
+    text-align: center; pointer-events: none; opacity: 0;
+    color: #f5e9cd; text-shadow: 0 4px 24px rgba(0, 0, 0, 0.9);
+    font: 500 clamp(1.5rem, 3.4vw, 3.2rem)/1.4 ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: 0.03em;
+  }
+  body.cinema #cinema-title, body.cinema #cinema-credits { display: grid; }
+  #cinema-credits {
+    grid-template-rows: repeat(2, auto); gap: 0.5rem;
+    color: #c3d0de; font-size: clamp(1rem, 2.1vw, 2rem);
+  }
+</style>
+</head>
+<body>
+<canvas id="viewport"></canvas>
+<div id="hud" aria-live="polite">
+  <b>phase</b><span id="phase">closed</span>
+  <b>azimuth</b><span id="azimuth">0.0°</span>
+  <b>contacts</b><span id="padCount">0</span>
+</div>
+<!--
+  Cinema-only layer: hidden until ?cinema=1 marks body.cinema. The card copy
+  is Jon's verbatim - do NOT "correct" the apostrophe or the spaced hyphen.
+-->
+<div id="cinema-fade"></div>
+<div id="cinema-title">LGA 3647 - 3,647 gold contacts</div>
+<div id="cinema-credits">
+  <div class="line">Dual GTX 1070's</div>
+  <div class="line">Qwen3.8 Flash Next Strata</div>
+</div>
+<div id="error-overlay"></div>
+<script type="module">
+"use strict";
+
+// ---------------------------------------------------------------- math
+// Column-major, same layout WebGL consumes, so matrices go straight to
+// gl.uniformMatrix4fv with transpose=false. No allocation in the per-frame path:
+// every node owns its matrices and writes into them.
+
+const mat4 = {
+  identity() {
+    const m = new Float32Array(16);
+    m[0] = m[5] = m[10] = m[15] = 1;
+    return m;
+  },
+
+  // out = a * b ("apply b first, then a", column-major convention).
+  multiply(out, a, b) {
+    for (let c = 0; c < 4; c++) {
+      for (let r = 0; r < 4; r++) {
+        out[c * 4 + r] =
+          a[0 * 4 + r] * b[c * 4 + 0] +
+          a[1 * 4 + r] * b[c * 4 + 1] +
+          a[2 * 4 + r] * b[c * 4 + 2] +
+          a[3 * 4 + r] * b[c * 4 + 3];
+      }
+    }
+    return out;
+  },
+
+  transformPoint(out, m, p) {
+    const [x, y, z] = p;
+    out[0] = m[0] * x + m[4] * y + m[8] * z + m[12];
+    out[1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+    out[2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+    return out;
+  },
+
+  // Translate * Rotate * Scale, rotation applied Y then X then Z (socket parts
+  // yaw about the vertical axis; the plate tips about its local X).
+  trs(out, { pos = [0, 0, 0], rot, scale = 1 }) {
+    const sx = typeof scale === "number" ? scale : scale.x;
+    const sy = typeof scale === "number" ? scale : scale.y;
+    const sz = typeof scale === "number" ? scale : scale.z;
+    const rx = rot?.x || 0, ry = rot?.y || 0, rz = rot?.z || 0;
+    const cx = Math.cos(rx), sxn = Math.sin(rx);
+    const cy = Math.cos(ry), syn = Math.sin(ry);
+    const cz = Math.cos(rz), snz = Math.sin(rz);
+    // Ry * Rx * Rz. The signs of the four sin(rx) cross terms matter: flip them
+    // and the matrix stops being a rotation (a pure-X matrix comes out symmetric,
+    // with det = cos 2x), which shears the load plate and its normals mid-swing.
+    const r00 = cy * cz + syn * sxn * snz, r01 = -cy * snz + syn * sxn * cz, r02 = syn * cx;
+    const r10 = snz * cx, r11 = cx * cz, r12 = -sxn;
+    const r20 = -syn * cz + cy * sxn * snz, r21 = syn * snz + cy * sxn * cz, r22 = cy * cx;
+    out[0] = r00 * sx; out[1] = r10 * sx; out[2] = r20 * sx; out[3] = 0;
+    out[4] = r01 * sy; out[5] = r11 * sy; out[6] = r21 * sy; out[7] = 0;
+    out[8] = r02 * sz; out[9] = r12 * sz; out[10] = r22 * sz; out[11] = 0;
+    out[12] = pos[0]; out[13] = pos[1]; out[14] = pos[2]; out[15] = 1;
+    return out;
+  },
+
+  perspective(out, { fovyDeg, aspect, near, far }) {
+    const f = 1 / Math.tan((fovyDeg * Math.PI) / 360);
+    const nf = 1 / (near - far);
+    out.fill(0);
+    out[0] = f / aspect;
+    out[5] = f;
+    out[10] = (far + near) * nf;
+    out[11] = -1;
+    out[14] = 2 * far * near * nf;
+    return out;
+  },
+
+  // View space: camera at origin looking down -Z, so the forward basis is -Z.
+  lookAt(out, eye, target, up) {
+    let zx = eye[0] - target[0], zy = eye[1] - target[1], zz = eye[2] - target[2];
+    let len = Math.hypot(zx, zy, zz) || 1;
+    zx /= len; zy /= len; zz /= len;
+    let xx = up[1] * zz - up[2] * zy, xy = up[2] * zx - up[0] * zz, xz = up[0] * zy - up[1] * zx;
+    len = Math.hypot(xx, xy, xz) || 1;
+    xx /= len; xy /= len; xz /= len;
+    const yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+    out[0] = xx; out[1] = yx; out[2] = zx; out[3] = 0;
+    out[4] = xy; out[5] = yy; out[6] = zy; out[7] = 0;
+    out[8] = xz; out[9] = yz; out[10] = zz; out[11] = 0;
+    out[12] = -(xx * eye[0] + xy * eye[1] + xz * eye[2]);
+    out[13] = -(yx * eye[0] + yy * eye[1] + yz * eye[2]);
+    out[14] = -(zx * eye[0] + zy * eye[1] + zz * eye[2]);
+    out[15] = 1;
+    return out;
+  },
+
+  // Upper-left 3x3 of a mat4, written column-major into a length-9 array.
+  toMat3(out9, m) {
+    out9[0] = m[0]; out9[1] = m[1]; out9[2] = m[2];
+    out9[3] = m[4]; out9[4] = m[5]; out9[5] = m[6];
+    out9[6] = m[8]; out9[7] = m[9]; out9[8] = m[10];
+    return out9;
+  },
+};
+
+// ---------------------------------------------------------------- scene graph
+class Node {
+  constructor(name) {
+    this.name = name;
+    this.local = { pos: [0, 0, 0], rot: { x: 0, y: 0, z: 0 }, scale: 1 };
+    this.children = [];
+    this.parent = null;
+    this._localMatrix = mat4.identity();
+    this._parentWorld = mat4.identity();
+    this._worldMatrix = mat4.identity();
+  }
+
+  add(child) {
+    child.parent = this;
+    this.children.push(child);
+    return child;
+  }
+
+  // Allocation-free: this node owns its matrices; the parent chain is written
+  // into the child's own scratch (a different array on purpose, because
+  // multiply(out, a, b) with out === a === b would alias mid-write).
+  world(out) {
+    mat4.trs(this._localMatrix, this.local);
+    if (this.parent) {
+      this.parent.world(this._parentWorld);
+      mat4.multiply(this._worldMatrix, this._parentWorld, this._localMatrix);
+    } else {
+      this._worldMatrix.set(this._localMatrix);
+    }
+    out.set(this._worldMatrix);
+    return out;
+  }
+
+  worldMatrix() {
+    return this.world(mat4.identity());
+  }
+}
+
+// ---------------------------------------------------------------- geometry
+// Every part is a flat XZ profile extruded along +Y, generated in code. Caps
+// are ear-clipped or quad-stripped (rings), side walls are per-face quads with
+// flat normals, so chamfered steel reads as machined metal, not smooth plastic.
+
+const signedArea2 = (pts) => {
+  let sum = 0;
+  for (let i = 0; i < pts.length; i += 2) {
+    const j = (i + 2) % pts.length;
+    sum += pts[i] * pts[j + 1] - pts[j] * pts[i + 1];
+  }
+  return sum;
+};
+
+const crossXZ = (a, b, c) =>
+  (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+
+/**
+ * Ear-clipping for a simple (non-self-intersecting) XZ polygon; non-convex
+ * outlines included. Returns vertex triples [x,z], CCW in xz — the extruder
+ * orients each cap triangle to the facing it wants, so winding here is a
+ * starting point, not a promise.
+ */
+function earClip(pts) {
+  const poly = [];
+  for (let i = 0; i < pts.length; i += 2) poly.push([pts[i], pts[i + 1]]);
+  if (poly.length < 3) throw new Error("polygon needs at least 3 points");
+  if (signedArea2(pts) < 0) poly.reverse();
+  const tris = [];
+  const ring = poly.slice();
+  while (ring.length > 3) {
+    let earAt = -1;
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length], c = ring[(i + 2) % ring.length];
+      if (crossXZ(a, b, c) <= 1e-12) continue; // reflex or collinear: not an ear
+      let coversAnother = false;
+      for (const p of ring) {
+        if (p === a || p === b || p === c) continue;
+        if (crossXZ(a, b, p) > -1e-12 && crossXZ(b, c, p) > -1e-12 && crossXZ(c, a, p) > -1e-12) {
+          coversAnother = true;
+          break;
+        }
+      }
+      if (!coversAnother) { earAt = i; break; }
+    }
+    if (earAt < 0) throw new Error("ear clip stalled: self-intersecting profile?");
+    tris.push(ring[earAt], ring[earAt + 1], ring[earAt + 2]);
+    ring.splice(earAt + 1, 1);
+  }
+  tris.push(ring[0], ring[1], ring[2]);
+  return tris;
+}
+
+/**
+ * Rounded-rectangle XZ profile, CCW, extents exactly w x h. Each quarter corner
+ * is sampled with `segs` arc divisions (segs+1 points, both tangent points
+ * included), so the flat edges between corners stay flat instead of getting
+ * chorded into a chamfer — a sheared substrate outline would be a sin against
+ * the whole point of this exercise.
+ */
+function roundedRectProfile(w, h, r, segs) {
+  if (!(r > 0) || 2 * r >= Math.min(w, h)) throw new Error(`corner radius ${r} won't fit ${w}x${h}`);
+  if (!(segs >= 1)) throw new Error("segs must be >= 1");
+  const hx = w / 2 - r, hz = h / 2 - r;
+  const centres = [[hx, hz, 0], [-hx, hz, Math.PI / 2], [-hx, -hz, Math.PI], [hx, -hz, (3 * Math.PI) / 2]];
+  const pts = [];
+  for (const [cx, cz, a0] of centres) {
+    for (let i = 0; i <= segs; i++) {
+      const a = a0 + (i * Math.PI) / (2 * segs);
+      pts.push(cx + r * Math.cos(a), cz + r * Math.sin(a));
+    }
+  }
+  return pts;
+}
+
+/**
+ * Drops corner 3's interior arc points, keeping its two tangent points: the
+ * quarter fillet becomes a straight 45deg cut. LGA 3647 is a keyed package —
+ * the cut corner is what the load plate's orientation reads on screen. The
+ * extents survive because the surviving tangent points own them.
+ */
+function withKeyingCut(pts, segs) {
+  const cornerStart = 3 * (segs + 1) * 2;
+  const cut = pts.slice();
+  cut.splice(cornerStart + 2, (segs - 1) * 2);
+  return cut;
+}
+
+/** Regular closed polygon in XZ, CCW, centred on the origin. Hinge rods, screw bosses. */
+function circleProfile(radius, segs) {
+  const pts = [];
+  for (let i = 0; i < segs; i++) {
+    const a = (i * 2 * Math.PI) / segs;
+    pts.push(radius * Math.cos(a), radius * Math.sin(a));
+  }
+  return pts;
+}
+
+const rectProfile = (x0, z0, x1, z1) => [x0, z0, x1, z0, x1, z1, x0, z1];
+
+function translatedProfile(pts, dx, dz) {
+  const out = [];
+  for (let i = 0; i < pts.length; i += 2) out.push(pts[i] + dx, pts[i + 1] + dz);
+  return out;
+}
+
+function reverseContour(pts) {
+  const out = [];
+  for (let i = pts.length - 2; i >= 0; i -= 2) out.push(pts[i], pts[i + 1]);
+  return out;
+}
+
+/**
+ * Approximate parallel inset for chamfer bands: scale toward the centroid.
+ * A mitred offset would be proper, but for 0.15 mm bevels on convex-ish
+ * contours the difference is sub-pixel, and every band normal is recomputed
+ * from the actual face anyway.
+ */
+function insetContour(pts, amount) {
+  let cx = 0, cz = 0;
+  for (let i = 0; i < pts.length; i += 2) { cx += pts[i]; cz += pts[i + 1]; }
+  const n = pts.length / 2;
+  cx /= n; cz /= n;
+  let span = 0;
+  for (let i = 0; i < pts.length; i += 2) span = Math.max(span, Math.hypot(pts[i] - cx, pts[i + 1] - cz));
+  const t = Math.min(amount / span, 0.999);
+  const out = [];
+  for (let i = 0; i < pts.length; i += 2) {
+    out.push(pts[i] + (cx - pts[i]) * t, pts[i + 1] + (cz - pts[i + 1]) * t);
+  }
+  return out;
+}
+
+/** Flat-shaded triangle push: winds toward `want`, normal from the actual face. */
+function pushTri(mesh, a, b, c, want) {
+  const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+  let nx = e1[1] * e2[2] - e1[2] * e2[1];
+  let ny = e1[2] * e2[0] - e1[0] * e2[2];
+  let nz = e1[0] * e2[1] - e1[1] * e2[0];
+  const len = Math.hypot(nx, ny, nz);
+  if (len < 1e-12) return; // sliver: degenerate corners drop, they never ship
+  nx /= len; ny /= len; nz /= len;
+  if (nx * want[0] + ny * want[1] + nz * want[2] < 0) {
+    [nx, ny, nz] = [-nx, -ny, -nz];
+    const t = b; b = c; c = t;
+  }
+  const base = mesh.pos.length / 3;
+  for (const p of [a, b, c]) {
+    mesh.pos.push(p[0], p[1], p[2]);
+    mesh.nrm.push(nx, ny, nz);
+  }
+  mesh.idx.push(base, base + 1, base + 2);
+}
+
+const yRing = (pts, y) => {
+  const out = [];
+  for (let i = 0; i < pts.length; i += 2) out.push([pts[i], y, pts[i + 1]]);
+  return out;
+};
+
+/**
+ * Extrude a closed XZ profile from y=0 to y=depth. Optional `hole` contour
+ * cuts a ring (needs aligned point counts with the outer contour — both come
+ * from roundedRectProfile with the same segs, so they do). A nonzero chamfer
+ * bevels the top rim: the side walls stay vertical, only the visible rim is
+ * cut. Holes never chamfer, they're too thin to matter.
+ */
+function extrudeProfile(outerContour, { depth, chamfer = 0, hole = null } = {}) {
+  if (!(depth > 0)) throw new Error("extrusion needs a positive depth");
+  const orientCCW = (contour) => (signedArea2(contour) >= 0 ? contour : reverseContour(contour));
+  const outer = orientCCW(outerContour);
+  // Holes keep the outer's angular order: the ring caps pair contour point i of
+  // the outer with point i of the hole, so reversing the winding would twist
+  // every quad in that strip. Facing is handled by flipping `want` instead.
+  const inner = hole ? orientCCW(hole) : null;
+  const c = chamfer > 0 ? Math.min(chamfer, depth / 2) : 0;
+  const ys = c > 0 ? [0, depth - c, depth] : [0, depth];
+
+  const contourAt = (i) => (c > 0 && i === ys.length - 1 ? insetContour(outer, c) : outer);
+  const outerLevels = ys.map((y, i) => yRing(contourAt(i), y));
+  const holeLevels = inner ? ys.map((y) => yRing(inner, y)) : null;
+
+  const mesh = { pos: [], nrm: [], idx: [] };
+
+  // Walls. The facing is the edge tangent rotated -90deg in XZ (outward for a
+  // CCW loop); a bore's visible side faces into the bore, so holes get `flip`.
+  const emitWalls = (levels, flip = false) => {
+    for (let lv = 0; lv + 1 < levels.length; lv++) {
+      const lo = levels[lv], hi = levels[lv + 1];
+      for (let i = 0; i < lo.length; i++) {
+        const p = lo[i], q = lo[(i + 1) % lo.length];
+        const want = [q[2] - p[2], 0, p[0] - q[0]];
+        const L = Math.hypot(want[0], want[2]) || 1;
+        want[0] = (want[0] / L) * (flip ? -1 : 1);
+        want[2] = (want[2] / L) * (flip ? -1 : 1);
+        pushTri(mesh, p, q, hi[i], want);
+        pushTri(mesh, q, hi[(i + 1) % hi.length], hi[i], want);
+      }
+    }
+  };
+  emitWalls(outerLevels);
+  if (holeLevels) emitWalls(holeLevels, true);
+
+  // Caps. Rings get a quad strip between aligned contours (earClip can't handle
+  // two contours as one polygon); single contours get ear-clipped per rim, the
+  // chamfered top rim clipping its own inset contour.
+  const bottom = outerLevels[0], top = outerLevels[outerLevels.length - 1];
+  if (inner) {
+    const hb = holeLevels[0], ht = holeLevels[holeLevels.length - 1];
+    if (hb.length !== bottom.length) throw new Error("ring caps need aligned outer/hole counts");
+    for (let i = 0; i < bottom.length; i++) {
+      const o1 = bottom[i], o2 = bottom[(i + 1) % bottom.length];
+      const h1 = hb[i], h2 = hb[(i + 1) % hb.length];
+      pushTri(mesh, o1, o2, h2, [0, -1, 0]);
+      pushTri(mesh, o1, h2, h1, [0, -1, 0]);
+      const t1 = top[i], t2 = top[(i + 1) % top.length];
+      const u1 = ht[i], u2 = ht[(i + 1) % ht.length];
+      pushTri(mesh, t1, u1, u2, [0, 1, 0]);
+      pushTri(mesh, t1, u2, t2, [0, 1, 0]);
+    }
+  } else {
+    const clipCap = (contour, y, wantY) => {
+      const tris = earClip(contour);
+      for (let i = 0; i < tris.length; i += 3) {
+        const a = tris[i], b = tris[i + 1], c3 = tris[i + 2];
+        pushTri(mesh, [a[0], y, a[1]], [b[0], y, b[1]], [c3[0], y, c3[1]], wantY);
+      }
+    };
+    clipCap(contourAt(0), ys[0], [0, -1, 0]);
+    clipCap(contourAt(ys.length - 1), ys[ys.length - 1], [0, 1, 0]);
+  }
+  return mesh;
+}
+
+function bboxOf(geometries) {
+  const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+  for (const g of geometries) {
+    for (let i = 0; i < g.pos.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        min[k] = Math.min(min[k], g.pos[i + k]);
+        max[k] = Math.max(max[k], g.pos[i + k]);
+      }
+    }
+  }
+  return { min, max };
+}
+
+/**
+ * The lowest point a part's world-space bounding box reaches. The fake contact AO
+ * wants this: handing it the local bbox instead darkened the load plate at its own
+ * local y = 0, which sits 4 mm above the floor it actually rests on, because the
+ * plate lives under a rotated hinge node. Transforming the bbox corners keeps the
+ * shadow contact honest under any parent transform.
+ *
+ * The world AABB corner is the conservative proxy, not the true minimum vertex:
+ * across the hinge swing it slides from 4.25 mm (closed) to 2.39 mm (fully open)
+ * as that corner sweeps back toward the substrate. contactAO clamps the height
+ * term at 0, so a proxy at or below the part's own low point means the part
+ * never picks up a stray contact shadow - the right answer anyway for a lid
+ * floating above the substrate.
+ */
+function worldFloorY(model, bbox) {
+  let y = Infinity;
+  for (const x of [bbox.min[0], bbox.max[0]])
+    for (const yCorner of [bbox.min[1], bbox.max[1]])
+    for (const z of [bbox.min[2], bbox.max[2]]) {
+      const wy = model[1] * x + model[5] * yCorner + model[9] * z + model[13];
+      if (wy < y) y = wy;
+    }
+  return Number.isFinite(y) ? y : 0;
+}
+
+// -------------------------------------------------------------- land grid
+/**
+ * LGA 3647 land-grid pattern, in millimetres, origin at the substrate centre.
+ *
+ * The field is a rectangular array of land positions punched by rectangular
+ * cutouts: a wide central ILS window with a narrow stem above and below it, plus
+ * a keyed notch on the latch side. The opening areas are tuned so the surviving
+ * count lands on exactly 3,647 pads, the package's contact count. The arithmetic
+ * is honest about the slack: the keepout leaves a 73 x 53 land field (3,869
+ * positions at 1.0 x 1.1 mm pitch), and the cutouts remove 169 + 50 + 3 contacts
+ * (~244 mm^2 of punched area) to land on 3,647. Re-tuning the cutout rectangles
+ * below changes that count, so verify/layout-report.mjs re-checks the budget.
+ *
+ * Rows run across X, one per `rowPitchMm`; each row's x-extent is split by every
+ * cutout it crosses, so the row table *is* the socket shape rather than a
+ * texture that happens to have a dark square in the middle.
+ */
+const LAND_GRID = {
+  envelope: { w: 75.9, h: 61.4 },
+  keepOutMm: 1.4, // pads never sit closer than this to the substrate edge
+  colPitchMm: 1.0,
+  rowPitchMm: 1.1,
+  cutouts: [
+    { name: "ils-window", x0: -6.5, x1: 6.5, z0: -7.15, z1: 7.15 },
+    { name: "ils-stem-north", x0: -2.5, x1: 2.5, z0: 7.15, z1: 12.65 },
+    { name: "ils-stem-south", x0: -2.5, x1: 2.5, z0: -12.65, z1: -7.15 },
+    // Keying notch on the latch side: exactly one row tall (1.1 mm = one
+    // rowPitch) and 3 columns wide, so it removes 3 pads and the surviving
+    // count lands on the package's 3,647 contacts.
+    { name: "key-notch-latch-side", x0: 20.5, x1: 23.5, z0: -21.5, z1: -20.5 },
+  ],
+};
+
+/** Deterministic hash, so a pad's tone never changes between frames. */
+function toneOfPad(col, row) {
+  const h = Math.imul(col + 1024, 73) ^ Math.imul(row + 1024, 151);
+  return ((h >>> 0) % 4096) / 4095;
+}
+
+/**
+ * Which columns live in a row: every land whose centre is strictly inside a
+ * cutout is punched out of that row. The predicate here must match the one the
+ * tests assert, so "strictly inside" is load-bearing, not accidental.
+ */
+function rowSpans(grid, rowZ) {
+  const insideCutout = (x, z) => grid.cutouts.some(
+    (c) => x > c.x0 && x < c.x1 && z > c.z0 && z < c.z1
+  );
+  const spans = [];
+  let run = null;
+  for (let k = -grid.cols; k <= grid.cols; k++) {
+    const x = k * grid.colPitchMm;
+    if (insideCutout(x, rowZ)) {
+      if (run) { spans.push(run); run = null; }
+      continue;
+    }
+    if (!run) run = { fromCol: k, toCol: k };
+    else run.toCol = k;
+  }
+  if (run) spans.push(run);
+  for (const s of spans) {
+    s.x0 = s.fromCol * grid.colPitchMm;
+    s.x1 = s.toCol * grid.colPitchMm;
+  }
+  return spans;
+}
+
+/**
+ * The whole pad field: pad centres, the interleaved instance buffer the GPU
+ * consumes, and the per-row spans that generated the central opening.
+ */
+function composeLayout(grid = LAND_GRID) {
+  const hx = grid.envelope.w / 2 - grid.keepOutMm;
+  const hz = grid.envelope.h / 2 - grid.keepOutMm;
+  const cols = Math.floor(hx / grid.colPitchMm);
+  const rows = Math.floor(hz / grid.rowPitchMm);
+  const shaped = { ...grid, cols, rows };
+
+  const pads = [];
+  const rowTable = [];
+  for (let m = -rows; m <= rows; m++) {
+    const z = m * grid.rowPitchMm;
+    const spans = rowSpans(shaped, z);
+    const count = spans.reduce((n, s) => n + (s.toCol - s.fromCol + 1), 0);
+    rowTable.push({ index: m, z, spans, count });
+    for (const s of spans) {
+      for (let k = s.fromCol; k <= s.toCol; k++) {
+        pads.push({
+          x: k * grid.colPitchMm,
+          z,
+          tone: toneOfPad(k, m),
+          phase: (k - s.fromCol) / Math.max(1, s.toCol - s.fromCol),
+        });
+      }
+    }
+  }
+
+  const data = new Float32Array(pads.length * 4);
+  for (let i = 0; i < pads.length; i++) {
+    data[i * 4] = pads[i].x;
+    data[i * 4 + 1] = pads[i].z;
+    data[i * 4 + 2] = pads[i].tone;
+    data[i * 4 + 3] = pads[i].phase;
+  }
+
+  return {
+    grid: shaped,
+    cutouts: grid.cutouts,
+    rows: rowTable,
+    pads,
+    data,
+    instanceCount: pads.length,
+  };
+}
+
+/**
+ * One land: a micro-plane with a bevelled rim, instanced `instanceCount` times.
+ * Flat-shaded on purpose — at this size the bevel needs its own face to read at
+ * all, and a smooth-shaded pad would be a shiny blur.
+ */
+function padMeshGeometry() {
+  // 0.74 x 0.70 mm lands on a 1.0 x 1.1 mm pitch: 0.26-0.40 mm of substrate
+  // between lands stays readable as gaps at this camera distance, while the gold
+  // itself stops being a sparkle pattern. The old 0.64 x 0.60 footprint put only
+  // 36% of the field's projected area on gold, and the coverage probe watched it
+  // wobble right on top of the 3% gate.
+  return extrudeProfile(rectProfile(-0.37, -0.35, 0.37, 0.35), { depth: 0.16, chamfer: 0.05 });
+}
+
+/**
+ * One part, one buffer: a bracket plate plus its screw bosses collapse into a
+ * single VBO/IBO so the GL layer draws each part exactly once instead of
+ * re-binding attributes per batch. pushTri already duplicates vertices per
+ * face, so merging is a copy plus an index offset.
+ */
+function mergeGeometries(geos) {
+  const merged = { pos: [], nrm: [], idx: [] };
+  for (const g of geos) {
+    const offset = merged.pos.length / 3;
+    for (const v of g.pos) merged.pos.push(v);
+    for (const v of g.nrm) merged.nrm.push(v);
+    for (const i of g.idx) merged.idx.push(i + offset);
+  }
+  return merged;
+}
+
+function makePart(name, geometries, local) {
+  const node = new Node(name);
+  node.local = local;
+  const geometry = mergeGeometries(geometries);
+  return {
+    name, node, geometry,
+    vertexCount: geometry.pos.length / 3,
+    bbox: bboxOf([geometry]),
+  };
+}
+
+/**
+ * The socket, in millimetres, origin at the substrate centre: the land-grid
+ * envelope is the XZ bbox of the substrate. Eight named parts; the pad field
+ * is a placeholder slab until Task 4 instances its 3.6k gold pads.
+ */
+function buildParts() {
+  const HZ = 61.4 / 2; // land-grid half-depth
+  const SUB_T = 0.8, BR_T = 0.5, PLATE_T = 1.6;
+  const BR_Y = SUB_T + 0.05;            // ILS plate rides on the substrate
+  const HINGE_Y = BR_Y + 3.4;           // hinge rod sits above the screw bosses
+  const HINGE_Z = HZ + 3.5;             // rod line lies outside the envelope
+
+  // Keying corner: corner 3's quarter fillet becomes a 45deg straight cut, so
+  // the package reads as oriented (and the load plate's corner notch has a mate).
+  const outline = withKeyingCut(roundedRectProfile(75.9, 61.4, 4.5, 4), 4);
+
+  const substrate = makePart("substrate",
+    [extrudeProfile(outline, { depth: SUB_T, chamfer: 0.15 })],
+    { pos: [0, 0, 0], rot: {}, scale: 1 });
+
+  const frame = makePart("frame",
+    [extrudeProfile(roundedRectProfile(79.3, 64.8, 6, 4),
+      { depth: 4.2, chamfer: 0.3, hole: roundedRectProfile(74.2, 59.6, 3, 4) })],
+    { pos: [0, -0.2, 0], rot: {}, scale: 1 });
+
+  // The land grid: one micro-plane geometry, instanced once per pad. The
+  // instance buffer is the layout's interleaved Float32Array, so nothing repeats
+  // a pad position on the CPU per frame — the vertex shader offsets them.
+  const layout = composeLayout();
+  const padField = makePart("padField", [padMeshGeometry()],
+    { pos: [0, SUB_T + 0.03, 0], rot: {}, scale: 1 });
+  padField.layout = layout;
+  padField.instanceCount = layout.instanceCount;
+  padField.instances = layout.data;
+
+  // The ILS is a frame, not a solid lid: a real lid carries a window over the
+  // pad field, and a showcase model that hides all 3,647 contacts behind a
+  // plate shows nothing worth showcasing. Window leaves the perimeter band and
+  // the four corner bosses standing.
+  const bracket = [
+    extrudeProfile(rectProfile(-33, -24.5, 33, 24.5),
+      { depth: BR_T, chamfer: 0.12, hole: rectProfile(-29.5, -21, 29.5, 21) }),
+    extrudeProfile(rectProfile(-37.2, -28.8, -33, 28.8), { depth: BR_T, chamfer: 0.1 }),
+    extrudeProfile(rectProfile(33, -28.8, 37.2, 28.8), { depth: BR_T, chamfer: 0.1 }),
+    ...[-30, 30].flatMap((x) => [-27, 27].map((z) =>
+      extrudeProfile(translatedProfile(circleProfile(3, 10), x, z), { depth: 2.4 }))),
+  ];
+  const brBracket = makePart("brBracket", bracket,
+    { pos: [0, BR_Y, 0], rot: {}, scale: 1 });
+
+  // The hinge pivot is a transform node, not a part: no geometry, just the
+  // rotation the plate cycle drives. The load plate and the rod collar hang off
+  // it, so one rotation moves both and they cannot disagree about the angle.
+  // The pivot sits on the rod centreline, which is also the plate's own origin,
+  // so the hinge line stays put through the whole swing (tested).
+  const hingePivot = makePart("hingePivot", [],
+    { pos: [0, HINGE_Y, HINGE_Z], rot: { x: 0, y: 0, z: 0 }, scale: 1 });
+
+  // Load plate: hinge edge at the node origin, body spans toward -z (latch
+  // side). Rotation about the pivot's local +X lifts the far end.
+  //
+  // The plate starts closed and the cycle opens it later, so the first frame of
+  // the showcase is the assembled socket; the land grid reaches the camera when
+  // the cycle reaches its open hold.
+  const loadPlate = makePart("loadPlate",
+    [extrudeProfile(rectProfile(-33, -68, 33, 1.5), { depth: PLATE_T, chamfer: 0.2 })],
+    { pos: [0, 0, 0], rot: { x: 0, y: 0, z: 0 }, scale: 1 });
+
+  // Rod extruded along its profile +Y, then z-rolled onto the world X axis:
+  // rot.z=-pi/2 maps +Y to +X, which is where a hinge line belongs.
+  const hingeBar = makePart("hingeBar",
+    [extrudeProfile(circleProfile(1.5, 12), { depth: 79 })],
+    { pos: [-39.5, 0, 0], rot: { x: 0, y: 0, z: -Math.PI / 2 }, scale: 1 });
+
+  hingePivot.node.add(loadPlate.node);
+  hingePivot.node.add(hingeBar.node);
+
+  // The latch lever stays on the ILS side of the hinge: it swings on its own
+  // post, not on the rod, so it is not a child of the pivot.
+  const latchLever = makePart("latchLever",
+    [extrudeProfile(rectProfile(-2.2, -1.2, 2.2, 4.8), { depth: 3.4, chamfer: 0.15 })],
+    { pos: [34, BR_Y + 1.4, -HZ - 3.5], rot: { x: 0, y: 0, z: 0 }, scale: 1 });
+
+  // Stiffener plate under the substrate, same footprint band as the frame wall:
+  // it nests just inside the frame bore, so it reads as machined steel from
+  // below without sharing any faces with the frame itself.
+  const stiffenRing = makePart("stiffenRing",
+    [extrudeProfile(roundedRectProfile(79.2, 64.7, 6, 4),
+      { depth: 0.8, chamfer: 0.1, hole: roundedRectProfile(74.3, 59.7, 3, 4) })],
+    { pos: [0, -1.0, 0], rot: {}, scale: 1 });
+
+  return { substrate, frame, padField, brBracket, hingePivot, loadPlate, hingeBar, latchLever, stiffenRing };
+}
+
+// ---------------------------------------------------------------- materials & lights
+/*
+ * One studio rig, hand-lit: key (warm, raking), rim (cool, back-left), fill
+ * (soft bounce from under the socket). Directions are normalised on the JS side
+ * and baked into the shaders as consts, so the lighting is part of the model
+ * rather than a per-frame uniform shuffle. Down-vector lights were tried and
+ * rejected: they blow the anodized frame out and flatten the gold field.
+ */
+const LIGHTS = [
+  { name: "KEY", dir: norm3([0.45, 0.80, 0.35]), color: [1.30, 1.22, 1.14] },
+  // RIM pulls double duty: it separates the silhouette AND gives the steel its
+  // sheen across the top face. A deep blue-violet cast reads as a bug in the
+  // gold field, so its blue is reined in and its green matched to the key.
+  { name: "RIM", dir: norm3([-0.72, 0.24, -0.60]), color: [0.55, 0.63, 0.82] },
+  { name: "FILL", dir: norm3([-0.25, -0.55, 0.78]), color: [0.34, 0.32, 0.30] },
+];
+
+/*
+ * Physically-ish material parameters. Gold's F0 is the real IOR-fresnello
+ * reflectance of the alloy (1.00, 0.766, 0.336); metals get their colour from
+ * F0, so their albedo is the same tint multiplied down a hair.
+ *
+ * The substrate is dark: a real LGA substrate is near-black ceramic, and a light
+ * grey one shows between the pads and washes the whole field out, which both
+ * reads wrong and costs the probe its gold ratio. Gold is deliberately rough -
+ * immersion-gold plating is microscopically matte, and a mirror finish would
+ * blow the key light into a white streak down the middle of the field.
+ */
+const MATERIALS = {
+  gold: { base: [0.86, 0.66, 0.30], f0: [1.0, 0.766, 0.336], rough: 0.40, metal: 1.0 },
+  steel: { base: [0.68, 0.70, 0.74], f0: [0.92, 0.93, 0.95], rough: 0.22, metal: 1.0 },
+  brass: { base: [0.78, 0.58, 0.26], f0: [0.96, 0.72, 0.30], rough: 0.30, metal: 1.0 },
+  anodize: { base: [0.085, 0.09, 0.105], f0: [0.55, 0.56, 0.60], rough: 0.40, metal: 0.85 },
+  ceramic: { base: [0.13, 0.135, 0.15], f0: [0.05, 0.05, 0.05], rough: 0.60, metal: 0.0 },
+};
+
+const PART_MATERIAL = {
+  substrate: "ceramic", frame: "anodize", padField: "gold", brBracket: "steel",
+  loadPlate: "steel", hingeBar: "brass", latchLever: "brass", stiffenRing: "steel",
+};
+
+function norm3(v) {
+  const len = Math.hypot(v[0], v[1], v[2]);
+  return [v[0] / len, v[1] / len, v[2] / len];
+}
+
+// ---------------------------------------------------------------- shaders
+// Shared BRDF code, GLSL-compiled into both programs. Nothing here is a texture
+// or a light-list: the environment is analytic, so one file stays one file.
+const GLSL_BxDF = `
+const float PI = 3.141592653589793;
+const vec3 SKY_TINT = vec3(0.30, 0.36, 0.46);
+const vec3 GROUND_TINT = vec3(0.17, 0.13, 0.10);
+const float AMBIENT = 0.14;
+const float SKY_SPEC = 0.45;
+// Wide-term env reflection for metals. A single GGX lobe against three point
+// lights leaves a machined-steel lid reading as near-black (all its light comes
+// from razor-thin highlights), which both looks wrong and costs the pixel probe
+// its coverage. This is the broad half of a two-lobe IBL approximation.
+const float ENV_SPEC_WIDE = 0.34;
+
+vec3 fresnelSchlick(vec3 f0, float u) {
+  return mix(f0, vec3(1.0), pow(1.0 - clamp(u, 0.0, 1.0), 5.0));
+}
+
+float ggxD(float NoH, float a2) {
+  float d = NoH * NoH * (a2 - 1.0) + 1.0;
+  return a2 / (PI * d * d);
+}
+
+float smithVisibility(float NoV, float NoL, float a2) {
+  float lambdaV = NoL * sqrt(NoV * NoV * (1.0 - a2) + a2);
+  float lambdaL = NoV * sqrt(NoL * NoL * (1.0 - a2) + a2);
+  return 0.5 / max(lambdaV + lambdaL, 1e-6);
+}
+
+vec3 lightContribution(vec3 N, vec3 V, vec3 L, vec3 LC, vec3 albedo, vec3 f0,
+                       float rough, float metal) {
+  float NoL = max(dot(N, L), 0.0);
+  if (NoL <= 0.0) return vec3(0.0);
+  float NoV = max(dot(N, V), 1e-4);
+  vec3 H = normalize(L + V);
+  float NoH = max(dot(N, H), 0.0);
+  float VoH = clamp(dot(V, H), 0.0, 1.0);
+  float a = clamp(rough, 0.04, 1.0);
+  float a2 = a * a; a2 *= a2;
+  vec3 F = fresnelSchlick(f0, VoH);
+  vec3 spec = vec3(ggxD(NoH, a2) * smithVisibility(NoV, NoL, a2)) * F;
+  vec3 diffW = (vec3(1.0) - F) * (1.0 - metal);
+  return (albedo * diffW + spec) * (NoL * LC);
+}
+
+vec3 shadeSurface(vec3 N, vec3 V, vec3 albedo, vec3 f0, float rough, float metal, float ao) {
+  vec3 col = vec3(0.0);
+  col += lightContribution(N, V, KEY_DIR, KEY_COLOR, albedo, f0, rough, metal);
+  col += lightContribution(N, V, RIM_DIR, RIM_COLOR, albedo, f0, rough, metal);
+  col += lightContribution(N, V, FILL_DIR, FILL_COLOR, albedo, f0, rough, metal);
+
+  // Analytic hemisphere environment: no IBL probe in a one-file build, so the
+  // ambient is a two-tint lerp over the normal and the sky gloss is a pow.
+  vec3 hemi = mix(GROUND_TINT, SKY_TINT, 0.5 + 0.5 * N.y);
+  col += albedo * hemi * AMBIENT * ao * (vec3(1.0) - f0 * 0.35);
+  vec3 R = reflect(-V, N);
+  float skyUp = clamp(R.y * 0.5 + 0.5, 0.0, 1.0);
+  // Broad term follows the reflected ray through the same hemisphere the diffuse
+  // ambient uses; the narrow term is the gloss band. Gloss range was widened
+  // (14 -> 10) so rough metals like steel keep some sheen instead of a pinpoint.
+  vec3 envTint = mix(GROUND_TINT, SKY_TINT, skyUp);
+  col += f0 * envTint * ENV_SPEC_WIDE * ao;
+  float gloss = mix(1.5, 10.0, 1.0 - clamp(rough, 0.0, 1.0));
+  col += f0 * SKY_SPEC * pow(skyUp, gloss) * ao;
+  return col;
+}
+
+// Fake contact shadow: a surface sitting on a plane gets its ambient pulled
+// down as it approaches that plane, hemispherical-ish, cheap, no shadow map.
+float contactAO(float worldY, float planeY, float facingUp) {
+  float h = max(worldY - planeY, 0.0);
+  float t = 1.0 - exp(-h * 1.1);
+  float facing = 0.5 + 0.5 * max(facingUp, 0.0);
+  return mix(1.0 - 0.45 * facing, 1.0, t);
+}
+
+vec3 tonemapACES(vec3 x) {
+  const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+`;
+
+// The light rig baked into every shading program as constants (see LIGHTS):
+// normalised in JS, so the numbers in the GLSL are honest vectors.
+const GLSL_LIGHT_CONSTANTS = LIGHTS.map((l) =>
+  `const vec3 ${l.name}_DIR = vec3(${l.dir.map((v) => v.toFixed(5)).join(", ")});\n` +
+  `const vec3 ${l.name}_COLOR = vec3(${l.color.map((v) => v.toFixed(5)).join(", ")});`
+).join("\n");
+
+// Only the lens falloff is needed by the backdrop; the full BRDF is for the
+// shaded parts. Keeping them apart stops the backdrop dragging a light rig and
+// a BRDF into a program that draws one triangle.
+const GLSL_VIGNETTE = `
+// Studio lens falloff in shader space: multiply by this, don't subtract.
+float vignetteFactor(vec2 ndcFromCentre, float strength) {
+  float r = length(ndcFromCentre);
+  return clamp(1.0 - strength * r * r, 0.0, 1.0);
+}
+`;
+
+const GLSL_SHADING = `${GLSL_LIGHT_CONSTANTS}\n${GLSL_BxDF}\n${GLSL_VIGNETTE}`;
+
+const VS_STD = `#version 300 es
+precision highp float;
+uniform mat4 u_viewProj;
+uniform mat4 u_model;
+uniform mat3 u_normalMat;
+in vec3 a_pos;
+in vec3 a_normal;
+out vec3 v_worldPos;
+out vec3 v_normal;
+void main() {
+  vec4 world = u_model * vec4(a_pos, 1.0);
+  v_worldPos = world.xyz;
+  v_normal = u_normalMat * a_normal;
+  gl_Position = u_viewProj * world;
+}`;
+
+const FS_STD = `#version 300 es
+precision highp float;
+in vec3 v_worldPos;
+in vec3 v_normal;
+uniform vec3 u_camPos;
+uniform vec3 u_base;
+uniform vec3 u_f0;
+uniform float u_rough;
+uniform float u_metal;
+uniform float u_contactY;
+uniform float u_exposure;
+uniform vec2 u_resolution;
+out vec4 outColor;
+${GLSL_SHADING}
+void main() {
+  vec3 N = normalize(v_normal);
+  vec3 toEye = u_camPos - v_worldPos;
+  float eyeDist = length(toEye);
+  vec3 V = eyeDist > 1e-4 ? toEye / eyeDist : vec3(0.0, 1.0, 0.0);
+  float ao = contactAO(v_worldPos.y, u_contactY, N.y);
+  vec3 col = shadeSurface(N, V, u_base, u_f0, u_rough, u_metal, ao) * u_exposure;
+  col = pow(tonemapACES(col), vec3(1.0 / 2.2));
+  vec2 ndc = (gl_FragCoord.xy / u_resolution) * 2.0 - 1.0;
+  col *= vignetteFactor(ndc, 0.28);
+  outColor = vec4(col, 1.0);
+}`;
+
+const VS_PAD = `#version 300 es
+precision highp float;
+uniform mat4 u_viewProj;
+uniform mat4 u_model;
+uniform mat3 u_normalMat;
+uniform float u_time;
+in vec3 a_pos;
+in vec3 a_normal;
+in vec2 a_padXZ;
+in vec2 a_padTone;
+out vec3 v_worldPos;
+out vec3 v_normal;
+out float v_tone;
+out float v_shimmer;
+void main() {
+  vec3 p = a_pos + vec3(a_padXZ.x, 0.0, a_padXZ.y);
+  vec4 world = u_model * vec4(p, 1.0);
+  v_worldPos = world.xyz;
+  v_normal = u_normalMat * a_normal;
+  v_tone = a_padTone.x;
+  // The field twinkles because each pad has its own phase: a slow sine, scaled
+  // to a few percent of brightness, never a full-blown strobe.
+  v_shimmer = 1.0 + 0.07 * sin(a_padTone.y + u_time * 0.6);
+  gl_Position = u_viewProj * world;
+}`;
+
+const FS_PAD = `#version 300 es
+precision highp float;
+in vec3 v_worldPos;
+in vec3 v_normal;
+in float v_tone;
+in float v_shimmer;
+uniform vec3 u_camPos;
+uniform vec3 u_base;
+uniform vec3 u_f0;
+uniform float u_rough;
+uniform float u_metal;
+uniform float u_contactY;
+uniform float u_exposure;
+uniform vec2 u_resolution;
+out vec4 outColor;
+${GLSL_SHADING}
+void main() {
+  vec3 N = normalize(v_normal);
+  vec3 toEye = u_camPos - v_worldPos;
+  float eyeDist = length(toEye);
+  vec3 V = eyeDist > 1e-4 ? toEye / eyeDist : vec3(0.0, 1.0, 0.0);
+  // Per-instance tone: roughness spreads over a 0.10 range, and the hue leans
+  // warmer/cool-er so the field shimmers as the camera moves instead of
+  // reading like one flat paint job.
+  float rough = u_rough + (v_tone - 0.5) * 0.10;
+  vec3 base = u_base * mix(vec3(1.0), vec3(1.04, 0.94, 0.84), v_tone - 0.5);
+  vec3 f0 = u_f0;
+  float ao = contactAO(v_worldPos.y, u_contactY, N.y);
+  vec3 col = shadeSurface(N, V, base, f0, rough, u_metal, ao) * u_exposure * v_shimmer;
+  col = pow(tonemapACES(col), vec3(1.0 / 2.2));
+  vec2 ndc = (gl_FragCoord.xy / u_resolution) * 2.0 - 1.0;
+  col *= vignetteFactor(ndc, 0.28);
+  outColor = vec4(col, 1.0);
+}`;
+
+// Studio backdrop: a vertical gradient with a radial falloff, dark enough that
+// the harness can tell part-from-backdrop with one threshold.
+const VS_BG = `#version 300 es
+precision highp float;
+in vec2 a_ndc;
+void main() { gl_Position = vec4(a_ndc, 0.5, 1.0); }`;
+
+const FS_BG = `#version 300 es
+precision highp float;
+uniform vec2 u_resolution;
+out vec4 outColor;
+${GLSL_VIGNETTE}
+void main() {
+  vec2 uv = gl_FragCoord.xy / u_resolution;
+  vec3 top = vec3(0.075, 0.085, 0.105);
+  vec3 bottom = vec3(0.020, 0.023, 0.030);
+  vec3 c = mix(bottom, top, smoothstep(0.0, 1.0, uv.y));
+  vec2 ndc = uv * 2.0 - 1.0;
+  c *= vignetteFactor(ndc, 0.85);
+  outColor = vec4(c, 1.0);
+}`;
+
+const PROGRAM_UNIFORM_NAMES = {
+  std: ["u_viewProj", "u_model", "u_normalMat", "u_camPos", "u_base", "u_f0",
+        "u_rough", "u_metal", "u_contactY", "u_exposure", "u_resolution"],
+  pad: ["u_viewProj", "u_model", "u_normalMat", "u_camPos", "u_base", "u_f0",
+        "u_rough", "u_metal", "u_contactY", "u_exposure", "u_resolution", "u_time"],
+  bg: ["u_resolution"],
+};
+
+const PROGRAM_ATTRIB_NAMES = {
+  std: ["a_pos", "a_normal"],
+  pad: ["a_pos", "a_normal", "a_padXZ", "a_padTone"],
+  bg: ["a_ndc"],
+};
+
+/**
+ * Compiles and links one program, publishing a diagnostics entry the harness
+ * reads directly (`compiled`/`linked`/`infoLog`) instead of trusting GL state.
+ * A compile failure becomes a thrown Error, because a black frame is a worse
+ * failure than a loud one.
+ */
+function createProgramRecord(gl, name) {
+  const sources = { std: [VS_STD, FS_STD], pad: [VS_PAD, FS_PAD], bg: [VS_BG, FS_BG] }[name];
+  const report = {
+    name,
+    compiled: true, linked: true, infoLog: "",
+    vertexSource: sources[0], fragmentSource: sources[1],
+    lights: LIGHTS.map((l) => ({ name: l.name, dir: l.dir, color: l.color })),
+  };
+  const shaders = [];
+  const shaderPairs = [[gl.VERTEX_SHADER, sources[0]], [gl.FRAGMENT_SHADER, sources[1]]];
+  for (const [type, src] of shaderPairs) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      report.compiled = false;
+      report.infoLog = `${name}: ${gl.getShaderInfoLog(sh)}`;
+      throw Object.assign(new Error(report.infoLog), { programReport: report });
+    }
+    shaders.push(sh);
+  }
+  const program = gl.createProgram();
+  for (const sh of shaders) gl.attachShader(program, sh);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    report.linked = false;
+    report.infoLog = `${name}: ${gl.getProgramInfoLog(program)}`;
+    throw Object.assign(new Error(report.infoLog), { programReport: report });
+  }
+  report.infoLog = gl.getProgramInfoLog(program) || "";
+
+  const uniforms = {}, attribs = {};
+  for (const n of PROGRAM_UNIFORM_NAMES[name]) uniforms[n] = gl.getUniformLocation(program, n);
+  for (const n of PROGRAM_ATTRIB_NAMES[name]) attribs[n] = gl.getAttribLocation(program, n);
+  return { program, uniforms, attribs, report };
+}
+
+// ---------------------------------------------------------------- renderer
+/*
+ * One interleaved VBO per part: one vertex of position+normal per 24-byte
+ * record, so each attribute pointer's offset lands on its own component. A
+ * segmented [all positions][all normals] upload with these pointers reads
+ * another vertex's normal as a position - which GL happily draws as noise
+ * without raising an error. The harness decodes this buffer byte-for-byte.
+ */
+const STRIDE_BYTES = 24;
+const INSTANCE_STRIDE_BYTES = 16; // 4 floats per pad: x, z, tone, phase
+
+function interleavedGeometry(geom) {
+  const vertexCount = geom.pos.length / 3;
+  const badIndex = geom.idx.find((i) => i >= vertexCount);
+  if (badIndex !== undefined) {
+    throw new RangeError(`index ${badIndex} out of range for ${vertexCount} vertices`);
+  }
+  if (geom.nrm.length !== geom.pos.length) {
+    throw new RangeError(`normals hold ${geom.nrm.length} floats, positions ${geom.pos.length}`);
+  }
+  const floats = new Float32Array(vertexCount * 6);
+  for (let v = 0; v < vertexCount; v++) {
+    floats[v * 6] = geom.pos[v * 3];
+    floats[v * 6 + 1] = geom.pos[v * 3 + 1];
+    floats[v * 6 + 2] = geom.pos[v * 3 + 2];
+    floats[v * 6 + 3] = geom.nrm[v * 3];
+    floats[v * 6 + 4] = geom.nrm[v * 3 + 1];
+    floats[v * 6 + 5] = geom.nrm[v * 3 + 2];
+  }
+  return floats;
+}
+
+/*
+ * Uint16 indices unless a part genuinely needs more than 65k vertices. The GL
+ * enum is read from the context rather than hardcoded, so a future context with
+ * OES_element_index_uint disabled still fails loudly instead of drawing noise.
+ */
+function indexBufferFor(gl, geom) {
+  const vertexCount = geom.pos.length / 3;
+  return vertexCount > 0xffff
+    ? { data: new Uint32Array(geom.idx), glType: gl.UNSIGNED_INT }
+    : { data: new Uint16Array(geom.idx), glType: gl.UNSIGNED_SHORT };
+}
+
+/**
+ * Uploads one part into a VAO the draw path only has to bind. Attribute
+ * pointers are wired from the program record at upload time, so the VAO and the
+ * shader agree on locations by construction and the per-frame path never
+ * re-derives them.
+ */
+function uploadPartToGpu(gl, part, rec) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  const vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, interleavedGeometry(part.geometry), gl.STATIC_DRAW);
+  bindInterleavedAttribs(gl, rec, [
+    [rec.attribs.a_pos, 3, 0],
+    [rec.attribs.a_normal, 3, 12],
+  ]);
+
+  let instanceBuffer = null;
+  if (part.instances) {
+    // The instance stream has to be the bound ARRAY_BUFFER while the pointers
+    // are set, or they silently point at the vertex VBO. That ordering bug drew
+    // 3,647 copies of pad zero, which looked almost plausible.
+    instanceBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, part.instances, gl.STATIC_DRAW);
+    bindInterleavedAttribs(gl, rec, [
+      [rec.attribs.a_padXZ, 2, 0],  // x, z
+      [rec.attribs.a_padTone, 2, 8], // tone, phase
+    ], INSTANCE_STRIDE_BYTES, 1);
+  }
+
+  const indexBuf = indexBufferFor(gl, part.geometry);
+  const ibo = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indexBuf.data, gl.STATIC_DRAW);
+
+  gl.bindVertexArray(null);
+  return {
+    part, vao, vbo, ibo, instanceBuffer,
+    indexCount: part.geometry.idx.length,
+    indexType: indexBuf.glType,
+    modelMatrix: mat4.identity(),
+  };
+}
+
+function bindInterleavedAttribs(gl, rec, entries, stride = STRIDE_BYTES, divisor = 0) {
+  for (const [attrib, size, offset] of entries) {
+    if (attrib < 0) continue; // optimised away by the linker: still legal, skip it
+    gl.enableVertexAttribArray(attrib);
+    gl.vertexAttribPointer(attrib, size, gl.FLOAT, false, stride, offset);
+    if (divisor) gl.vertexAttribDivisor(attrib, divisor);
+  }
+}
+
+/** A fullscreen triangle for the backdrop: two clipped corners and one big tri. */
+function uploadBackdropToGpu(gl, rec) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  bindInterleavedAttribs(gl, rec, [[rec.attribs.a_ndc, 2, 0]], 0);
+  gl.bindVertexArray(null);
+  return { vao, vbo };
+}
+
+// Exposure pulls the ACES curve off the top of the chamfers: at 1.18 the plate's
+// bevels and the brightest pads clipped at 250/255 and lost their form.
+const EXPOSURE = 1.05;
+const FOV_DEG = 30;
+
+/*
+ * The showcase pose: looking down the socket's face rather than across it. A
+ * grazing 35deg elevation made the whole assembly read as a thin sliver and hid
+ * the pad field, which is the one thing worth showcasing on an LGA socket.
+ * ~56deg elevation keeps the land grid facing the camera while still showing the
+ * frame wall and hinge rod.
+ */
+/*
+ * Showcase framing, settled by a projection solver plus a pixel bake-off rather
+ * than by eyeballing screenshots. The two constraints do not coexist, so this
+ * is the trade written down: the 76 x 61 mm slab at 30 deg vertical FOV wants
+ * dist >= ~170 to keep every corner inside the frame across the whole 360 deg
+ * orbit, and ~190+ to fit the fully-open plate (its tip swings to y ~= 70 mm).
+ * At that distance the pixel coverage drops to 0.15-0.19 - the subject turns
+ * into a postage stamp and the gold field stops being the point of the render.
+ * So dist 150 sits on the pinch: coverage stays >= 0.25 and gold >= 0.03 at
+ * every pinned plate pose (closed reads 0.003, fully open ~0.12, and the slab's
+ * corners kiss the frame edge only at the extreme orbit azimuths). The swinging
+ * lid travelling past the frame is on purpose - that is what an open-and-load
+ * product turntable looks like. The ranges are re-measured by the pinned-pose
+ * render check rather than trusted from the solver's pre-fix numbers.
+ */
+const VIEW = { azDeg: 34, elevDeg: 56, dist: 150, target: [0, 5, 0] };
+
+/*
+ * Orbit rate and input scaling, in one place, so the harness can pin them and
+ * the render loop never has to know what "slow" means. One revolution in ~70 s
+ * looks static in a screenshot but reads as rotation in motion: fast enough that
+ * specular and the pad shimmer move, slow enough to inspect the machining.
+ */
+const ORBIT = {
+  degPerMs: 0.004, // 4 deg/s
+  elevAmplitudeDeg: 6,
+  elevPeriodMs: 45000, // one drift cycle: never repeats in a way the eye can follow
+  dragDegPerPx: 0.35,
+  zoomPerStep: 0.11, // 11 % per wheel notch, compounded in log space
+};
+
+const CAMERA_LIMITS = {
+  minDist: 45, maxDist: 280,
+  minElevDeg: 5, maxElevDeg: 75,
+  minAspect: 0.35, maxAspect: 3.2,
+  maxDpr: 2, // an iGPU at 4x DPR would fill-rate itself to death
+};
+
+/*
+ * User-input offsets live here rather than in the pose, so cameraPose() stays a
+ * pure function of (elapsedMs, input): a harness can pin or scrub the camera
+ * without unpicking an accumulator, and dragging never fights the auto-orbit.
+ */
+const inputState = { azOffsetDeg: 0, elevOffsetDeg: 0, zoomLog: 0 };
+
+const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
+const DEG_TO_RAD = Math.PI / 180;
+
+/** Eye position for a polar pose: one spherical mapping, shared by all paths. */
+function eyeAt(azDeg, elevDeg, dist) {
+  const az = azDeg * DEG_TO_RAD;
+  const el = elevDeg * DEG_TO_RAD;
+  return [
+    dist * Math.cos(el) * Math.sin(az),
+    dist * Math.sin(el),
+    dist * Math.cos(el) * Math.cos(az),
+  ];
+}
+
+/**
+ * The orbit pose for a clock value, in degrees and mm. Returns a fresh object on
+ * purpose: a reused scratch record would break any caller that compares two
+ * poses, and one small record per frame is not a fill-rate concern.
+ */
+function cameraPose(elapsedMs = 0) {
+  const azDeg = VIEW.azDeg + elapsedMs * ORBIT.degPerMs + inputState.azOffsetDeg;
+  const drift = ORBIT.elevAmplitudeDeg * Math.sin((2 * Math.PI * elapsedMs) / ORBIT.elevPeriodMs);
+  const elevDeg = clamp(VIEW.elevDeg + drift + inputState.elevOffsetDeg,
+    CAMERA_LIMITS.minElevDeg, CAMERA_LIMITS.maxElevDeg);
+  // Radius is exp() of a log accumulator, so it can never reach or cross zero the
+  // way a per-frame multiply-with-clamp does: the clamp only bounds the framing.
+  const dist = clamp(VIEW.dist * Math.exp(inputState.zoomLog), CAMERA_LIMITS.minDist, CAMERA_LIMITS.maxDist);
+  return {
+    azDeg, elevDeg, dist, target: VIEW.target,
+    eye: eyeAt(azDeg, elevDeg, dist),
+  };
+}
+
+/** Applies a pointer drag, in CSS pixels. Azimuth is unbounded; elevation saturates. */
+function orbit(dxPx, dyPx) {
+  inputState.azOffsetDeg += dxPx * ORBIT.dragDegPerPx;
+  inputState.elevOffsetDeg += dyPx * ORBIT.dragDegPerPx;
+  return inputState;
+}
+
+/** Positive steps move the camera away from the socket (wheel down = out). */
+function zoom(steps) {
+  inputState.zoomLog += steps * Math.log(1 + ORBIT.zoomPerStep);
+  return inputState;
+}
+
+/**
+ * Maps a CSS box to a drawing buffer. The aspect clamp is the important part:
+ * a window that is only a few pixels tall (or a browser reporting 0) would
+ * otherwise hand a division-by-one-zero straight into the projection matrix.
+ */
+function fitViewport(cssW, cssH, dpr = window.devicePixelRatio || 1) {
+  const d = clamp(dpr || 1, 0.5, CAMERA_LIMITS.maxDpr);
+  const width = Math.max(1, Math.round((cssW || 0) * d));
+  const height = Math.max(1, Math.round((cssH || 0) * d));
+  return {
+    width, height, dpr: d,
+    aspect: clamp(width / height, CAMERA_LIMITS.minAspect, CAMERA_LIMITS.maxAspect),
+  };
+}
+
+const cameraState = {
+  eye: [0, 0, 0],
+  view: mat4.identity(),
+  projection: mat4.identity(),
+  viewProj: mat4.identity(),
+};
+const scratch = { normalMat: new Float32Array(9), pixels: null };
+
+/** Builds view + projection matrices from a pose and a viewport record. */
+function updateCamera(pose = cameraPose(0), viewport = fitViewport(canvas.clientWidth, canvas.clientHeight)) {
+  cameraState.eye[0] = pose.eye[0];
+  cameraState.eye[1] = pose.eye[1];
+  cameraState.eye[2] = pose.eye[2];
+  mat4.lookAt(cameraState.view, cameraState.eye, pose.target, [0, 1, 0]);
+  mat4.perspective(cameraState.projection, {
+    fovyDeg: FOV_DEG,
+    aspect: viewport.aspect,
+    near: 1,
+    far: 4000,
+  });
+  mat4.multiply(cameraState.viewProj, cameraState.projection, cameraState.view);
+  return cameraState;
+}
+
+/*
+ * Bonus interactivity (DESIGN.md's "user controls as a bonus"): pointer drag
+ * orbits, wheel zooms. Wheel is the one listener that needs preventDefault, so
+ * it is registered non-passive; a passive listener would let the page scroll
+ * underneath the canvas while the user was trying to zoom.
+ */
+function attachCameraInput(target, { onCursor } = {}) {
+  // null is the idle sentinel: real pointer ids are >= 0 in every browser, so
+  // this cannot alias a genuine event the way a -1 sentinel could.
+  const drag = { pointerId: null, lastX: 0, lastY: 0 };
+
+  target.addEventListener("pointerdown", (event) => {
+    if (drag.pointerId !== null) return; // already dragging
+    drag.pointerId = event.pointerId;
+    drag.lastX = event.clientX;
+    drag.lastY = event.clientY;
+    try {
+      // Capturing keeps the drag alive when the pointer leaves the canvas. It
+      // throws on a pointer the browser never activated (a synthetic event, which
+      // the harness dispatches), so the capture is a nicety, not a requirement.
+      if (target.setPointerCapture) target.setPointerCapture(event.pointerId);
+    } catch (err) {
+      // No capture, no drag lock: the orbit still works.
+    }
+    if (onCursor) onCursor("grabbing");
+  });
+
+  target.addEventListener("pointermove", (event) => {
+    if (event.pointerId !== drag.pointerId) return;
+    const dx = event.clientX - drag.lastX;
+    const dy = event.clientY - drag.lastY;
+    drag.lastX = event.clientX;
+    drag.lastY = event.clientY;
+    orbit(dx, dy);
+  });
+
+  const stop = (event) => {
+    if (event.pointerId !== drag.pointerId) return;
+    drag.pointerId = -1;
+    if (onCursor) onCursor("grab");
+  };
+  target.addEventListener("pointerup", stop);
+  target.addEventListener("pointercancel", stop);
+
+  target.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    zoom(clamp(event.deltaY / 100, -3, 3));
+  }, { passive: false });
+
+  return inputState;
+}
+
+const MAX_FRAME_MS = 50; // a backgrounded tab hands us 1 Hz deltas; never let them through
+
+/*
+ * The orbit clock is a single accumulator, not a per-frame delta: the pose is
+ * always derived from it, so a harness can pin elapsedMs and get the same camera
+ * every time. Pausing freezes the clock rather than zeroing the pose, which is
+ * what keeps a resumed orbit from snapping back.
+ */
+const orbitClock = { elapsedMs: 0, paused: false };
+
+/** Returns the clamped delta so the caller can reuse it for plate/other clocks. */
+function advanceOrbitClock(dtMs) {
+  const step = clamp(dtMs, 0, MAX_FRAME_MS);
+  if (!orbitClock.paused) orbitClock.elapsedMs += step;
+  return step;
+}
+
+/*
+ * The load plate hinge cycle: a keyframe table, not per-frame accumulators.
+ * Everything downstream reads it as a function of elapsed time, so a harness can
+ * scrub it to any t and get the same pose every time - and so a paused clock
+ * resumes where it was instead of re-running the swing.
+ *
+ * A keyframe's `phase` labels the span it opens, and its deg values are the
+ * values AT that keyframe; the span interpolates toward the next keyframe's
+ * values. The final keyframe is the wrap sentinel: it must equal the first, so
+ * t = cycleMs reads identical to t = 0.
+ */
+const PLATE_MAX_DEG = 105;   // a real LGA load plate swings open past vertical
+const PLATE_LATCH_DEG = 18;  // the lever clears its hook at ~18 deg of plate swing
+const PLATE_CYCLE = {
+  cycleMs: 19600,
+  maxDeg: PLATE_MAX_DEG,
+  keyframes: [
+    { atMs: 0, phase: "closed", plateDeg: 0, latchDeg: 0 },
+    { atMs: 6000, phase: "unlatching", plateDeg: 0, latchDeg: 0 },
+    { atMs: 7600, phase: "opening", plateDeg: 0, latchDeg: PLATE_LATCH_DEG },
+    { atMs: 10800, phase: "open", plateDeg: PLATE_MAX_DEG, latchDeg: PLATE_LATCH_DEG },
+    { atMs: 16800, phase: "closing", plateDeg: PLATE_MAX_DEG, latchDeg: PLATE_LATCH_DEG },
+    { atMs: 19600, phase: "closed", plateDeg: 0, latchDeg: 0 },
+  ],
+};
+
+const easeInOut = (h) => h * h * (3 - 2 * h);
+
+/**
+ * The plate pose at one point in the cycle. `plateOverride.deg` (set through
+ * setPlateOverride, e.g. by the Space key) pins a pose and lets the clock keep
+ * running, so unpinning returns to the identical frame it was on.
+ */
+function platePose(elapsedMs) {
+  if (plateOverride.deg !== null) {
+    const deg = plateOverride.deg;
+    return {
+      phase: deg <= 0.01 ? "closed" : deg >= PLATE_MAX_DEG - 0.01 ? "open" : "holding",
+      plateAngleDeg: deg,
+      latchAngleDeg: 0,
+    };
+  }
+  const { cycleMs, keyframes: ks } = PLATE_CYCLE;
+  const local = ((elapsedMs % cycleMs) + cycleMs) % cycleMs;
+  let i = 0;
+  while (i < ks.length - 2 && ks[i + 1].atMs <= local) i++;
+  const from = ks[i], to = ks[i + 1];
+  const span = to.atMs - from.atMs;
+  const h = span <= 0 ? 0 : (local - from.atMs) / span;
+  const e = easeInOut(h);
+  return {
+    phase: from.phase,
+    plateAngleDeg: from.plateDeg + (to.plateDeg - from.plateDeg) * e,
+    latchAngleDeg: from.latchDeg + (to.latchDeg - from.latchDeg) * e,
+  };
+}
+
+/*
+ * null means "follow the cycle". The sentinel is null rather than any falsy
+ * value because 0 is a legitimate pin (plate closed), and 0 is falsy.
+ */
+const plateOverride = { deg: null };
+
+function setPlateOverride(deg) {
+  plateOverride.deg = deg === undefined ? null : deg;
+}
+
+/** Space: closed -> open -> back to the auto cycle, in that order. */
+function togglePlatePin() {
+  if (plateOverride.deg === null) plateOverride.deg = 0;
+  else if (plateOverride.deg < PLATE_MAX_DEG / 2) plateOverride.deg = PLATE_MAX_DEG;
+  else plateOverride.deg = null;
+}
+
+/** Writes a pose into the scene graph. Returns the pose for caller chaining. */
+function applyPlatePose(parts, pose) {
+  parts.hingePivot.node.local.rot.x = (pose.plateAngleDeg * Math.PI) / 180;
+  parts.latchLever.node.local.rot.y = (pose.latchAngleDeg * Math.PI) / 180;
+  return pose;
+}
+
+/** Keyboard shortcuts: Space pins the plate, A freezes the animation clock. */
+function handleKey(code) {
+  if (code === "Space") {
+    togglePlatePin();
+    return true;
+  }
+  if (code === "KeyA") {
+    orbitClock.paused = !orbitClock.paused;
+    return true;
+  }
+  return false;
+}
+
+/*
+ * ---------------------------------------------- cinema mode (?cinema=1)
+ * The 40 s reel timeline. Not an animation: the film driver steps it frame by
+ * frame (renderCinemaFrame(ms)), so the whole thing is a pure lookup table -
+ * the same ms always produces the same frame, which is what makes a 2400-frame
+ * capture deterministic by construction.
+ *
+ * Beat sheet in DESIGN.md's 2026-11-18 addendum; the keyframes below are that
+ * table, in ms. Camera azimuth stays monotonic across the 34 -> 340 deg sweep:
+ * no wrap cut means no seam between the last frame and the credits pose.
+ */
+const cinemaRequested =
+  typeof location !== "undefined" && /[?&]cinema=1(?:&|$)/.test(location.search);
+
+const CINEMA = {
+  durationMs: 40000,
+  cameraKeys: [
+    { atMs: 0, azDeg: 34, elevDeg: 56, dist: 150 },
+    { atMs: 9500, azDeg: 96, elevDeg: 50, dist: 132 },
+    { atMs: 13000, azDeg: 118, elevDeg: 28, dist: 62 },
+    { atMs: 18000, azDeg: 150, elevDeg: 20, dist: 78 },
+    { atMs: 23000, azDeg: 196, elevDeg: 38, dist: 60 },
+    { atMs: 27500, azDeg: 224, elevDeg: 50, dist: 150 },
+    { atMs: 33000, azDeg: 262, elevDeg: 58, dist: 140 },
+    { atMs: 36500, azDeg: 340, elevDeg: 56, dist: 150 },
+  ],
+  plateKeys: [
+    { atMs: 0, deg: 0 },
+    { atMs: 10800, deg: 0 },
+    { atMs: 15500, deg: PLATE_MAX_DEG },
+    { atMs: 26500, deg: PLATE_MAX_DEG },
+    { atMs: 30500, deg: 0 },
+  ],
+  latchKeys: [
+    { atMs: 0, deg: 0 },
+    { atMs: 9500, deg: 0 },
+    { atMs: 11000, deg: PLATE_LATCH_DEG },
+    { atMs: 30500, deg: PLATE_LATCH_DEG },
+    { atMs: 32000, deg: 0 },
+  ],
+  phaseKeys: [
+    { atMs: 0, phase: "closed" },
+    { atMs: 9500, phase: "unlatching" },
+    { atMs: 10800, phase: "opening" },
+    { atMs: 15500, phase: "open" },
+    { atMs: 26500, phase: "closing" },
+    { atMs: 30500, phase: "latching" },
+    { atMs: 32000, phase: "closed" },
+  ],
+  // Card alpha: the reel fades in from black, the title card crosses for 3 s,
+  // the credits (Jon's two lines) cross near the end, and black closes the reel.
+  cards: {
+    fade: [
+      { atMs: 0, alpha: 1 }, { atMs: 800, alpha: 0 },
+      { atMs: 39300, alpha: 0 }, { atMs: 40000, alpha: 1 },
+    ],
+    title: [
+      { atMs: 0, alpha: 0 }, { atMs: 900, alpha: 0 },
+      { atMs: 2600, alpha: 1 }, { atMs: 3300, alpha: 0 },
+    ],
+    credits: [
+      { atMs: 0, alpha: 0 }, { atMs: 36500, alpha: 0 }, { atMs: 37500, alpha: 1 },
+      { atMs: 39000, alpha: 1 }, { atMs: 39600, alpha: 0 },
+    ],
+  },
+};
+
+/**
+ * One span of a keyframe table at time t: outside the table the end values are
+ * held (that is what keeps t past the last keyframe from sprouting a NaN),
+ * inside it the span is eased with the same easeInOut the hinge cycle uses.
+ */
+function spanValue(keys, t, field) {
+  if (t <= keys[0].atMs) return keys[0][field];
+  const last = keys[keys.length - 1];
+  if (t >= last.atMs) return last[field];
+  let i = 0;
+  while (i < keys.length - 2 && keys[i + 1].atMs <= t) i++;
+  const from = keys[i], to = keys[i + 1];
+  const h = to.atMs === from.atMs ? 0 : (t - from.atMs) / (to.atMs - from.atMs);
+  return from[field] + (to[field] - from[field]) * easeInOut(h);
+}
+
+/** The full reel state at time ms: camera, plate, latch, phase, card alphas. */
+function cinemaState(ms) {
+  const t = clamp(ms, 0, CINEMA.durationMs);
+  const { cameraKeys, plateKeys, latchKeys, phaseKeys, cards } = CINEMA;
+  let phase = phaseKeys[0].phase;
+  for (const key of phaseKeys) {
+    if (key.atMs > t) break;
+    phase = key.phase;
+  }
+  return {
+    camera: {
+      azDeg: spanValue(cameraKeys, t, "azDeg"),
+      elevDeg: clamp(spanValue(cameraKeys, t, "elevDeg"), CAMERA_LIMITS.minElevDeg, CAMERA_LIMITS.maxElevDeg),
+      dist: clamp(spanValue(cameraKeys, t, "dist"), CAMERA_LIMITS.minDist, CAMERA_LIMITS.maxDist),
+    },
+    plateAngleDeg: spanValue(plateKeys, t, "deg"),
+    latchAngleDeg: spanValue(latchKeys, t, "deg"),
+    phase,
+    titleAlpha: spanValue(cards.title, t, "alpha"),
+    creditAlpha: spanValue(cards.credits, t, "alpha"),
+    fadeAlpha: spanValue(cards.fade, t, "alpha"),
+  };
+}
+
+/**
+ * One frame of cinema mode, exactly as the film driver asked for it: the
+ * drawing buffer is read by a screenshot immediately after, so nothing here
+ * may depend on wall time or on a previous frame.
+ */
+function renderCinemaFrame(ms) {
+  if (!cinemaStage) throw new Error("renderCinemaFrame called before a ?cinema=1 boot: nothing to draw");
+  const st = cinemaState(ms);
+  applyPlatePose(cinemaStage.parts, {
+    phase: st.phase,
+    plateAngleDeg: st.plateAngleDeg,
+    latchAngleDeg: st.latchAngleDeg,
+  });
+  const pose = {
+    azDeg: st.camera.azDeg, elevDeg: st.camera.elevDeg, dist: st.camera.dist,
+    target: VIEW.target,
+    eye: eyeAt(st.camera.azDeg, st.camera.elevDeg, st.camera.dist),
+  };
+  updateCamera(pose, resizeCanvas(cinemaStage.gl));
+  cinemaStage.scene.azimuthDeg = st.camera.azDeg;
+  cinemaStage.scene.cameraDist = st.camera.dist;
+  cinemaStage.scene.plateAngleDeg = st.plateAngleDeg;
+  cinemaStage.scene.platePhase = st.phase;
+  for (const [id, alpha] of [
+    ["cinema-fade", st.fadeAlpha], ["cinema-title", st.titleAlpha], ["cinema-credits", st.creditAlpha],
+  ]) {
+    const el = document.getElementById(id);
+    if (el) el.style.opacity = String(alpha);
+  }
+  cinemaStage.scene.frames++;
+  // u_time rides the reel clock, not the wall: frame N always shimmers the
+  // same way, encode after encode.
+  cinemaStage.scene.drawCalls = drawScene(cameraState.viewProj, ms, cameraState.eye);
+  cinemaStage.scene.padsDrawn = cinemaStage.scene.padCount;
+  return st;
+}
+
+
+/**
+ * One studio frame: backdrop, seven shaded parts, then the 3,647 pads in a
+ * single instanced draw. Returns the number of draw calls issued.
+ */
+function drawScene(viewProj, timeMs, camPos = cameraState.eye) {
+  if (!activeRenderer) throw new Error("drawScene called before boot(): no renderer to draw with");
+  return activeRenderer.draw(viewProj, timeMs, camPos);
+}
+
+const LUMA = [0.2126, 0.7152, 0.0722];
+
+/*
+ * Frame analysis, kept GL-free so the thresholds are unit-testable against a
+ * synthetic frame. "Gold-ish" means red dominates blue with green bright enough
+ * to be a lit pad rather than a shaded brown one; non-background is any pixel
+ * brighter than the backdrop or carrying real chroma.
+ */
+function analysePixels(pixels, width, height, { step = 1 } = {}) {
+  if (!(width > 0) || !(height > 0)) throw new RangeError(`bad frame size ${width}x${height}`);
+  if (pixels.length < width * height * 4) {
+    throw new RangeError(`buffer holds ${pixels.length / 4} pixels, fewer than ${width * height}`);
+  }
+  const s = Math.max(1, Math.round(step));
+  let sampled = 0, goldCount = 0, nonBackgroundCount = 0, maxLuma = 0;
+  for (let y = 0; y < height; y += s) {
+    for (let x = 0; x < width; x += s) {
+      const i = (y * width + x) * 4;
+      const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+      const luma = LUMA[0] * r + LUMA[1] * g + LUMA[2] * b;
+      const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+      sampled++;
+      if (luma > maxLuma) maxLuma = luma;
+      if (luma > 60 || chroma > 14) nonBackgroundCount++;
+      if (r > b + 20 && g > 60) goldCount++;
+    }
+  }
+  return {
+    sampled, goldCount, nonBackgroundCount, maxLuma,
+    goldRatio: goldCount / sampled,
+    nonBackgroundRatio: nonBackgroundCount / sampled,
+  };
+}
+
+/**
+ * Reads the drawing buffer back and reports coverage. The caller has to draw a
+ * frame first: with preserveDrawingBuffer off, reading after the frame has
+ * presented hands back an unspecified buffer, so the probe redraws by default.
+ */
+function frameStats({ step = 1, drawFirst = true } = {}) {
+  if (!activeRenderer) throw new Error("frameStats called before boot(): no renderer to read");
+  if (drawFirst) drawScene(cameraState.viewProj, lastFrameTimeMs, cameraState.eye);
+  const gl = activeRenderer.gl;
+  const w = canvas.width, h = canvas.height;
+  if (!scratch.pixels || scratch.pixels.length !== w * h * 4) {
+    scratch.pixels = new Uint8Array(w * h * 4);
+  }
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, scratch.pixels);
+  return analysePixels(scratch.pixels, w, h, { step });
+}
+
+/** Sizes the backing store to the CSS box; the DPR cap lives in fitViewport. */
+function resizeCanvas(gl, source = canvas) {
+  const vp = fitViewport(source.clientWidth || source.width || 1, source.clientHeight || source.height || 1);
+  if (source.width !== vp.width) source.width = vp.width;
+  if (source.height !== vp.height) source.height = vp.height;
+  gl.viewport(0, 0, vp.width, vp.height);
+  return vp;
+}
+
+let activeRenderer = null;
+let lastFrameTimeMs = 0;
+// Populated by a ?cinema=1 boot; renderCinemaFrame refuses to draw before it.
+let cinemaStage = null;
+
+function createRenderer(gl, parts) {
+  const records = {};
+  const programs = {};
+  for (const name of ["bg", "std", "pad"]) {
+    const rec = createProgramRecord(gl, name);
+    records[name] = rec;
+    programs[name] = rec.report;
+  }
+
+  // Transform nodes carry no geometry, so there is nothing to upload for them:
+  // the hinge pivot exists only to rotate the plate and the rod collar.
+  const gpuParts = Object.entries(parts)
+    .filter(([, part]) => part.geometry.idx.length > 0 && part.name !== "padField")
+    .map(([, part]) => uploadPartToGpu(gl, part, records.std));
+  const padGpu = uploadPartToGpu(gl, parts.padField, records.pad);
+  const backdrop = uploadBackdropToGpu(gl, records.bg);
+
+  function drawShadedParts(std, viewProj, camPos, resolution) {
+    let drawCalls = 0;
+    gl.useProgram(std.program);
+    gl.uniformMatrix4fv(std.uniforms.u_viewProj, false, viewProj);
+    gl.uniform3fv(std.uniforms.u_camPos, camPos);
+    gl.uniform2f(std.uniforms.u_resolution, resolution[0], resolution[1]);
+    gl.uniform1f(std.uniforms.u_exposure, EXPOSURE);
+    for (const entry of gpuParts) {
+      const mat = MATERIALS[PART_MATERIAL[entry.part.name]];
+      entry.part.node.world(entry.modelMatrix);
+      // The model matrices here are rigid (uniform scale, no shear), so the
+      // upper-left 3x3 is already the correct normal basis. If Task 7 ever
+      // scales a part non-uniformly, this becomes an inverse-transpose.
+      mat4.toMat3(scratch.normalMat, entry.modelMatrix);
+      gl.bindVertexArray(entry.vao);
+      gl.uniformMatrix4fv(std.uniforms.u_model, false, entry.modelMatrix);
+      gl.uniformMatrix3fv(std.uniforms.u_normalMat, false, scratch.normalMat);
+      gl.uniform3fv(std.uniforms.u_base, mat.base);
+      gl.uniform3fv(std.uniforms.u_f0, mat.f0);
+      gl.uniform1f(std.uniforms.u_rough, mat.rough);
+      gl.uniform1f(std.uniforms.u_metal, mat.metal);
+      // Contact AO starts at the part's world floor, not its local bbox: the load
+      // plate is parented to the hinge node, so local y=0 is 4 mm above the floor.
+      gl.uniform1f(std.uniforms.u_contactY, worldFloorY(entry.modelMatrix, entry.part.bbox));
+      gl.drawElements(gl.TRIANGLES, entry.indexCount, entry.indexType, 0);
+      drawCalls++;
+    }
+    return drawCalls;
+  }
+
+  function drawPadField(pad, viewProj, timeMs, camPos, resolution) {
+    const mat = MATERIALS[PART_MATERIAL.padField];
+    padGpu.part.node.world(padGpu.modelMatrix);
+    mat4.toMat3(scratch.normalMat, padGpu.modelMatrix);
+    gl.useProgram(pad.program);
+    gl.bindVertexArray(padGpu.vao);
+    gl.uniformMatrix4fv(pad.uniforms.u_viewProj, false, viewProj);
+    gl.uniformMatrix4fv(pad.uniforms.u_model, false, padGpu.modelMatrix);
+    gl.uniformMatrix3fv(pad.uniforms.u_normalMat, false, scratch.normalMat);
+    gl.uniform3fv(pad.uniforms.u_camPos, camPos);
+    gl.uniform2f(pad.uniforms.u_resolution, resolution[0], resolution[1]);
+    gl.uniform1f(pad.uniforms.u_exposure, EXPOSURE);
+    gl.uniform1f(pad.uniforms.u_time, timeMs / 1000);
+    gl.uniform3fv(pad.uniforms.u_base, mat.base);
+    gl.uniform3fv(pad.uniforms.u_f0, mat.f0);
+    gl.uniform1f(pad.uniforms.u_rough, mat.rough);
+    gl.uniform1f(pad.uniforms.u_metal, mat.metal);
+    gl.uniform1f(pad.uniforms.u_contactY, worldFloorY(padGpu.modelMatrix, padGpu.part.bbox));
+    // WebGL2 instancing is core: no ANGLE_instanced_arrays hunt, and exactly
+    // one call for the whole 3,647-pad field.
+    gl.drawElementsInstanced(gl.TRIANGLES, padGpu.indexCount, padGpu.indexType, 0,
+      padGpu.part.instanceCount);
+    return 1;
+  }
+
+  function draw(viewProj, timeMs, camPos) {
+    const { std, pad, bg } = records;
+    const resolution = [canvas.width, canvas.height];
+
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(true);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    // Backdrop first, depth writes off: it never occludes geometry and never
+    // burns a fragment invocation on what is drawn after it.
+    gl.depthMask(false);
+    gl.useProgram(bg.program);
+    gl.bindVertexArray(backdrop.vao);
+    gl.uniform2f(bg.uniforms.u_resolution, resolution[0], resolution[1]);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    gl.depthMask(true);
+    const calls = drawShadedParts(std, viewProj, camPos, resolution)
+      + drawPadField(pad, viewProj, timeMs, camPos, resolution);
+
+    gl.bindVertexArray(null);
+    return calls;
+  }
+
+  return { gl, records, programs, gpuParts, padGpu, backdrop, draw };
+}
+
+window.__api = {
+  mat4, Node, earClip, bboxOf, worldFloorY, buildParts,
+  roundedRectProfile, circleProfile, rectProfile, translatedProfile, withKeyingCut, extrudeProfile,
+  LAND_GRID, composeLayout, padMeshGeometry,
+  MATERIALS, LIGHTS, PART_MATERIAL, VIEW,
+  ORBIT, CAMERA_LIMITS, cameraPose, orbit, zoom, fitViewport, attachCameraInput,
+  cameraInput: inputState,
+  orbitClock, advanceOrbitClock, MAX_FRAME_MS,
+  PLATE_CYCLE, PLATE_MAX_DEG, platePose, applyPlatePose, setPlateOverride, handleKey,
+  cinemaMode: cinemaRequested, CINEMA, cinemaState, renderCinemaFrame,
+  analysePixels, frameStats, drawScene, updateCamera, resizeCanvas, createRenderer,
+  interleavedGeometry, uploadPartToGpu, STRIDE_BYTES, INSTANCE_STRIDE_BYTES,
+};
+
+const canvas = document.getElementById("viewport");
+const overlay = document.getElementById("error-overlay");
+
+/**
+ * A failure the harness can assert on: the overlay is what a human sees, the
+ * __scene record is what the tests read. A silent black screen would let a
+ * broken render look like a passing one.
+ */
+function reportFailure(cause, detail) {
+  overlay.textContent = detail;
+  overlay.classList.add("visible");
+  window.__scene = {
+    ok: false, cause, parts: {}, programs: {}, frames: 0,
+    padCount: 0, padsDrawn: 0, plateAngleDeg: 0, platePhase: "closed", azimuthDeg: 0,
+    cameraDist: 0, drawCalls: 0, fps: 0, lastFrameMs: 0,
+  };
+}
+
+/**
+ * One frame of model state: the cycle clock feeds the plate pose straight into
+ * the scene graph. Because the pose is derived from the clock rather than
+ * accumulated per frame, a paused clock or a harness that pins elapsedMs both
+ * land on the pose they asked for.
+ */
+function applyFramePoses(scene, parts) {
+  const pose = applyPlatePose(parts, platePose(orbitClock.elapsedMs));
+  scene.plateAngleDeg = pose.plateAngleDeg;
+  scene.platePhase = pose.phase;
+  return pose;
+}
+
+/*
+ * The HUD is a diagnostic as much as a nicety: it is what makes a hinge cycle
+ * and a 3,647-pad count visible to a human without an eval, and the harness
+ * asserts on the same text it reads.
+ */
+function updateHud(scene) {
+  const texts = {
+    phase: scene.platePhase,
+    azimuth: `${scene.azimuthDeg.toFixed(1)}°`,
+    padCount: String(scene.padCount),
+  };
+  for (const [id, text] of Object.entries(texts)) {
+    const node = document.getElementById(id);
+    // Assigning every frame would blink the readout; text nodes compare cheaply
+    // and a changed string is the only reason to touch the DOM.
+    if (node && node.textContent !== text) node.textContent = text;
+  }
+}
+
+/*
+ * The animation loop. dtMs is clamped by advanceOrbitClock so a hidden-tab 1 s
+ * delta cannot jump the camera 20 deg or snap the plate cycle to its end pose;
+ * the clamp is what keeps the showcase honest about its own speed.
+ */
+function startRenderLoop(gl, scene, parts) {
+  let last = performance.now();
+  const frame = (now) => {
+    advanceOrbitClock(now - last);
+    // Published before the draw so a sample between frames sees the cadence of
+    // the previous frame rather than a stale 0.
+    scene.lastFrameMs = now - last;
+    scene.fps = 1000 / Math.max(1, scene.lastFrameMs);
+    last = now;
+    scene.frames++;
+
+    const viewport = resizeCanvas(gl);
+    const pose = cameraPose(orbitClock.elapsedMs);
+    scene.azimuthDeg = pose.azDeg;
+    // Framing goes in the same record, so the harness can assert a wheel zoom
+    // actually moved the camera rather than just swallowing the event.
+    scene.cameraDist = pose.dist;
+    applyFramePoses(scene, parts);
+    updateHud(scene);
+    updateCamera(pose, viewport);
+    lastFrameTimeMs = now;
+    // u_time rides the orbit clock, not wall time: a frozen clock (KeyA) then
+    // genuinely freezes the gold shimmer too, and a harness that pins elapsedMs
+    // pins the whole frame instead of just the poses.
+    scene.drawCalls = drawScene(cameraState.viewProj, orbitClock.elapsedMs, cameraState.eye);
+    scene.padsDrawn = scene.padCount;
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}
+
+function boot() {
+  // preserveDrawingBuffer only under cinema: every default-mode frame asks the
+  // compositor for a buffer it never reads back, and asking drains the iGPU.
+  const gl = canvas.getContext(
+    "webgl2",
+    cinemaRequested
+      ? { antialias: true, alpha: false, preserveDrawingBuffer: true }
+      : { antialias: true, alpha: false }
+  );
+  if (!gl) {
+    reportFailure("webgl2-unavailable", "WebGL2 is not available in this browser.\n" +
+      "The socket render needs WebGL2 (antialias). Check that hardware acceleration is on.");
+    return;
+  }
+
+  const scene = {
+    ok: true, cause: "", parts: {}, programs: {}, frames: 0,
+    padCount: 0, padsDrawn: 0, plateAngleDeg: 0, platePhase: "closed",
+    azimuthDeg: VIEW.azDeg, cameraDist: VIEW.dist, drawCalls: 0,
+    // Published frame cadence: the 60 fps gate in DESIGN.md needs a measurement
+    // made inside the page, not one inferred from screenshot latency.
+    fps: 0, lastFrameMs: 0,
+  };
+  window.__scene = scene;
+
+  // Scene graph first, so the diagnostics are live before the first frame: the
+  // harness asserts padCount comes from the layout, not a hardcoded 3647.
+  const parts = buildParts();
+  const socketRoot = new Node("socket");
+  for (const part of Object.values(parts)) {
+    // Parts already hanging off the hinge pivot must not be re-parented onto the
+    // root, or the one rotation that drives the plate would hang nothing.
+    if (!part.node.parent) socketRoot.add(part.node);
+    scene.parts[part.name] = {
+      vertexCount: part.vertexCount,
+      indexCount: part.geometry.idx.length,
+      instanceCount: part.instanceCount || 0,
+    };
+  }
+  scene.padCount = parts.padField.instanceCount;
+  window.__sceneParts = parts;
+  window.__socketRoot = socketRoot;
+
+  try {
+    const renderer = createRenderer(gl, parts);
+    activeRenderer = renderer;
+  } catch (err) {
+    // A shader that fails to compile is the loudest failure the page can have:
+    // a black screen would otherwise look like a successful render.
+    const report = err.programReport || {};
+    reportFailure("shader-compile", `Shader compile/link failed:\n${report.infoLog || err.message}`);
+    if (report.name) window.__scene.programs = { [report.name]: report };
+    return;
+  }
+  scene.programs = activeRenderer.programs;
+
+  gl.clearColor(0.03, 0.035, 0.045, 1);
+  gl.enable(gl.DEPTH_TEST);
+
+  if (cinemaRequested) {
+    // The film driver owns this mode from here on: every pixel arrives through
+    // renderCinemaFrame(ms). No HUD, no orbit controls, no rAF loop - a
+    // wall-clock frame racing a captured one would film a pose nobody asked
+    // for, and a boot frame here would be a frame the encoder never requested.
+    document.body.classList.add("cinema");
+    cinemaStage = { gl, scene, parts };
+    return;
+  }
+
+  // One frame synchronously, so a harness reading __scene immediately after
+  // boot sees a populated diagnostics object, not a clear-colour promise.
+  resizeCanvas(gl);
+  updateCamera();
+  applyFramePoses(scene, parts);
+  updateHud(scene);
+  lastFrameTimeMs = performance.now();
+  scene.drawCalls = drawScene(cameraState.viewProj, lastFrameTimeMs, cameraState.eye);
+  scene.padsDrawn = scene.padCount;
+  scene.frames = 1;
+
+  // Drag to orbit, wheel to zoom: pure bonus, but wired through the same tested
+  // orbit/zoom API the unit tests drive, so there is only one input path.
+  attachCameraInput(canvas, { onCursor: (cursor) => { canvas.style.cursor = cursor; } });
+
+  // Space pins the plate (closed, open, off), A freezes the whole animation.
+  window.addEventListener("keydown", (event) => {
+    if (handleKey(event.code)) event.preventDefault();
+  });
+
+  startRenderLoop(gl, scene, parts);
+}
+
+boot();
+
+</script>
+</body>
+</html>

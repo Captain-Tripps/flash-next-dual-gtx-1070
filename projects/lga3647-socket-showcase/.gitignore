@@ -1,0 +1,6 @@
+notes/
+superpowers.md
+# Reel artifacts are machine-built, never committed: the MP4 is reproducible
+# from the cinema timeline, and 2400 JPEG frames don't belong in git.
+reel/
+
