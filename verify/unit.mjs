@@ -206,6 +206,87 @@ test("node_world_parentRotated90AboutY_placesChildAtLocalPlusZ_inParentSpace", (
 
 const mat4point = (mat4, m, v) => mat4.transformPoint(new Float64Array(3), m, v);
 
+test("worldFloorY_closedLoadPlate_reportsTheHingeHeightSoTheContactShadowSitsOnTheLid", () => {
+  // The wiring bug this guards: the renderer used to hand the shader the part's
+  // LOCAL bbox min y, which for the load plate is 0 - but the plate lives under a
+  // hinge node and actually rests 4+ mm above the substrate plane. Darkening then
+  // happened at an imaginary floor.
+  const { buildParts, applyPlatePose, worldFloorY, mat4 } = api();
+  const parts = buildParts();
+  applyPlatePose(parts, { plateAngleDeg: 0, latchAngleDeg: 0 });
+  const model = parts.loadPlate.node.world(new Float32Array(16));
+  const floor = worldFloorY(model, parts.loadPlate.bbox);
+  if (!(floor > 3 && floor < 6)) throw new Error(`closed plate floor ${floor}, want ~4 mm above the substrate`);
+});
+
+test("worldFloorY_acrossTheHingeSwing_staysInsideTheLidSweepSoTheContactUniformStaysFinite", () => {
+  // Measured semantics (floorprobe2): the contact proxy is the WORLD AABB floor,
+  // so it slides down the hinge sweep - 4.25 mm closed, 3.50 at 30deg, 3.06 at
+  // 52.5, 2.39 fully open - as the box's low corner swings toward the substrate.
+  // That is the conservative choice: contactAO only darkens fragments above the
+  // plane, and nothing in this scene sits below y = 2.4. What this test guards is
+  // that the value stays finite and sane mid-swing, unlike the old local-bbox
+  // constant that ignored the hinge node entirely.
+  const { buildParts, applyPlatePose, worldFloorY, mat4 } = api();
+  const parts = buildParts();
+  const m = new Float32Array(16);
+  const cornersOf = (b) => {
+    const out = [];
+    for (const x of [b.min[0], b.max[0]])
+      for (const y of [b.min[1], b.max[1]])
+        for (const z of [b.min[2], b.max[2]]) out.push([x, y, z]);
+    return out;
+  };
+  const worldTopOf = (mat, b) => {
+    const p = new Float64Array(3);
+    return Math.max(...cornersOf(b).map((c) => mat4.transformPoint(p, mat, c)[1]));
+  };
+
+  applyPlatePose(parts, { plateAngleDeg: 0, latchAngleDeg: 0 });
+  parts.loadPlate.node.world(m);
+  const closed = {
+    floor: worldFloorY(m, parts.loadPlate.bbox),
+    top: worldTopOf(m, parts.loadPlate.bbox),
+  };
+  applyPlatePose(parts, { plateAngleDeg: 52.5, latchAngleDeg: 0 });
+  parts.loadPlate.node.world(m);
+  const mid = {
+    floor: worldFloorY(m, parts.loadPlate.bbox),
+    top: worldTopOf(m, parts.loadPlate.bbox),
+  };
+  applyPlatePose(parts, { plateAngleDeg: 105, latchAngleDeg: 18 });
+  parts.loadPlate.node.world(m);
+  const open = {
+    floor: worldFloorY(m, parts.loadPlate.bbox),
+    top: worldTopOf(m, parts.loadPlate.bbox),
+  };
+
+  for (const [pose, v] of [["closed", closed], ["mid-swing", mid], ["open", open]]) {
+    if (!Number.isFinite(v.floor)) {
+      throw new Error(`${pose} floor is ${v.floor}: a NaN uniform would poison the shading`);
+    }
+    if (!(v.floor > 2 && v.floor < 6)) {
+      throw new Error(`${pose} floor ${v.floor}, want inside the lid sweep (2-6 mm)`);
+    }
+  }
+  if (!(open.top > closed.top + 50)) {
+    throw new Error(`lid top ${closed.top} closed vs ${open.top} open: the swing must lift the free end`);
+  }
+});
+
+test("worldFloorY_forAnUnlocatedPart_agreesWithTheLocalBboxMinY_andSurvivesAnEmptyBbox", () => {
+  const { mat4, worldFloorY, bboxOf } = api();
+  const box = { min: [-2, 3, -4], max: [2, 7, 4] };
+  const identity = mat4.identity();
+  if (worldFloorY(identity, box) !== 3) throw new Error("unlocated part should report its own bbox floor");
+  const lifted = mat4.trs(mat4.identity(), { pos: [0, 10, 0], rot: { y: 0 }, scale: 1 });
+  if (worldFloorY(lifted, box) !== 13) throw new Error("a lifted part must follow its floor");
+  // An empty geometry (a transform-only node) has a null bbox: it must not hand a
+  // NaN into a uniform or the whole part's shading goes to NaN.
+  const empty = worldFloorY(identity, bboxOf([]));
+  if (empty !== 0 || !Number.isFinite(empty)) throw new Error(`empty bbox floor ${empty}, want a finite 0`);
+});
+
 test("mat4_perspective_aspectHalf_isFiniteAndScalesXByAspect", () => {
   const { mat4 } = api();
   const m = mat4.perspective(mat4.identity(), { fovyDeg: 45, aspect: 0.5, near: 0.1, far: 100 });

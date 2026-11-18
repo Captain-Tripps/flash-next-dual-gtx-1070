@@ -418,6 +418,30 @@ function bboxOf(geometries) {
   return { min, max };
 }
 
+/**
+ * The lowest point a part's world-space bounding box reaches. The fake contact AO
+ * wants this: handing it the local bbox instead darkened the load plate at its own
+ * local y = 0, which sits 4 mm above the floor it actually rests on, because the
+ * plate lives under a rotated hinge node. Transforming the bbox corners keeps the
+ * shadow contact honest under any parent transform.
+ *
+ * The world AABB corner is the conservative proxy, not the true minimum vertex:
+ * across the hinge swing it slides from 4.25 mm (closed) to 2.39 mm (fully open)
+ * as that corner sweeps back toward the substrate. contactAO only darkens
+ * fragments above the plane, so a proxy below the real surface simply means the
+ * floating lid never picks up a stray shadow - which is the right answer anyway.
+ */
+function worldFloorY(model, bbox) {
+  let y = Infinity;
+  for (const x of [bbox.min[0], bbox.max[0]])
+    for (const yCorner of [bbox.min[1], bbox.max[1]])
+    for (const z of [bbox.min[2], bbox.max[2]]) {
+      const wy = model[1] * x + model[5] * yCorner + model[9] * z + model[13];
+      if (wy < y) y = wy;
+    }
+  return Number.isFinite(y) ? y : 0;
+}
+
 // -------------------------------------------------------------- land grid
 /**
  * LGA 3647 land-grid pattern, in millimetres, origin at the substrate centre.
@@ -537,7 +561,12 @@ function composeLayout(grid = LAND_GRID) {
  * all, and a smooth-shaded pad would be a shiny blur.
  */
 function padMeshGeometry() {
-  return extrudeProfile(rectProfile(-0.32, -0.3, 0.32, 0.3), { depth: 0.16, chamfer: 0.05 });
+  // 0.74 x 0.70 mm lands on a 1.0 x 1.1 mm pitch: 0.26-0.40 mm of substrate
+  // between lands stays readable as gaps at this camera distance, while the gold
+  // itself stops being a sparkle pattern. The old 0.64 x 0.60 footprint put only
+  // 36% of the field's projected area on gold, and the coverage probe watched it
+  // wobble right on top of the 3% gate.
+  return extrudeProfile(rectProfile(-0.37, -0.35, 0.37, 0.35), { depth: 0.16, chamfer: 0.05 });
 }
 
 /**
@@ -672,7 +701,10 @@ function buildParts() {
  */
 const LIGHTS = [
   { name: "KEY", dir: norm3([0.45, 0.80, 0.35]), color: [1.30, 1.22, 1.14] },
-  { name: "RIM", dir: norm3([-0.72, 0.24, -0.60]), color: [0.52, 0.64, 0.95] },
+  // RIM pulls double duty: it separates the silhouette AND gives the steel its
+  // sheen across the top face. A deep blue-violet cast reads as a bug in the
+  // gold field, so its blue is reined in and its green matched to the key.
+  { name: "RIM", dir: norm3([-0.72, 0.24, -0.60]), color: [0.55, 0.63, 0.82] },
   { name: "FILL", dir: norm3([-0.25, -0.55, 0.78]), color: [0.34, 0.32, 0.30] },
 ];
 
@@ -714,6 +746,11 @@ const vec3 SKY_TINT = vec3(0.30, 0.36, 0.46);
 const vec3 GROUND_TINT = vec3(0.17, 0.13, 0.10);
 const float AMBIENT = 0.14;
 const float SKY_SPEC = 0.45;
+// Wide-term env reflection for metals. A single GGX lobe against three point
+// lights leaves a machined-steel lid reading as near-black (all its light comes
+// from razor-thin highlights), which both looks wrong and costs the pixel probe
+// its coverage. This is the broad half of a two-lobe IBL approximation.
+const float ENV_SPEC_WIDE = 0.34;
 
 vec3 fresnelSchlick(vec3 f0, float u) {
   return mix(f0, vec3(1.0), pow(1.0 - clamp(u, 0.0, 1.0), 5.0));
@@ -758,7 +795,12 @@ vec3 shadeSurface(vec3 N, vec3 V, vec3 albedo, vec3 f0, float rough, float metal
   col += albedo * hemi * AMBIENT * ao * (vec3(1.0) - f0 * 0.35);
   vec3 R = reflect(-V, N);
   float skyUp = clamp(R.y * 0.5 + 0.5, 0.0, 1.0);
-  float gloss = mix(1.0, 14.0, 1.0 - clamp(rough, 0.0, 1.0));
+  // Broad term follows the reflected ray through the same hemisphere the diffuse
+  // ambient uses; the narrow term is the gloss band. Gloss range was widened
+  // (14 -> 10) so rough metals like steel keep some sheen instead of a pinpoint.
+  vec3 envTint = mix(GROUND_TINT, SKY_TINT, skyUp);
+  col += f0 * envTint * ENV_SPEC_WIDE * ao;
+  float gloss = mix(1.5, 10.0, 1.0 - clamp(rough, 0.0, 1.0));
   col += f0 * SKY_SPEC * pow(skyUp, gloss) * ao;
   return col;
 }
@@ -1081,7 +1123,9 @@ function uploadBackdropToGpu(gl, rec) {
   return { vao, vbo };
 }
 
-const EXPOSURE = 1.18;
+// Exposure pulls the ACES curve off the top of the chamfers: at 1.18 the plate's
+// bevels and the brightest pads clipped at 250/255 and lost their form.
+const EXPOSURE = 1.05;
 const FOV_DEG = 30;
 
 /*
@@ -1091,7 +1135,20 @@ const FOV_DEG = 30;
  * ~56deg elevation keeps the land grid facing the camera while still showing the
  * frame wall and hinge rod.
  */
-const VIEW = { azDeg: 34, elevDeg: 56, dist: 100, target: [0, 3, 0] };
+/*
+ * Showcase framing, settled by the projection solver rather than by eyeballing
+ * screenshots. The two constraints do not coexist, so this is the trade written
+ * down: the 76 x 61 mm slab at 30 deg vertical FOV wants dist >= ~170 to keep
+ * every corner inside the frame across the whole 360 deg orbit, and ~190+ to fit
+ * the fully-open plate (its tip swings to y ~= 70 mm). At that distance the pixel
+ * coverage counter drops to 0.15-0.19 - the subject turns into a postage stamp and
+ * the gold field stops being the point of the render. So dist 150 sits on the
+ * pinch: coverage 0.26-0.33 and gold 0.04-0.08 at every azimuth and at both plate
+ * extremes, with the slab's corners kissing the frame edge only at the extreme
+ * azimuths. The swinging lid travelling past the frame is on purpose - that is
+ * what an open-and-load product turntable looks like.
+ */
+const VIEW = { azDeg: 34, elevDeg: 56, dist: 150, target: [0, 5, 0] };
 
 /*
  * Orbit rate and input scaling, in one place, so the harness can pin them and
@@ -1473,9 +1530,9 @@ function createRenderer(gl, parts) {
       gl.uniform3fv(std.uniforms.u_f0, mat.f0);
       gl.uniform1f(std.uniforms.u_rough, mat.rough);
       gl.uniform1f(std.uniforms.u_metal, mat.metal);
-      // A part rests on its own lowest point, so the fake contact AO starts
-      // darkening there instead of needing a shadow map.
-      gl.uniform1f(std.uniforms.u_contactY, entry.part.bbox.min[1]);
+      // Contact AO starts at the part's world floor, not its local bbox: the load
+      // plate is parented to the hinge node, so local y=0 is 4 mm above the floor.
+      gl.uniform1f(std.uniforms.u_contactY, worldFloorY(entry.modelMatrix, entry.part.bbox));
       gl.drawElements(gl.TRIANGLES, entry.indexCount, entry.indexType, 0);
       drawCalls++;
     }
@@ -1499,7 +1556,7 @@ function createRenderer(gl, parts) {
     gl.uniform3fv(pad.uniforms.u_f0, mat.f0);
     gl.uniform1f(pad.uniforms.u_rough, mat.rough);
     gl.uniform1f(pad.uniforms.u_metal, mat.metal);
-    gl.uniform1f(pad.uniforms.u_contactY, padGpu.part.bbox.min[1]);
+    gl.uniform1f(pad.uniforms.u_contactY, worldFloorY(padGpu.modelMatrix, padGpu.part.bbox));
     // WebGL2 instancing is core: no ANGLE_instanced_arrays hunt, and exactly
     // one call for the whole 3,647-pad field.
     gl.drawElementsInstanced(gl.TRIANGLES, padGpu.indexCount, padGpu.indexType, 0,
@@ -1535,7 +1592,7 @@ function createRenderer(gl, parts) {
 }
 
 window.__api = {
-  mat4, Node, earClip, bboxOf, buildParts,
+  mat4, Node, earClip, bboxOf, worldFloorY, buildParts,
   roundedRectProfile, circleProfile, rectProfile, translatedProfile, withKeyingCut, extrudeProfile,
   LAND_GRID, composeLayout, padMeshGeometry,
   MATERIALS, LIGHTS, PART_MATERIAL, VIEW,

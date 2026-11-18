@@ -163,6 +163,45 @@ check("at_least_3_percent_of_pixels_are_gold_pads", () => {
   return `gold ${(s.goldRatio * 100).toFixed(2)}% of ${s.sampled} px`;
 });
 
+/*
+ * Three pinned poses, measured in order. The sweep check above proves the render
+ * loop *can* sweep the plate, but it samples on luck: whichever phase the 12 s
+ * window lands on is whatever it measures. These pins are deterministic, and the
+ * monotonic gold assertion encodes the whole point of the animation - the plate
+ * swings out of the way and the gold field is what gets revealed.
+ *
+ * setPlateOverride applies on the NEXT frame (the rAF loop is the applier, not the
+ * caller), so every pin is followed by a real wait before any pixel probe. A
+ * synchronous eval alone reads a stale scene graph and blames the renderer.
+ */
+check("the_pinned_plate_poses_render_in_order_and_the_gold_reveal_is_monotonic", () => {
+  const poses = [];
+  for (const pin of [0, 52.5, 105]) {
+    evalJs(`window.__api.setPlateOverride(${pin}); return 1;`);
+    run(["wait", "600"]);                     // one real frame for the pin to land
+    poses.push(evalJs(`
+      const st = window.__api.frameStats({ step: 3 });
+      return JSON.stringify({
+        deg: window.__scene.plateAngleDeg, phase: window.__scene.platePhase,
+        cov: st.nonBackgroundRatio, gold: st.goldRatio, pads: window.__scene.padCount,
+      });
+    `));
+  }
+  evalJs("window.__api.setPlateOverride(null); window.__api.orbitClock.elapsedMs = 0; return 1;");
+
+  const want = [0, 52.5, 105];
+  for (const [i, p] of poses.entries()) {
+    if (Math.abs(p.deg - want[i]) > 0.5) throw new Error(`pose ${i} pinned ${want[i]} deg, scene says ${p.deg}`);
+    if (!(p.cov >= 0.25)) throw new Error(`pose ${i} (${p.deg} deg) covers ${(p.cov * 100).toFixed(1)}% of the view, want 25%`);
+    if (!(p.gold >= 0.03)) throw new Error(`pose ${i} (${p.deg} deg) gold ${(p.gold * 100).toFixed(2)}%, want 3%`);
+    if (p.pads !== 3647) throw new Error(`pose ${i} HUD padCount ${p.pads}, want 3647`);
+  }
+  if (!(poses[0].gold < poses[1].gold && poses[1].gold < poses[2].gold)) {
+    throw new Error(`gold not revealed monotonically by the swing: ${poses.map((p) => p.gold.toFixed(4)).join(" -> ")}`);
+  }
+  return poses.map((p) => `${p.deg.toFixed(0)}deg ${p.phase} cov${(p.cov * 100).toFixed(0)}% gold${(p.gold * 100).toFixed(1)}%`).join(" | ");
+});
+
 // ------------------------------------- camera interaction: drive the DOM, assert the pose
 // The unit tests can reach the pure camera API, but pointer and wheel handlers
 // only exist in a real browser, so this is where the input path gets verified.
