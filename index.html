@@ -77,17 +77,21 @@ const mat4 = {
   // yaw about the vertical axis; the plate tips about its local X).
   trs(out, { pos = [0, 0, 0], rot, scale = 1 }) {
     const sx = typeof scale === "number" ? scale : scale.x;
+    const sy = typeof scale === "number" ? scale : scale.y;
+    const sz = typeof scale === "number" ? scale : scale.z;
     const rx = rot?.x || 0, ry = rot?.y || 0, rz = rot?.z || 0;
     const cx = Math.cos(rx), sxn = Math.sin(rx);
     const cy = Math.cos(ry), syn = Math.sin(ry);
     const cz = Math.cos(rz), snz = Math.sin(rz);
-    // Ry * Rx * Rz
-    const r00 = cy * cz - syn * sxn * snz, r01 = -cy * snz - syn * sxn * cz, r02 = syn * cx;
+    // Ry * Rx * Rz. The signs of the four sin(rx) cross terms matter: flip them
+    // and the matrix stops being a rotation (a pure-X matrix comes out symmetric,
+    // with det = cos 2x), which shears the load plate and its normals mid-swing.
+    const r00 = cy * cz + syn * sxn * snz, r01 = -cy * snz + syn * sxn * cz, r02 = syn * cx;
     const r10 = snz * cx, r11 = cx * cz, r12 = -sxn;
-    const r20 = -syn * cz - cy * sxn * snz, r21 = syn * snz - cy * sxn * cz, r22 = cy * cx;
+    const r20 = -syn * cz + cy * sxn * snz, r21 = syn * snz + cy * sxn * cz, r22 = cy * cx;
     out[0] = r00 * sx; out[1] = r10 * sx; out[2] = r20 * sx; out[3] = 0;
-    out[4] = r01 * sx; out[5] = r11 * sx; out[6] = r21 * sx; out[7] = 0;
-    out[8] = r02 * sx; out[9] = r12 * sx; out[10] = r22 * sx; out[11] = 0;
+    out[4] = r01 * sy; out[5] = r11 * sy; out[6] = r21 * sy; out[7] = 0;
+    out[8] = r02 * sz; out[9] = r12 * sz; out[10] = r22 * sz; out[11] = 0;
     out[12] = pos[0]; out[13] = pos[1]; out[14] = pos[2]; out[15] = 1;
     return out;
   },
@@ -449,9 +453,11 @@ function worldFloorY(model, bbox) {
  * The field is a rectangular array of land positions punched by rectangular
  * cutouts: a wide central ILS window with a narrow stem above and below it, plus
  * a keyed notch on the latch side. The opening areas are tuned so the surviving
- * count lands on exactly 3,647 pads, the package's contact count — which is
- * what the pitch makes possible: a 76 x 61 mm envelope is 4,660 mm^2, so 3,647
- * lands at ~1.1 mm pitch leave about 1,000 mm^2 for openings.
+ * count lands on exactly 3,647 pads, the package's contact count. The arithmetic
+ * is honest about the slack: the keepout leaves a 73 x 53 land field (3,869
+ * positions at 1.0 x 1.1 mm pitch), and the cutouts remove 169 + 50 + 3 contacts
+ * (~244 mm^2 of punched area) to land on 3,647. Re-tuning the cutout rectangles
+ * below changes that count, so verify/layout-report.mjs re-checks the budget.
  *
  * Rows run across X, one per `rowPitchMm`; each row's x-extent is split by every
  * cutout it crosses, so the row table *is* the socket shape rather than a
@@ -891,7 +897,7 @@ uniform mat3 u_normalMat;
 uniform float u_time;
 in vec3 a_pos;
 in vec3 a_normal;
-in vec3 a_padXZ;
+in vec2 a_padXZ;
 in vec2 a_padTone;
 out vec3 v_worldPos;
 out vec3 v_normal;
@@ -1025,9 +1031,11 @@ function createProgramRecord(gl, name) {
 
 // ---------------------------------------------------------------- renderer
 /*
- * One interleaved VBO per part: position (float3) then normal (float3), a
- * 24-byte stride. The harness pins STRIDE_BYTES, so changing the layout has to
- * touch the harness too.
+ * One interleaved VBO per part: one vertex of position+normal per 24-byte
+ * record, so each attribute pointer's offset lands on its own component. A
+ * segmented [all positions][all normals] upload with these pointers reads
+ * another vertex's normal as a position - which GL happily draws as noise
+ * without raising an error. The harness decodes this buffer byte-for-byte.
  */
 const STRIDE_BYTES = 24;
 const INSTANCE_STRIDE_BYTES = 16; // 4 floats per pad: x, z, tone, phase
@@ -1038,9 +1046,18 @@ function interleavedGeometry(geom) {
   if (badIndex !== undefined) {
     throw new RangeError(`index ${badIndex} out of range for ${vertexCount} vertices`);
   }
+  if (geom.nrm.length !== geom.pos.length) {
+    throw new RangeError(`normals hold ${geom.nrm.length} floats, positions ${geom.pos.length}`);
+  }
   const floats = new Float32Array(vertexCount * 6);
-  floats.set(geom.pos, 0);
-  floats.set(geom.nrm, geom.pos.length);
+  for (let v = 0; v < vertexCount; v++) {
+    floats[v * 6] = geom.pos[v * 3];
+    floats[v * 6 + 1] = geom.pos[v * 3 + 1];
+    floats[v * 6 + 2] = geom.pos[v * 3 + 2];
+    floats[v * 6 + 3] = geom.nrm[v * 3];
+    floats[v * 6 + 4] = geom.nrm[v * 3 + 1];
+    floats[v * 6 + 5] = geom.nrm[v * 3 + 2];
+  }
   return floats;
 }
 
@@ -1083,8 +1100,8 @@ function uploadPartToGpu(gl, part, rec) {
     gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, part.instances, gl.STATIC_DRAW);
     bindInterleavedAttribs(gl, rec, [
-      [rec.attribs.a_padXZ, 3, 0],
-      [rec.attribs.a_padTone, 2, 12],
+      [rec.attribs.a_padXZ, 2, 0],  // x, z
+      [rec.attribs.a_padTone, 2, 8], // tone, phase
     ], INSTANCE_STRIDE_BYTES, 1);
   }
 
@@ -1136,17 +1153,19 @@ const FOV_DEG = 30;
  * frame wall and hinge rod.
  */
 /*
- * Showcase framing, settled by the projection solver rather than by eyeballing
- * screenshots. The two constraints do not coexist, so this is the trade written
- * down: the 76 x 61 mm slab at 30 deg vertical FOV wants dist >= ~170 to keep
- * every corner inside the frame across the whole 360 deg orbit, and ~190+ to fit
- * the fully-open plate (its tip swings to y ~= 70 mm). At that distance the pixel
- * coverage counter drops to 0.15-0.19 - the subject turns into a postage stamp and
- * the gold field stops being the point of the render. So dist 150 sits on the
- * pinch: coverage 0.26-0.33 and gold 0.04-0.08 at every azimuth and at both plate
- * extremes, with the slab's corners kissing the frame edge only at the extreme
- * azimuths. The swinging lid travelling past the frame is on purpose - that is
- * what an open-and-load product turntable looks like.
+ * Showcase framing, settled by a projection solver plus a pixel bake-off rather
+ * than by eyeballing screenshots. The two constraints do not coexist, so this
+ * is the trade written down: the 76 x 61 mm slab at 30 deg vertical FOV wants
+ * dist >= ~170 to keep every corner inside the frame across the whole 360 deg
+ * orbit, and ~190+ to fit the fully-open plate (its tip swings to y ~= 70 mm).
+ * At that distance the pixel coverage drops to 0.15-0.19 - the subject turns
+ * into a postage stamp and the gold field stops being the point of the render.
+ * So dist 150 sits on the pinch: coverage stays >= 0.25 and gold >= 0.03 at
+ * every pinned plate pose (closed reads 0.003, fully open ~0.12, and the slab's
+ * corners kiss the frame edge only at the extreme orbit azimuths). The swinging
+ * lid travelling past the frame is on purpose - that is what an open-and-load
+ * product turntable looks like. The ranges are re-measured by the pinned-pose
+ * render check rather than trusted from the solver's pre-fix numbers.
  */
 const VIEW = { azDeg: 34, elevDeg: 56, dist: 150, target: [0, 5, 0] };
 
@@ -1265,10 +1284,12 @@ function updateCamera(pose = cameraPose(0), viewport = fitViewport(canvas.client
  * underneath the canvas while the user was trying to zoom.
  */
 function attachCameraInput(target, { onCursor } = {}) {
-  const drag = { pointerId: -1, lastX: 0, lastY: 0 };
+  // null is the idle sentinel: real pointer ids are >= 0 in every browser, so
+  // this cannot alias a genuine event the way a -1 sentinel could.
+  const drag = { pointerId: null, lastX: 0, lastY: 0 };
 
   target.addEventListener("pointerdown", (event) => {
-    if (drag.pointerId >= 0) return; // already dragging
+    if (drag.pointerId !== null) return; // already dragging
     drag.pointerId = event.pointerId;
     drag.lastX = event.clientX;
     drag.lastY = event.clientY;
@@ -1481,10 +1502,10 @@ function frameStats({ step = 1, drawFirst = true } = {}) {
 }
 
 /** Sizes the backing store to the CSS box; the DPR cap lives in fitViewport. */
-function resizeCanvas(gl, size = canvas) {
-  const vp = fitViewport(size.clientWidth || size.width || 1, size.clientHeight || size.height || 1);
-  if (size.width !== vp.width) size.width = vp.width;
-  if (size.height !== vp.height) size.height = vp.height;
+function resizeCanvas(gl, source = canvas) {
+  const vp = fitViewport(source.clientWidth || source.width || 1, source.clientHeight || source.height || 1);
+  if (source.width !== vp.width) source.width = vp.width;
+  if (source.height !== vp.height) source.height = vp.height;
   gl.viewport(0, 0, vp.width, vp.height);
   return vp;
 }
@@ -1601,7 +1622,7 @@ window.__api = {
   orbitClock, advanceOrbitClock, MAX_FRAME_MS,
   PLATE_CYCLE, PLATE_MAX_DEG, platePose, applyPlatePose, setPlateOverride, handleKey,
   analysePixels, frameStats, drawScene, updateCamera, resizeCanvas, createRenderer,
-  interleavedGeometry, STRIDE_BYTES,
+  interleavedGeometry, uploadPartToGpu, STRIDE_BYTES, INSTANCE_STRIDE_BYTES,
 };
 
 const canvas = document.getElementById("viewport");
@@ -1618,7 +1639,7 @@ function reportFailure(cause, detail) {
   window.__scene = {
     ok: false, cause, parts: {}, programs: {}, frames: 0,
     padCount: 0, padsDrawn: 0, plateAngleDeg: 0, platePhase: "closed", azimuthDeg: 0,
-    cameraDist: 0, drawCalls: 0,
+    cameraDist: 0, drawCalls: 0, fps: 0, lastFrameMs: 0,
   };
 }
 
@@ -1663,6 +1684,10 @@ function startRenderLoop(gl, scene, parts) {
   let last = performance.now();
   const frame = (now) => {
     advanceOrbitClock(now - last);
+    // Published before the draw so a sample between frames sees the cadence of
+    // the previous frame rather than a stale 0.
+    scene.lastFrameMs = now - last;
+    scene.fps = 1000 / Math.max(1, scene.lastFrameMs);
     last = now;
     scene.frames++;
 
@@ -1676,7 +1701,10 @@ function startRenderLoop(gl, scene, parts) {
     updateHud(scene);
     updateCamera(pose, viewport);
     lastFrameTimeMs = now;
-    scene.drawCalls = drawScene(cameraState.viewProj, now, cameraState.eye);
+    // u_time rides the orbit clock, not wall time: a frozen clock (KeyA) then
+    // genuinely freezes the gold shimmer too, and a harness that pins elapsedMs
+    // pins the whole frame instead of just the poses.
+    scene.drawCalls = drawScene(cameraState.viewProj, orbitClock.elapsedMs, cameraState.eye);
     scene.padsDrawn = scene.padCount;
     requestAnimationFrame(frame);
   };
@@ -1695,6 +1723,9 @@ function boot() {
     ok: true, cause: "", parts: {}, programs: {}, frames: 0,
     padCount: 0, padsDrawn: 0, plateAngleDeg: 0, platePhase: "closed",
     azimuthDeg: VIEW.azDeg, cameraDist: VIEW.dist, drawCalls: 0,
+    // Published frame cadence: the 60 fps gate in DESIGN.md needs a measurement
+    // made inside the page, not one inferred from screenshot latency.
+    fps: 0, lastFrameMs: 0,
   };
   window.__scene = scene;
 

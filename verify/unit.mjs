@@ -21,6 +21,7 @@ export function inlineModuleSource(html) {
 
 /** Minimal stub good enough to boot the page: no real DOM, no real GL. */
 function makeSandbox({ glFactory = () => null } = {}) {
+  const sandboxAnimationFrameQueue = [];
   const nodes = new Map();
   const makeNode = (tag) => ({
     tagName: tag,
@@ -67,7 +68,9 @@ function makeSandbox({ glFactory = () => null } = {}) {
     document,
     console,
     performance: { now: () => Date.now() },
-    requestAnimationFrame: () => 0, // never fires: the harness must not animate
+    // Frames queue instead of firing on their own: the harness must not animate,
+    // but a test that wants the rAF loop (fps cadence) can pump the queue below.
+    requestAnimationFrame: (cb) => { sandboxAnimationFrameQueue.push(cb); return sandboxAnimationFrameQueue.length; },
     cancelAnimationFrame() {},
     devicePixelRatio: 1,
     innerWidth: 1280,
@@ -80,6 +83,8 @@ function makeSandbox({ glFactory = () => null } = {}) {
   sandbox.window.document = document;
   sandbox.window.addEventListener = () => {};
   sandbox.window.matchMedia = () => ({ matches: false, addEventListener() {} });
+  // Exposed so boot().pumpFrame can walk the loop instead of leaving it dead.
+  sandbox.requestAnimationFrameQueue = sandboxAnimationFrameQueue;
   return { sandbox, canvas, nodes };
 }
 
@@ -89,10 +94,24 @@ export function boot({ glFactory } = {}) {
   const src = inlineModuleSource(html);
   const { sandbox, canvas, nodes } = makeSandbox({ glFactory });
   runInNewContext(src, createContext(sandbox), { filename: "index.html" });
-  return { scene: sandbox.window.__scene, api: sandbox.window.__api, canvas, nodes, source: src, html };
+  return {
+    scene: sandbox.window.__scene, api: sandbox.window.__api, canvas, nodes, source: src, html,
+    // Drains one queued rAF callback with a given timestamp, so a test can walk
+    // the loop forward frame by frame instead of hoping wall time behaves.
+    pumpFrame: (timeMs) => {
+      const cb = sandbox.requestAnimationFrameQueue?.shift();
+      if (!cb) throw new Error("no rAF callback queued: the page does not run a rAF loop");
+      cb(timeMs);
+    },
+  };
 }
 
-/** A WebGL2 stub: every method is a no-op, every constant is a number. */
+/**
+ * A WebGL2 stub: methods are no-ops and unknown property reads return a
+ * catch-all function, so every GL constant also resolves through the proxy
+ * (call sites treat constants as identity; the byte-level tests use the
+ * recording stub below instead).
+ */
 export function stubGL() {
   const store = new Map();
   return new Proxy(
@@ -127,6 +146,78 @@ export function stubGL() {
       has: () => true,
     }
   );
+}
+
+/**
+ * A WebGL2 stub that records the buffer uploads and attribute pointers the page
+ * wires, so the harness can decode the bytes through the pointer table. Real GL
+ * keeps attribute locations opaque; handing back the name we were asked for is
+ * therefore faithful, and it lets the tests address pointers by name instead of
+ * mirroring linker numbers.
+ */
+export function recordingGL() {
+  const log = { uploads: [], attribPointers: [], divisors: [] };
+  const bound = { ARRAY_BUFFER: null, ELEMENT_ARRAY_BUFFER: null };
+  let nextBufferId = 0;
+
+  const target = {
+    log,
+    ARRAY_BUFFER: "ARRAY_BUFFER",
+    ELEMENT_ARRAY_BUFFER: "ELEMENT_ARRAY_BUFFER",
+    STATIC_DRAW: "STATIC_DRAW",
+    TRIANGLES: "TRIANGLES",
+    FLOAT: "FLOAT",
+    UNSIGNED_SHORT: 0x1401,
+    UNSIGNED_INT: 0x1405,
+    getParameter: () => 0,
+    getExtension: () => null,
+    getShaderParameter: () => true,
+    getProgramParameter: () => true,
+    getShaderInfoLog: () => "",
+    getProgramInfoLog: () => "",
+    getError: () => 0,
+    getUniformLocation: (_program, name) => name,
+    getAttribLocation: (_program, name) => name,
+    createBuffer: () => ({ id: ++nextBufferId, byteLength: 0 }),
+    bindBuffer: (where, buffer) => { bound[where] = buffer; },
+    bufferData: (where, data) => {
+      const buffer = bound[where];
+      buffer.byteLength = data.byteLength;
+      log.uploads.push({ where, buffer, data });
+    },
+    vertexAttribPointer: (attrib, size, type, normalized, stride, offset) => {
+      log.attribPointers.push({ attrib, size, type, normalized, stride, offset, buffer: bound.ARRAY_BUFFER });
+    },
+    vertexAttribDivisor: (attrib, divisor) => { log.divisors.push({ attrib, divisor }); },
+  };
+
+  return new Proxy(target, {
+    get(obj, prop) {
+      if (prop in obj) return obj[prop];
+      if (typeof prop !== "string") return undefined;
+      return (..._args) => ({});
+    },
+    has: () => true,
+  });
+}
+
+/** Decodes one attribute out of a recorded upload, exactly as the GPU would. */
+function decodeAttrib(upload, pointer, itemCount) {
+  const rows = [];
+  for (let i = 0; i < itemCount; i++) {
+    const baseFloat = (i * pointer.stride + pointer.offset) / 4;
+    rows.push(Array.from(upload.data.slice(baseFloat, baseFloat + pointer.size)));
+  }
+  return rows;
+}
+
+/** The upload a pointer was wired against, or a loud failure. */
+function uploadOfPointer(gl, attribName) {
+  const pointer = gl.log.attribPointers.find((p) => p.attrib === attribName);
+  if (!pointer) throw new Error(`no vertexAttribPointer was recorded for ${attribName}`);
+  const upload = gl.log.uploads.find((u) => u.buffer === pointer.buffer && u.where === "ARRAY_BUFFER");
+  if (!upload) throw new Error(`${attribName} points at a buffer that was never uploaded`);
+  return { pointer, upload };
 }
 
 // ---------------------------------------------------------------- tests
@@ -188,6 +279,45 @@ test("mat4_trs_rotatesLocalPointThenTranslates", () => {
   const m = mat4.trs(mat4.identity(), { pos: [10, 0, 0], rot: { y: Math.PI / 2 }, scale: 2 });
   const p = mat4.transformPoint(new Float64Array(3), m, [0, 0, 5]);
   near(p, [20, 0, 0], "scale 2, rotate 90 about Y, then translate +10x");
+});
+
+/*
+ * The hinge swings about the pivot's local X, so every rotation test written
+ * about Y only would have kept a broken X-rotation matrix looking fine. The
+ * columns of a rotation matrix have to be a right-handed orthonormal basis:
+ * anything else quietly shears the plate and its normals mid-swing.
+ */
+test("mat4_trs_withRotationAboutX_tipsUpTowardForwardAndForwardBackDown", () => {
+  const { mat4 } = api();
+  const m = mat4.trs(mat4.identity(), { pos: [0, 0, 0], rot: { x: Math.PI / 2 }, scale: 1 });
+  near(mat4.transformPoint(new Float64Array(3), m, [0, 1, 0]), [0, 0, 1],
+    "right-hand rule about +X: +Y tips toward +Z");
+  near(mat4.transformPoint(new Float64Array(3), m, [0, 0, 1]), [0, -1, 0],
+    "right-hand rule about +X: +Z tips toward -Y");
+});
+
+const linearColumns = (m) => [[m[0], m[1], m[2]], [m[4], m[5], m[6]], [m[8], m[9], m[10]]];
+
+test("mat4_trs_withCombinedRotations_leavesARigidMatrixWithDeterminantOne", () => {
+  const { mat4 } = api();
+  const poses = [{ x: 0.7 }, { y: 1.1 }, { z: -0.4 }, { x: 1.83, y: 0.6, z: -1.2 }];
+  for (const rot of poses) {
+    const m = mat4.trs(mat4.identity(), { pos: [3, 4, 5], rot, scale: 1 });
+    const [c0, c1, c2] = linearColumns(m);
+    const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    near([dot(c0, c0), dot(c1, c1), dot(c2, c2)], [1, 1, 1], `unit columns for rot ${JSON.stringify(rot)}`);
+    near([dot(c0, c1), dot(c0, c2), dot(c1, c2)], [0, 0, 0], `orthogonal columns for rot ${JSON.stringify(rot)}`);
+    const det = dot(c0, cross(c1, c2));
+    // The matrix lands in a Float32Array, so the determinant can't be exactly 1.
+    if (Math.abs(det - 1) > 1e-6) throw new Error(`det(${JSON.stringify(rot)}) = ${det}, want 1 (no mirroring, no shear)`);
+  }
+});
+
+test("mat4_trs_withAnIsotropicScaleObject_scalesEachAxisSeparately", () => {
+  const { mat4 } = api();
+  const m = mat4.trs(mat4.identity(), { pos: [0, 0, 0], rot: { y: 0 }, scale: { x: 2, y: 3, z: 4 } });
+  near([m[0], m[5], m[10]], [2, 3, 4], "diagonal entries must carry scale.x/y/z");
 });
 
 test("node_world_parentRotated90AboutY_placesChildAtLocalPlusZ_inParentSpace", () => {
@@ -632,7 +762,7 @@ test("boot_withWebGL2_recordsCompileAndLinkStatusForTheStdAndPadPrograms", () =>
   for (const name of ["std", "pad"]) {
     const p = programs[name];
     if (!p) throw new Error(`no program diagnostics for "${name}" (have [${Object.keys(programs)}])`);
-    if (p.linked !== true || p.linked !== true) throw new Error(`${name} did not link: ${JSON.stringify(p)}`);
+    if (!p.compiled || !p.linked) throw new Error(`${name} did not compile/link: ${JSON.stringify(p)}`);
     if ((p.infoLog || "") !== "") throw new Error(`${name} info log: ${p.infoLog}`);
   }
 });
@@ -651,6 +781,28 @@ test("boot_withWebGL2_drawScene_countsOneDrawPerPartPlusTheInstancedPadField", (
     throw new Error(`drawCalls ${scene.drawCalls}, want one per drawable part (${drawableParts})`);
   }
   if (scene.padsDrawn !== scene.padCount) throw new Error(`padsDrawn ${scene.padsDrawn}, want ${scene.padCount}`);
+});
+
+/*
+ * The 60 fps gate (DESIGN.md) needs a number produced inside the page, not one
+ * inferred from screenshot latency. The loop has to publish its own cadence, so
+ * the render suite can sample fps/lastFrameMs in real Chrome. Pumping the queue
+ * with fake timestamps proves the contract without waiting on wall clock.
+ */
+test("renderLoop_pumpedWithFakeTimestamps_publishesFrameCadenceOnTheScene", () => {
+  const { scene, pumpFrame } = boot({ glFactory: () => stubGL() });
+  if (!Number.isFinite(scene.fps) || !Number.isFinite(scene.lastFrameMs)) {
+    throw new Error(`boot published fps ${scene.fps}, lastFrameMs ${scene.lastFrameMs}: both must be numbers`);
+  }
+  for (const t of [116.5, 133.2, 149.9]) {
+    pumpFrame(t);
+  }
+  if (Math.abs(scene.lastFrameMs - 16.7) > 0.05) {
+    throw new Error(`lastFrameMs ${scene.lastFrameMs}, want 16.7 (the gap between pumped timestamps)`);
+  }
+  if (Math.abs(scene.fps - 1000 / 16.7) > 0.01) {
+    throw new Error(`fps ${scene.fps}, want ${1000 / 16.7} (derived from the published gap)`);
+  }
 });
 
 test("frameStats_withStubbedReadPixels_reportsTheSyntheticFrameRatios", () => {
@@ -952,6 +1104,41 @@ test("applyPlatePose_at105Degrees_keepsTheHingeLineFixedAndLiftsThePlateTip", ()
   }
 });
 
+/*
+ * Every sample in the test above sits on the plate's y = 0 plane, where a
+ * rotation matrix that has lost its X-rotation terms happens to agree with the
+ * right one. A corner off that plane catches the shear: a 105deg swing must keep
+ * the plate's own diagonals the same length, thickness included.
+ */
+test("applyPlatePose_at105Degrees_keepsPlateDiagonalsRigidAwayFromTheHingePlane", () => {
+  const { applyPlatePose, mat4, buildParts } = plateApi();
+  const parts = buildParts();
+  const corners = [];
+  for (const x of [parts.loadPlate.bbox.min[0], parts.loadPlate.bbox.max[0]])
+    for (const y of [parts.loadPlate.bbox.min[1], parts.loadPlate.bbox.max[1]])
+      for (const z of [parts.loadPlate.bbox.min[2], parts.loadPlate.bbox.max[2]])
+        corners.push([x, y, z]);
+
+  const distanceInWorld = (matrix, a, b) => {
+    const pa = mat4.transformPoint(new Float64Array(3), matrix, a);
+    const pb = mat4.transformPoint(new Float64Array(3), matrix, b);
+    return Math.hypot(pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2]);
+  };
+
+  applyPlatePose(parts, { plateAngleDeg: 0, latchAngleDeg: 0 });
+  const closed = parts.loadPlate.node.world(new Float32Array(16));
+  applyPlatePose(parts, { plateAngleDeg: 105, latchAngleDeg: 18 });
+  const open = parts.loadPlate.node.world(new Float32Array(16));
+
+  for (const [a, opposite] of [[0, 7], [1, 6], [2, 5], [3, 4]]) {
+    const before = distanceInWorld(closed, corners[a], corners[opposite]);
+    const after = distanceInWorld(open, corners[a], corners[opposite]);
+    if (Math.abs(before - after) > 1e-6) {
+      throw new Error(`plate diagonal ${a}-${opposite} stretched ${before.toFixed(3)} -> ${after.toFixed(3)} mm at 105deg`);
+    }
+  }
+});
+
 // One rotation on the pivot must drive both the plate and the rod collar, so
 // they cannot disagree about how far the plate swung.
 test("buildParts_hingePivot_parentsTheLoadPlateAndHingeBarSoOneRotationDrivesBoth", () => {
@@ -1032,6 +1219,106 @@ test("boot_withWebGL2_writesPhaseAzimuthAndPadCountIntoTheHudNodes", () => {
   }
   if (pads !== String(3647)) throw new Error(`#padCount is "${pads}", want 3647`);
   if (!/^-?\d+(\.\d+)?°$/.test(azimuth)) throw new Error(`#azimuth is "${azimuth}", want a degree readout`);
+});
+
+// ---------------------------------------------------------------- GL plumbing
+/*
+ * Buffer layout and attribute pointers are the two things most likely to be
+ * wrong and least likely to be noticed: a mismatch compiles, links and draws
+ * without a single GL error, reading whatever bytes sit at the pointer's offset.
+ * So these tests decode the uploaded bytes through the pointer table the page
+ * actually wired, and compare them against the CPU geometry it built.
+ */
+const pointerFor = (gl, name) => {
+  const pointer = gl.log.attribPointers.find((p) => p.attrib === name);
+  if (!pointer) throw new Error(`no vertexAttribPointer recorded for ${name}`);
+  return pointer;
+};
+
+const arrayUploadFor = (gl, name) => {
+  const pointer = pointerFor(gl, name);
+  const upload = gl.log.uploads.find((u) => u.buffer === pointer.buffer && u.where === "ARRAY_BUFFER");
+  if (!upload) throw new Error(`${name} is wired to a buffer that was never uploaded`);
+  return upload;
+};
+
+test("uploadPartToGpu_withTwoVertices_storesPositionAndNormalPerVertexAndPointsAtBoth", () => {
+  const gl = recordingGL();
+  const { uploadPartToGpu, STRIDE_BYTES } = api();
+  const geometry = {
+    pos: [-1, -2, -3, 7, 8, 9],
+    nrm: [0, 1, 0, 0, -1, 0],
+    idx: [0, 1, 0],
+  };
+  uploadPartToGpu(gl, { name: "probe", geometry }, { attribs: { a_pos: "a_pos", a_normal: "a_normal" } });
+
+  const upload = arrayUploadFor(gl, "a_pos");
+  if (upload.data.length !== 12) throw new Error(`expected 12 floats for 2 verts, got ${upload.data.length}`);
+  const vertexCount = geometry.pos.length / 3;
+  const decoded = (name) => decodeAttrib(upload, pointerFor(gl, name), vertexCount);
+  near(decoded("a_pos").flat(), geometry.pos, "a_pos must read one position per vertex");
+  near(decoded("a_normal").flat(), geometry.nrm, "a_normal must read one normal per vertex");
+
+  for (const name of ["a_pos", "a_normal"]) {
+    const { stride, offset, size } = pointerFor(gl, name);
+    if (stride !== STRIDE_BYTES) throw new Error(`${name} stride ${stride}, want ${STRIDE_BYTES}`);
+    if (offset + size * 4 > stride) throw new Error(`${name} reads ${offset}..${offset + size * 4} past stride ${stride}`);
+  }
+});
+
+test("uploadPartToGpu_withInterleavedXzTonePhaseInstances_usesTheFourFloatsPerPadCorrectly", () => {
+  const gl = recordingGL();
+  const { uploadPartToGpu, STRIDE_BYTES } = api();
+  const instances = new Float32Array([
+    -5, 6, 0.9, 0.25,
+    20, -21, 0.2, 0.75,
+  ]);
+  const geometry = { pos: [0, 0, 0, 1, 1, 1], nrm: [0, 1, 0, 0, 1, 0], idx: [0, 1] };
+  const rec = { attribs: { a_pos: "a_pos", a_normal: "a_normal", a_padXZ: "a_padXZ", a_padTone: "a_padTone" } };
+  uploadPartToGpu(gl, { name: "padField", geometry, instances }, rec);
+
+  const upload = arrayUploadFor(gl, "a_padXZ");
+  const pads = instances.length / 4;
+  const xz = decodeAttrib(upload, pointerFor(gl, "a_padXZ"), pads);
+  const tone = decodeAttrib(upload, pointerFor(gl, "a_padTone"), pads);
+  near(xz.flat(), [-5, 6, 20, -21], "each pad must get its own x/z offset");
+  near(tone.flat(), [0.9, 0.25, 0.2, 0.75], "each pad must get its own tone and phase");
+
+  for (const name of ["a_padXZ", "a_padTone"]) {
+    const { stride, offset, size } = pointerFor(gl, name);
+    if (offset + size * 4 > stride) throw new Error(`${name} overlaps the next instance: ${offset}..${offset + size * 4} in stride ${stride}`);
+  }
+  for (const name of ["a_padXZ", "a_padTone"]) {
+    if (gl.log.divisors.find((d) => d.attrib === name)?.divisor !== 1) {
+      throw new Error(`${name} is not per-instance (divisor ${JSON.stringify(gl.log.divisors)})`);
+    }
+  }
+});
+
+test("boot_wiresTheRealPadFieldPadsOntoTheirOwnLayoutPositions", () => {
+  const gl = recordingGL();
+  const { api: page } = boot({ glFactory: () => gl });
+  const instanceUpload = gl.log.uploads
+    .filter((u) => u.where === "ARRAY_BUFFER")
+    .reduce((best, u) => (u.data.length > best.data.length ? u : best));
+  const layout = page.composeLayout();
+  if (instanceUpload.data.length !== layout.instanceCount * 4) {
+    throw new Error(`instance buffer holds ${instanceUpload.data.length} floats, want ${layout.instanceCount * 4}`);
+  }
+
+  const xzPointer = pointerFor(gl, "a_padXZ");
+  const tonePointer = pointerFor(gl, "a_padTone");
+  const lastBase = (layout.instanceCount - 1) * xzPointer.stride;
+  for (const [name, pointer] of [["a_padXZ", xzPointer], ["a_padTone", tonePointer]]) {
+    const reach = lastBase + pointer.offset + pointer.size * 4;
+    if (reach > instanceUpload.buffer.byteLength) {
+      throw new Error(`${name} reads ${reach} bytes, past the ${instanceUpload.buffer.byteLength}-byte instance buffer`);
+    }
+  }
+
+  const decodedPads = (pointer) => decodeAttrib(instanceUpload, pointer, 3);
+  near(decodedPads(xzPointer).flat(), layout.pads.slice(0, 3).flatMap((p) => [p.x, p.z]), "pad x/z must match the layout");
+  near(decodedPads(tonePointer).flat(), layout.pads.slice(0, 3).flatMap((p) => [p.tone, p.phase]), "pad tone/phase must match the layout");
 });
 
 let failed = 0;
