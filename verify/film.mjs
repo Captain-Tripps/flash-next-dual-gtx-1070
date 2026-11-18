@@ -15,7 +15,7 @@
 // is frame 2399 at 60 fps. The internally consistent reading, and the one the
 // unit tests pin, is 2400 frames. This driver follows that.
 
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,9 @@ export const FPS = 60;
 // 40.000 s at 60 fps; last frame ms = 39983.33. The FILM_FRAMES override is a
 // smoke-test dial (the full 2400-frame run stays the default).
 export const FRAMES = Number(process.env.FILM_FRAMES || 2400);
+// The gate pins the deliverable, not the dial: a smoke run capped short must
+// never talk the nb_frames check down to its own frame count.
+export const GATE_FRAMES = 2400;
 const CDP_PORT = 9334; // private port: the agent-browser default session lives elsewhere
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -152,6 +155,15 @@ class CdpConnection {
       if (msg.error) waiter.reject(new Error(`CDP ${msg.method}: ${msg.error.message}`));
       else waiter.resolve(msg.result);
     });
+    // A dead socket must reject the futures already in flight: without this,
+    // a Chrome dying mid-capture leaves every later await in that Chrome
+    // zombie state, and the driver hangs instead of reporting.
+    const rejectPending = (message) => {
+      for (const waiter of this.pending.values()) waiter.reject(new Error(message));
+      this.pending.clear();
+    };
+    ws.addEventListener("close", () => rejectPending("CDP socket closed before the reply arrived"));
+    ws.addEventListener("error", () => rejectPending("CDP socket died before the reply arrived"));
   }
 
   static connect(url) {
@@ -185,9 +197,13 @@ async function evaluate(conn, expression) {
   return res.result.value;
 }
 
-async function waitForCdp(port, attempts = 40) {
+async function waitForCdp(port, bailOut = () => null, attempts = 40) {
   const url = `http://127.0.0.1:${port}/json/version`;
   for (let attempt = 0; attempt < attempts; attempt++) {
+    // A Chrome that refused to spawn will never offer the port; the spawn
+    // error listener records the cause so we can stop waiting and name it.
+    const cause = bailOut();
+    if (cause) fail(cause);
     try {
       const response = await fetch(url);
       if (response.ok) return await response.json();
@@ -219,6 +235,13 @@ async function assertReelFraming(conn) {
 async function captureFrames() {
   const chromeExe = findChrome();
   mkdirSync(FRAMES_DIR, { recursive: true });
+  // Clear old frames first: ffmpeg globs frame-%04d.jpg whole numbers, so a
+  // smoke run's 120 frames left standing next to a later full run (or a full
+  // run that died mid-flight) would be muxed right into the reel. The stale
+  // tail passes the sequence check and ships a reel that stopped years ago.
+  for (const entry of readdirSync(FRAMES_DIR)) {
+    if (/^frame-\d{4}\.jpg$/.test(entry)) rmSync(join(FRAMES_DIR, entry), { maxRetries: 3 });
+  }
   mkdirSync(join(ROOT, "reel"), { recursive: true });
 
   // The private user-data-dir is what keeps this Chrome ours alone: a shared
@@ -235,49 +258,56 @@ async function captureFrames() {
     "--no-default-browser-check",
   ];
   const chrome = spawn(chromeExe, flags, { stdio: "ignore" });
+  let chromeDied = null;
   chrome.on("error", (err) => {
-    // Late-spawn failures (exe quarantined between the find and the spawn)
-    // would otherwise be an uncaughtException burying the real message.
-    fail(`could not drive Chrome at ${chromeExe}: ${err.message}`);
+    // A late-spawn failure (exe quarantined between the find and the spawn)
+    // must not be thrown from an event listener: that becomes an
+    // uncaughtException. Record the cause and let waitForCdp name it.
+    chromeDied = `could not drive Chrome at ${chromeExe}: ${err.message}`;
   });
-  const conn = await CdpConnection.connect((await waitForCdp(CDP_PORT)).webSocketDebuggerUrl);
+  // From the spawn on, everything is inside the finally's reach: a failed
+  // CDP connect used to leave Chrome running with nobody to kill it.
   try {
-    const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
-    conn.sessionId = (await conn.send("Target.attachToTarget", { targetId, flatten: true })).sessionId;
-    await conn.send("Page.enable");
-    // Force the exact reel viewport rather than trusting --window-size: in
-    // headless, the window size carries chrome offsets that vary by build,
-    // so innerWidth/innerHeight come back short (measured: 1904x985 on
-    // Chrome 157). The emulation override pins the viewport deterministically.
-    await conn.send("Emulation.setDeviceMetricsOverride", {
-      width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false,
-    });
-    await conn.send("Page.navigate", { url: PAGE_URL });
-    await waitPageReady(conn);
-    await assertReelFraming(conn);
-    if ((await evaluate(conn, "window.__api && window.__api.cinemaMode")) !== true) {
-      fail("?cinema=1 did not activate cinema mode: the URL or the flag guard is off");
-    }
+    const conn = await CdpConnection.connect((await waitForCdp(CDP_PORT, () => chromeDied)).webSocketDebuggerUrl);
+    try {
+      const { targetId } = await conn.send("Target.createTarget", { url: "about:blank" });
+      conn.sessionId = (await conn.send("Target.attachToTarget", { targetId, flatten: true })).sessionId;
+      await conn.send("Page.enable");
+      // Force the exact reel viewport rather than trusting --window-size: in
+      // headless, the window size carries chrome offsets that vary by build,
+      // so innerWidth/innerHeight come back short (measured: 1904x985 on
+      // Chrome 157). The emulation override pins the viewport deterministically.
+      await conn.send("Emulation.setDeviceMetricsOverride", {
+        width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false,
+      });
+      await conn.send("Page.navigate", { url: PAGE_URL });
+      await waitPageReady(conn);
+      await assertReelFraming(conn);
+      if ((await evaluate(conn, "window.__api && window.__api.cinemaMode")) !== true) {
+        fail("?cinema=1 did not activate cinema mode: the URL or the flag guard is off");
+      }
 
-    for (let frame = 0; frame < FRAMES; frame++) {
-      const ms = (frame * 1000) / FPS;
-      const st = await evaluate(conn, `window.__api.renderCinemaFrame(${ms})`);
-      if (!st || !Number.isFinite(st.fadeAlpha) || !Number.isFinite(st.plateAngleDeg)) {
-        fail(`frame ${frame} (t=${ms} ms) rendered a non-finite state: ${JSON.stringify(st)}`);
+      for (let frame = 0; frame < FRAMES; frame++) {
+        const ms = (frame * 1000) / FPS;
+        const st = await evaluate(conn, `window.__api.renderCinemaFrame(${ms})`);
+        if (!st || !Number.isFinite(st.fadeAlpha) || !Number.isFinite(st.plateAngleDeg)) {
+          fail(`frame ${frame} (t=${ms} ms) rendered a non-finite state: ${JSON.stringify(st)}`);
+        }
+        const shot = await conn.send("Page.captureScreenshot", { format: "jpeg", quality: 95, fromSurface: true });
+        if (!shot || !shot.data) fail(`frame ${frame}: screenshot came back empty`);
+        writeFileSync(join(FRAMES_DIR, `frame-${String(frame).padStart(4, "0")}.jpg`), Buffer.from(shot.data, "base64"));
+        if (frame % 120 === 0) {
+          console.log(`  frame ${frame}/${FRAMES} t=${ms.toFixed(1)}ms plate=${st.plateAngleDeg.toFixed(0)} fade=${st.fadeAlpha.toFixed(2)}`);
+        }
       }
-      const shot = await conn.send("Page.captureScreenshot", { format: "jpeg", quality: 95, fromSurface: true });
-      if (!shot || !shot.data) fail(`frame ${frame}: screenshot came back empty`);
-      writeFileSync(join(FRAMES_DIR, `frame-${String(frame).padStart(4, "0")}.jpg`), Buffer.from(shot.data, "base64"));
-      if (frame % 120 === 0) {
-        console.log(`  frame ${frame}/${FRAMES} t=${ms.toFixed(1)}ms plate=${st.plateAngleDeg.toFixed(0)} fade=${st.fadeAlpha.toFixed(2)}`);
-      }
+      // Frame-stepping means a gap in the middle would be an ffmpeg "muxes up to
+      // the gap" bug, so the tail of the sequence is asserted, not trusted.
+      const lastFrame = `frame-${String(FRAMES - 1).padStart(4, "0")}.jpg`;
+      if (!existsSync(join(FRAMES_DIR, lastFrame))) fail(`last expected frame ${lastFrame} is absent`);
+    } finally {
+      conn.close();
     }
-    // Frame-stepping means a gap in the middle would be an ffmpeg "muxes up to
-    // the gap" bug, so the tail of the sequence is asserted, not trusted.
-    const lastFrame = `frame-${String(FRAMES - 1).padStart(4, "0")}.jpg`;
-    if (!existsSync(join(FRAMES_DIR, lastFrame))) fail(`last expected frame ${lastFrame} is absent`);
   } finally {
-    conn.close();
     chrome.kill();
   }
 }
@@ -305,7 +335,7 @@ async function gateReel() {
   if (!stream) fail("ffprobe found no video stream in the reel");
   expect(stream.width === 1920 && stream.height === 1080, `reel is ${stream.width}x${stream.height}, want 1920x1080`);
   expect(stream.r_frame_rate === "60/1", `r_frame_rate ${stream.r_frame_rate}, want 60/1`);
-  expect(String(stream.nb_frames) === String(FRAMES), `nb_frames ${stream.nb_frames}, want ${FRAMES}`);
+  expect(String(stream.nb_frames) === String(GATE_FRAMES), `nb_frames ${stream.nb_frames}, want ${GATE_FRAMES}`);
   const duration = Number(probe.format?.duration);
   expect(Number.isFinite(duration) && Math.abs(duration - 40) <= 0.15, `format.duration ${duration}, want 40.0 +/- 0.15`);
 
@@ -323,7 +353,7 @@ async function gateReel() {
   }
   const goldRatio = gold / sampled;
   expect(goldRatio >= 0.03, `gold ratio at t=22 s is ${goldRatio.toFixed(4)}, want >= 0.03: the macro beat lost its gold in the encode`);
-  console.log(`  gate: 1920x1080 60/1 ${FRAMES} frames ${duration.toFixed(3)} s, gold ratio ${goldRatio.toFixed(4)}`);
+  console.log(`  gate: 1920x1080 60/1 ${stream.nb_frames} frames ${duration.toFixed(3)} s, gold ratio ${goldRatio.toFixed(4)}`);
 }
 
 /* ---------------------------------------------------------------- main */
