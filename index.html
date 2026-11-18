@@ -431,9 +431,10 @@ function bboxOf(geometries) {
  *
  * The world AABB corner is the conservative proxy, not the true minimum vertex:
  * across the hinge swing it slides from 4.25 mm (closed) to 2.39 mm (fully open)
- * as that corner sweeps back toward the substrate. contactAO only darkens
- * fragments above the plane, so a proxy below the real surface simply means the
- * floating lid never picks up a stray shadow - which is the right answer anyway.
+ * as that corner sweeps back toward the substrate. contactAO clamps the height
+ * term at 0, so a proxy at or below the part's own low point means the part
+ * never picks up a stray contact shadow - the right answer anyway for a lid
+ * floating above the substrate.
  */
 function worldFloorY(model, bbox) {
   let y = Infinity;
@@ -1358,7 +1359,7 @@ function advanceOrbitClock(dtMs) {
  * t = cycleMs reads identical to t = 0.
  */
 const PLATE_MAX_DEG = 105;   // a real LGA load plate swings open past vertical
-const PLATE_LATCH_DEG = 18;  // the lever clears its hook roughly a quarter turn
+const PLATE_LATCH_DEG = 18;  // the lever clears its hook at ~18 deg of plate swing
 const PLATE_CYCLE = {
   cycleMs: 19600,
   maxDeg: PLATE_MAX_DEG,

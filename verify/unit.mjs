@@ -353,10 +353,11 @@ test("worldFloorY_acrossTheHingeSwing_staysInsideTheLidSweepSoTheContactUniformS
   // Measured semantics (floorprobe2): the contact proxy is the WORLD AABB floor,
   // so it slides down the hinge sweep - 4.25 mm closed, 3.50 at 30deg, 3.06 at
   // 52.5, 2.39 fully open - as the box's low corner swings toward the substrate.
-  // That is the conservative choice: contactAO only darkens fragments above the
-  // plane, and nothing in this scene sits below y = 2.4. What this test guards is
-  // that the value stays finite and sane mid-swing, unlike the old local-bbox
-  // constant that ignored the hinge node entirely.
+  // That is the conservative direction: contactAO clamps h at 0, so a proxy at
+  // or below a part's real low point just means no stray shadow (a claim "no
+  // geometry sits below 2.4 mm" would be false anyway - the substrate spans
+  // y=1..2). What this test guards is that the value stays finite and sane
+  // mid-swing, unlike the old local-bbox constant that ignored the hinge node.
   const { buildParts, applyPlatePose, worldFloorY, mat4 } = api();
   const parts = buildParts();
   const m = new Float32Array(16);
