@@ -4,7 +4,7 @@
 
 **Goal:** Ship `?cinema=1` deterministic cinema mode on the showcase page and a capture driver that produces a 40.000 s, 1920×108060 fps MP4 for X.
 
-**Architecture:** The page gains a pure keyframe table (`cinemaState(ms)`) driving camera pose, plate/latch angles, and card opacity, plus a one-call `renderCinemaFrame(ms)`. The film driver spawns a private headless Chrome over raw CDP (Node 24 global `WebSocket`, no npm deps), frame-steps 1200 deterministic screenshots, and ffmpeg muxes JPEG frames to H.264 MP4. The encoded file is gated with `ffprobe` + raw-pixel decode of extracted frames.
+**Architecture:** The page gains a pure keyframe table (`cinemaState(ms)`) driving camera pose, plate/latch angles, and card opacity, plus a one-call `renderCinemaFrame(ms)`. The film driver spawns a private headless Chrome over raw CDP (Node 24 global `WebSocket`, no npm deps), frame-steps 2400 deterministic screenshots, and ffmpeg muxes JPEG frames to H.264 MP4. The encoded file is gated with `ffprobe` + raw-pixel decode of extracted frames.
 
 **Tech Stack:** WebGL 2 inline module (index.html), Node 24 ESM harnesses, raw CDP over global WebSocket, Chrome 157 (`C:\Program Files\Google\Chrome\Application\chrome.exe`), ffmpeg/ffprobe at `C:\Users\jstap\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_*\ffmpeg-9.0.2-full_build\bin\` (glob-resolved).
 
@@ -15,7 +15,7 @@
 - Zero dependencies: no `import`/`export`/`fetch`/external script in the page (unit test `page_has_no_external_module_or_fetch` must stay green).
 - Default mode behavior unchanged: cinema code activates only under `?cinema=1`, guarded so the unit sandbox (no `location`) still boots. `preserveDrawingBuffer:true` is passed **only** in cinema mode.
 - Exact copy, verbatim from Jon: title card `LGA 3647 — 3,647 gold contacts` (spaced hyphen per voice rules: `LGA 3647 - 3,647 gold contacts`), credit card lines `Dual GTX 1070's` and `Qwen3.8 Flash Next Strata`.
-- Reel: 1920×1080, 60 fps exactly, duration 40.000 s (frame = `index * 1000/60`, 1200 frames, last frame ms = 39983.33 < 40000), silent, `-movflags +faststart`, libx264 crf 17 preset slow, yuv420p.
+- Reel: 1920×1080, 60 fps exactly, duration 40.000 s (frame = `index * 1000/60`, 2400 frames, last frame ms = 39983.33 < 40000). The original draft of this plan said 1200 frames; that was arithmetic-on-the-slip-of-a pen, 1200 @ 60 fps = 20 s. 2400 is the internally-consistent value, pinned by the unit tests' 40000 ms timeline and the 39983.33 boundary. Silent, `-movflags +faststart`, libx264 crf 17 preset slow, yuv420p.
 - Output MP4 and frames live under `.superpowers/film/` and `reel/` — never committed to git.
 - All timing values in ms, camera angles in degrees, distances in mm to match existing `VIEW`/`CAMERA_LIMITS`.
 - Test command stays `node verify/unit.mjs` / `node verify/render.mjs` / `node verify/all.mjs`; whole suite must be green before each commit.
@@ -72,15 +72,15 @@
 
 **Interfaces:**
 - Consumes: `window.__api.renderCinemaFrame(ms)`, `window.__api.cinemaState(ms)`, `?cinema=1` boot from Task 1.
-- Produces: `.superpowers/film/frame-NNNN.jpg` (1200 frames), `reel/lga3647-reel.mp4`.
+- Produces: `.superpowers/film/frame-NNNN.jpg` (2400 frames), `reel/lga3647-reel.mp4`.
 - Chrome flags: `--headless=new --remote-debugging-port=9334 --window-size=1920,1080 --force-device-scale-factor=1 --allow-file-access-from-files` (spawn detached, wait for `/json/version`).
-- CDP flow: `Target.createTarget` → `Page.navigate file:///…/index.html?cinema=1` → wait load → for frame `i` in `0..1199`: `Runtime.evaluate` `window.__api.renderCinemaFrame(i*1000/60)` (await, no object group), then `Page.captureScreenshot {format:"jpeg",quality:95,fromSurface:true}` → append base64 to file.
+- CDP flow: `Target.createTarget` → `Page.navigate file:///…/index.html?cinema=1` → wait load → `Emulation.setDeviceMetricsOverride` (1920x1080, scale 1: `--window-size` does not map to innerWidth/Height in headless) → for frame `i` in `0..2399`: `Runtime.evaluate` `window.__api.renderCinemaFrame(i*1000/60)` (await, no object group), then `Page.captureScreenshot {format:"jpeg",quality:95,fromSurface:true}` → append base64 to file.
 - ffmpeg args: `-framerate 60 -i frame-%04d.jpg -c:v libx264 -preset slow -crf 17 -pix_fmt yuv420p -movflags +faststart reel/lga3647-reel.mp4` (no audio stream).
-- Gate: `ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate,nb_frames:format=duration -of json`; assert width 1920, height 1080, `r_frame_rate` "60/1", `nb_frames` 1200, duration 40.0±0.15. Then extract raw frame: `ffmpeg -ss 22 -i reel/lga3647-reel.mp4 -frames:v 1 -f rawvideo -pix_fmt rgb24 frame.rgb`; node reads 1920*1080*3 bytes and applies the render-suite gold definition (`r > b + 20 && g > 60`) over every 8th pixel: expect `goldRatio >= 0.03` (mid-reel macro beat must survive H.264).
+- Gate: `ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate,nb_frames:format=duration -of json`; assert width 1920, height 1080, `r_frame_rate` "60/1", `nb_frames` 2400, duration 40.0±0.15. Then extract raw frame: `ffmpeg -ss 22 -i reel/lga3647-reel.mp4 -frames:v 1 -f rawvideo -pix_fmt rgb24 frame.rgb`; node reads 1920*1080*3 bytes and applies the render-suite gold definition (`r > b + 20 && g > 60`) over every 8th pixel: expect `goldRatio >= 0.03` (mid-reel macro beat must survive H.264).
 
 - [ ] **Step 1: Write the failing gate** — run `node verify/film.mjs --gate` with no MP4 present; expect exit 1 with "reel/lga3647-reel.mp4 not found".
 - [ ] **Step 2: Implement the capture path per Interfaces.** ffmpeg/chrome exe discovery like `findAgentBrowser()` in render.mjs (env override + glob fallback, named error when missing). Keep the CDP socket handling in one small `cdpConnection` helper: `send(method, params)` → Promise over global `WebSocket` messages; reusing it for both evaluate and screenshot.
-- [ ] **Step 3: Run `node verify/film.mjs`** — 1200 frames captured, ffmpeg prints size, exit 0.
+- [ ] **Step 3: Run `node verify/film.mjs`** — 2400 frames captured, ffmpeg prints size, exit 0.
 - [ ] **Step 4: Run `node verify/film.mjs --gate`** — expect all ffprobe assertions + gold ratio green (RED first if the ratio band is off: re-tune from the measured value, per the re-measure-after-fix lesson).
 - [ ] **Step 5: Visual evidence** — `ffmpeg -ss` PNG extract at 3 s (title card visible), 14 s (plate open), 37 s (credits visible); `read` the PNGs to confirm composition, plate state, card copy legibility.
 - [ ] **Step 6: Commit** `verify/film.mjs .gitignore reel/ entry` as `feat: cinema reel capture driver (CDP frame-step + ffmpeg mux)`.
