@@ -65,3 +65,59 @@ pad field gets a per-row shimmer. All visual polish, no functional change.
 End-state assertions, not symptom checks: drive to a known pose and assert the
 plate's hinge angle, pad instance count, camera angle, and a pixel probe that gold
 pixels exist in the frame. Screenshot the finished frame, not a mid-flight one.
+
+---
+
+## Addendum 2026-11-18: cinema reel (`?cinema=1`)
+
+Jon wants a 40-second MP4 of the socket for X, showing the cover open/close cycle,
+the gold contacts, and the latch mechanism. Decisions taken: 1920x1080 landscape,
+title/credit cards (his verbatim copy: "LGA 3647 - 3,647 gold contacts", "Dual GTX
+1070's", "Qwen3.8 Flash Next Strata"), fades from/to black, and cinema mode ships
+on the showcase branch as a tested feature.
+
+### Why frame-stepping, not real-time capture
+Real-time `MediaRecorder` capture of the live page is the tempting path, but it
+records whatever the harness happened to do that millisecond: timing jitter, frame
+drops, and a director that cannot be unit-tested. Instead the page gains a pure
+function `cinemaState(ms)` - a keyframe table covering camera pose, plate/latch
+angle, and card opacity - and the capture driver renders one deterministic frame
+per frame index, `ms = frame * 1000/60`, via `__api.renderCinemaFrame(ms)`. The
+director is therefore unit-testable (hinge angle at 13 s, camera distance at 9 s),
+and the MP4 is exactly 1200 frames at 60 fps = 40.000 s. The screenshot path needs
+`preserveDrawingBuffer: true`, but only in cinema mode - the default mode keeps
+its zero-copy swap chain.
+
+### The shot list (40.0 s, 60 fps)
+| t | beat | camera | plate/latch |
+|---|------|--------|-------------|
+| 0.0-2.6 s | fade in; title card | hero arc, dist ~150, elev ~52 | closed |
+| 2.6-9.5 s | closed-lid beauty orbit, latch posts in frame | slow azimuth arc | closed |
+| 9.5-13 s | push in on the latch side | dist 150 to ~65, elev to ~30 | latch flips, plate breaks free |
+| 13-18 s | cover opens: camera arcs at the hinge rod | follows the plate | plate 0 to 105 deg |
+| 18-27.5 s | the gold: macro pan over ILS cross and pad rows | dist ~60, elevation sweep | open, held |
+| 27.5-33 s | cover closes, latch re-hooks | pulls to wide | plate 105 to 0, latch hooks |
+| 33-36.5 s | final hero orbit settles into the default view | dist ~150 | closed |
+| 36.5-39.3 s | credit cards (the two Jon-supplied lines) | static hero | closed |
+| 39.3-40.0 s | fade out | - | closed |
+
+### Capture pipeline (all local, nothing installed)
+1. `verify/film.mjs` (on-branch): spawns private headless Chrome 157 with
+   `--remote-debugging-port`, drives it over raw CDP (Node 24 has global
+   `WebSocket` - no npm deps): navigate, then per frame `Runtime.evaluate` the
+   render call, `Page.captureScreenshot` (JPEG q95), write frames to
+   `.superpowers/film/`.
+2. ffmpeg (already on this box via winget Gyan.FFmpeg 9.0.2, resolved by path like
+   the agent-browser exe): `-framerate 60` image2 → libx264 crf 17 preset slow,
+   yuv420p, `-movflags +faststart`, silent. Output `reel/lga3647-reel.mp4`
+   (untracked; the MP4 itself never lands in git).
+
+### Verification
+- Unit: `cinemaState` end states - full plate sweep covered, monotonic reveal,
+  camera within `CAMERA_LIMITS`, card opacity envelopes, timeline exactly 40000 ms.
+- Film gate (after encode): `ffprobe` says exactly 1200 frames at 1920x1080 60 fps,
+  duration 40.0 +/- 0.1 s; plus three frames extracted at pinned times decoded
+  through the same gold/coverage pixel definitions as the render suite.
+- The existing 66-unit/12-render suite stays green: cinema code must not disturb
+  default boot (sandbox has no `location`, so the mode flag reads `location.search`
+  through a guard).

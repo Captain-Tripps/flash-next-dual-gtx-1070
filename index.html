@@ -26,6 +26,30 @@
   }
   #hud b { font-weight: 500; color: #6b7f93; text-transform: uppercase; letter-spacing: 0.06em; }
   #hud span { text-align: right; }
+  /*
+   * Cinema mode (?cinema=1) for the film driver: the HUD hides, and a black
+   * fade layer plus two cards sit over the canvas. Opacity rides the
+   * timeline in JS, never a CSS animation - a captured frame and its card
+   * state must not drift apart between wall clocks.
+   */
+  body.cinema #hud { display: none; }
+  #cinema-fade {
+    position: fixed; inset: 0; z-index: 3; background: #000;
+    opacity: 0; pointer-events: none;
+  }
+  #cinema-title, #cinema-credits {
+    position: fixed; inset: 0; z-index: 4;
+    display: none; place-content: center;
+    text-align: center; pointer-events: none; opacity: 0;
+    color: #f5e9cd; text-shadow: 0 4px 24px rgba(0, 0, 0, 0.9);
+    font: 500 clamp(1.5rem, 3.4vw, 3.2rem)/1.4 ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: 0.03em;
+  }
+  body.cinema #cinema-title, body.cinema #cinema-credits { display: grid; }
+  #cinema-credits {
+    grid-template-rows: repeat(2, auto); gap: 0.5rem;
+    color: #c3d0de; font-size: clamp(1rem, 2.1vw, 2rem);
+  }
 </style>
 </head>
 <body>
@@ -34,6 +58,16 @@
   <b>phase</b><span id="phase">closed</span>
   <b>azimuth</b><span id="azimuth">0.0°</span>
   <b>contacts</b><span id="padCount">0</span>
+</div>
+<!--
+  Cinema-only layer: hidden until ?cinema=1 marks body.cinema. The card copy
+  is Jon's verbatim - do NOT "correct" the apostrophe or the spaced hyphen.
+-->
+<div id="cinema-fade"></div>
+<div id="cinema-title">LGA 3647 - 3,647 gold contacts</div>
+<div id="cinema-credits">
+  <div class="line">Dual GTX 1070's</div>
+  <div class="line">Qwen3.8 Flash Next Strata</div>
 </div>
 <div id="error-overlay"></div>
 <script type="module">
@@ -1201,6 +1235,17 @@ const inputState = { azOffsetDeg: 0, elevOffsetDeg: 0, zoomLog: 0 };
 const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
 const DEG_TO_RAD = Math.PI / 180;
 
+/** Eye position for a polar pose: one spherical mapping, shared by all paths. */
+function eyeAt(azDeg, elevDeg, dist) {
+  const az = azDeg * DEG_TO_RAD;
+  const el = elevDeg * DEG_TO_RAD;
+  return [
+    dist * Math.cos(el) * Math.sin(az),
+    dist * Math.sin(el),
+    dist * Math.cos(el) * Math.cos(az),
+  ];
+}
+
 /**
  * The orbit pose for a clock value, in degrees and mm. Returns a fresh object on
  * purpose: a reused scratch record would break any caller that compares two
@@ -1214,15 +1259,9 @@ function cameraPose(elapsedMs = 0) {
   // Radius is exp() of a log accumulator, so it can never reach or cross zero the
   // way a per-frame multiply-with-clamp does: the clamp only bounds the framing.
   const dist = clamp(VIEW.dist * Math.exp(inputState.zoomLog), CAMERA_LIMITS.minDist, CAMERA_LIMITS.maxDist);
-  const az = azDeg * DEG_TO_RAD;
-  const el = elevDeg * DEG_TO_RAD;
   return {
     azDeg, elevDeg, dist, target: VIEW.target,
-    eye: [
-      dist * Math.cos(el) * Math.sin(az),
-      dist * Math.sin(el),
-      dist * Math.cos(el) * Math.cos(az),
-    ],
+    eye: eyeAt(azDeg, elevDeg, dist),
   };
 }
 
@@ -1441,6 +1480,150 @@ function handleKey(code) {
   return false;
 }
 
+/*
+ * ---------------------------------------------- cinema mode (?cinema=1)
+ * The 40 s reel timeline. Not an animation: the film driver steps it frame by
+ * frame (renderCinemaFrame(ms)), so the whole thing is a pure lookup table -
+ * the same ms always produces the same frame, which is what makes a 1200-frame
+ * capture deterministic by construction.
+ *
+ * Beat sheet in DESIGN.md's 2026-11-18 addendum; the keyframes below are that
+ * table, in ms. Camera azimuth stays monotonic across the 34 -> 340 deg sweep:
+ * no wrap cut means no seam between the last frame and the credits pose.
+ */
+const cinemaRequested =
+  typeof location !== "undefined" && /[?&]cinema=1(?:&|$)/.test(location.search);
+
+const CINEMA = {
+  durationMs: 40000,
+  cameraKeys: [
+    { atMs: 0, azDeg: 34, elevDeg: 56, dist: 150 },
+    { atMs: 9500, azDeg: 96, elevDeg: 50, dist: 132 },
+    { atMs: 13000, azDeg: 118, elevDeg: 28, dist: 62 },
+    { atMs: 18000, azDeg: 150, elevDeg: 20, dist: 78 },
+    { atMs: 23000, azDeg: 196, elevDeg: 38, dist: 60 },
+    { atMs: 27500, azDeg: 224, elevDeg: 50, dist: 150 },
+    { atMs: 33000, azDeg: 262, elevDeg: 58, dist: 140 },
+    { atMs: 36500, azDeg: 340, elevDeg: 56, dist: 150 },
+  ],
+  plateKeys: [
+    { atMs: 0, deg: 0 },
+    { atMs: 10800, deg: 0 },
+    { atMs: 15500, deg: PLATE_MAX_DEG },
+    { atMs: 26500, deg: PLATE_MAX_DEG },
+    { atMs: 30500, deg: 0 },
+  ],
+  latchKeys: [
+    { atMs: 0, deg: 0 },
+    { atMs: 9500, deg: 0 },
+    { atMs: 11000, deg: PLATE_LATCH_DEG },
+    { atMs: 30500, deg: PLATE_LATCH_DEG },
+    { atMs: 32000, deg: 0 },
+  ],
+  phaseKeys: [
+    { atMs: 0, phase: "closed" },
+    { atMs: 9500, phase: "unlatching" },
+    { atMs: 10800, phase: "opening" },
+    { atMs: 15500, phase: "open" },
+    { atMs: 26500, phase: "closing" },
+    { atMs: 30500, phase: "latching" },
+    { atMs: 32000, phase: "closed" },
+  ],
+  // Card alpha: the reel fades in from black, the title card crosses for 3 s,
+  // the credits (Jon's two lines) cross near the end, and black closes the reel.
+  cards: {
+    fade: [
+      { atMs: 0, alpha: 1 }, { atMs: 800, alpha: 0 },
+      { atMs: 39300, alpha: 0 }, { atMs: 40000, alpha: 1 },
+    ],
+    title: [
+      { atMs: 0, alpha: 0 }, { atMs: 900, alpha: 0 },
+      { atMs: 2600, alpha: 1 }, { atMs: 3300, alpha: 0 },
+    ],
+    credits: [
+      { atMs: 0, alpha: 0 }, { atMs: 36500, alpha: 0 }, { atMs: 37500, alpha: 1 },
+      { atMs: 39000, alpha: 1 }, { atMs: 39600, alpha: 0 },
+    ],
+  },
+};
+
+/**
+ * One span of a keyframe table at time t: outside the table the end values are
+ * held (that is what keeps t past the last keyframe from sprouting a NaN),
+ * inside it the span is eased with the same easeInOut the hinge cycle uses.
+ */
+function spanValue(keys, t, field) {
+  if (t <= keys[0].atMs) return keys[0][field];
+  const last = keys[keys.length - 1];
+  if (t >= last.atMs) return last[field];
+  let i = 0;
+  while (i < keys.length - 2 && keys[i + 1].atMs <= t) i++;
+  const from = keys[i], to = keys[i + 1];
+  const h = to.atMs === from.atMs ? 0 : (t - from.atMs) / (to.atMs - from.atMs);
+  return from[field] + (to[field] - from[field]) * easeInOut(h);
+}
+
+/** The full reel state at time ms: camera, plate, latch, phase, card alphas. */
+function cinemaState(ms) {
+  const t = clamp(ms, 0, CINEMA.durationMs);
+  const { cameraKeys, plateKeys, latchKeys, phaseKeys, cards } = CINEMA;
+  let phase = phaseKeys[0].phase;
+  for (const key of phaseKeys) {
+    if (key.atMs > t) break;
+    phase = key.phase;
+  }
+  return {
+    camera: {
+      azDeg: spanValue(cameraKeys, t, "azDeg"),
+      elevDeg: clamp(spanValue(cameraKeys, t, "elevDeg"), CAMERA_LIMITS.minElevDeg, CAMERA_LIMITS.maxElevDeg),
+      dist: clamp(spanValue(cameraKeys, t, "dist"), CAMERA_LIMITS.minDist, CAMERA_LIMITS.maxDist),
+    },
+    plateAngleDeg: spanValue(plateKeys, t, "deg"),
+    latchAngleDeg: spanValue(latchKeys, t, "deg"),
+    phase,
+    titleAlpha: spanValue(cards.title, t, "alpha"),
+    creditAlpha: spanValue(cards.credits, t, "alpha"),
+    fadeAlpha: spanValue(cards.fade, t, "alpha"),
+  };
+}
+
+/**
+ * One frame of cinema mode, exactly as the film driver asked for it: the
+ * drawing buffer is read by a screenshot immediately after, so nothing here
+ * may depend on wall time or on a previous frame.
+ */
+function renderCinemaFrame(ms) {
+  if (!cinemaStage) throw new Error("renderCinemaFrame called before a ?cinema=1 boot: nothing to draw");
+  const st = cinemaState(ms);
+  applyPlatePose(cinemaStage.parts, {
+    phase: st.phase,
+    plateAngleDeg: st.plateAngleDeg,
+    latchAngleDeg: st.latchAngleDeg,
+  });
+  const pose = {
+    azDeg: st.camera.azDeg, elevDeg: st.camera.elevDeg, dist: st.camera.dist,
+    target: VIEW.target,
+    eye: eyeAt(st.camera.azDeg, st.camera.elevDeg, st.camera.dist),
+  };
+  updateCamera(pose, resizeCanvas(cinemaStage.gl));
+  cinemaStage.scene.azimuthDeg = st.camera.azDeg;
+  cinemaStage.scene.cameraDist = st.camera.dist;
+  cinemaStage.scene.plateAngleDeg = st.plateAngleDeg;
+  cinemaStage.scene.platePhase = st.phase;
+  for (const [id, alpha] of [
+    ["cinema-fade", st.fadeAlpha], ["cinema-title", st.titleAlpha], ["cinema-credits", st.creditAlpha],
+  ]) {
+    const el = document.getElementById(id);
+    if (el) el.style.opacity = String(alpha);
+  }
+  cinemaStage.scene.frames++;
+  // u_time rides the reel clock, not the wall: frame N always shimmers the
+  // same way, encode after encode.
+  cinemaStage.scene.drawCalls = drawScene(cameraState.viewProj, ms, cameraState.eye);
+  cinemaStage.scene.padsDrawn = cinemaStage.scene.padCount;
+  return st;
+}
+
 
 /**
  * One studio frame: backdrop, seven shaded parts, then the 3,647 pads in a
@@ -1513,6 +1696,8 @@ function resizeCanvas(gl, source = canvas) {
 
 let activeRenderer = null;
 let lastFrameTimeMs = 0;
+// Populated by a ?cinema=1 boot; renderCinemaFrame refuses to draw before it.
+let cinemaStage = null;
 
 function createRenderer(gl, parts) {
   const records = {};
@@ -1622,6 +1807,7 @@ window.__api = {
   cameraInput: inputState,
   orbitClock, advanceOrbitClock, MAX_FRAME_MS,
   PLATE_CYCLE, PLATE_MAX_DEG, platePose, applyPlatePose, setPlateOverride, handleKey,
+  cinemaMode: cinemaRequested, CINEMA, cinemaState, renderCinemaFrame,
   analysePixels, frameStats, drawScene, updateCamera, resizeCanvas, createRenderer,
   interleavedGeometry, uploadPartToGpu, STRIDE_BYTES, INSTANCE_STRIDE_BYTES,
 };
@@ -1713,7 +1899,14 @@ function startRenderLoop(gl, scene, parts) {
 }
 
 function boot() {
-  const gl = canvas.getContext("webgl2", { antialias: true, alpha: false });
+  // preserveDrawingBuffer only under cinema: every default-mode frame asks the
+  // compositor for a buffer it never reads back, and asking drains the iGPU.
+  const gl = canvas.getContext(
+    "webgl2",
+    cinemaRequested
+      ? { antialias: true, alpha: false, preserveDrawingBuffer: true }
+      : { antialias: true, alpha: false }
+  );
   if (!gl) {
     reportFailure("webgl2-unavailable", "WebGL2 is not available in this browser.\n" +
       "The socket render needs WebGL2 (antialias). Check that hardware acceleration is on.");
@@ -1761,14 +1954,25 @@ function boot() {
   }
   scene.programs = activeRenderer.programs;
 
+  gl.clearColor(0.03, 0.035, 0.045, 1);
+  gl.enable(gl.DEPTH_TEST);
+
+  if (cinemaRequested) {
+    // The film driver owns this mode from here on: every pixel arrives through
+    // renderCinemaFrame(ms). No HUD, no orbit controls, no rAF loop - a
+    // wall-clock frame racing a captured one would film a pose nobody asked
+    // for, and a boot frame here would be a frame the encoder never requested.
+    document.body.classList.add("cinema");
+    cinemaStage = { gl, scene, parts };
+    return;
+  }
+
   // One frame synchronously, so a harness reading __scene immediately after
   // boot sees a populated diagnostics object, not a clear-colour promise.
   resizeCanvas(gl);
   updateCamera();
   applyFramePoses(scene, parts);
   updateHud(scene);
-  gl.clearColor(0.03, 0.035, 0.045, 1);
-  gl.enable(gl.DEPTH_TEST);
   lastFrameTimeMs = performance.now();
   scene.drawCalls = drawScene(cameraState.viewProj, lastFrameTimeMs, cameraState.eye);
   scene.padsDrawn = scene.padCount;

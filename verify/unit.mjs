@@ -28,7 +28,16 @@ function makeSandbox({ glFactory = () => null } = {}) {
     style: {},
     textContent: "",
     innerHTML: "",
-    classList: { add() {}, remove() {}, contains: () => false },
+    // Set-backed rather than no-op: the cinema boot marks body with a class,
+    // and a stub that always answers "no" would let that marker go unasserted.
+    classList: (() => {
+      const tokens = new Set();
+      return {
+        add: (...names) => names.forEach((n) => tokens.add(n)),
+        remove: (name) => tokens.delete(name),
+        contains: (name) => tokens.has(name),
+      };
+    })(),
     appendChild() {},
     addEventListener() {},
     setAttribute() {},
@@ -41,7 +50,13 @@ function makeSandbox({ glFactory = () => null } = {}) {
     dataset: {},
   });
   const canvas = makeNode("canvas");
-  canvas.getContext = (kind) => (kind === "webgl2" ? glFactory() : null);
+  // Records the context attributes the page asks for: the cinema mode must
+  // request preserveDrawingBuffer, and the default mode must not, because a
+  // buffer that resets after each screenshot would film a black reel.
+  canvas.getContext = (kind, options) => {
+    canvas.lastContextAttributes = options ?? null;
+    return kind === "webgl2" ? glFactory() : null;
+  };
   // A stub drawing buffer the harness controls: Task 5's frameStats probe reads
   // it back through the stub's synthetic fill, so the pixel maths is testable
   // without a GPU.
@@ -68,6 +83,9 @@ function makeSandbox({ glFactory = () => null } = {}) {
     document,
     console,
     performance: { now: () => Date.now() },
+    // No `location` by default: reading the cinema flag must tolerate its
+    // absence (real browsers always have one, but the guard is what keeps the
+    // sandbox - and any future harness without location - bootable).
     // Frames queue instead of firing on their own: the harness must not animate,
     // but a test that wants the rAF loop (fps cadence) can pump the queue below.
     requestAnimationFrame: (cb) => { sandboxAnimationFrameQueue.push(cb); return sandboxAnimationFrameQueue.length; },
@@ -85,17 +103,18 @@ function makeSandbox({ glFactory = () => null } = {}) {
   sandbox.window.matchMedia = () => ({ matches: false, addEventListener() {} });
   // Exposed so boot().pumpFrame can walk the loop instead of leaving it dead.
   sandbox.requestAnimationFrameQueue = sandboxAnimationFrameQueue;
-  return { sandbox, canvas, nodes };
+  return { sandbox, canvas, nodes, document };
 }
 
 /** Runs the page's inline module against a stub environment. */
-export function boot({ glFactory } = {}) {
+export function boot({ glFactory, locationSearch } = {}) {
   const html = readFileSync(HTML_PATH, "utf8");
   const src = inlineModuleSource(html);
-  const { sandbox, canvas, nodes } = makeSandbox({ glFactory });
+  const { sandbox, canvas, nodes, document } = makeSandbox({ glFactory });
+  if (locationSearch !== undefined) sandbox.location = { search: locationSearch };
   runInNewContext(src, createContext(sandbox), { filename: "index.html" });
   return {
-    scene: sandbox.window.__scene, api: sandbox.window.__api, canvas, nodes, source: src, html,
+    scene: sandbox.window.__scene, api: sandbox.window.__api, canvas, nodes, document, source: src, html,
     // Drains one queued rAF callback with a given timestamp, so a test can walk
     // the loop forward frame by frame instead of hoping wall time behaves.
     pumpFrame: (timeMs) => {
@@ -1320,6 +1339,108 @@ test("boot_wiresTheRealPadFieldPadsOntoTheirOwnLayoutPositions", () => {
   const decodedPads = (pointer) => decodeAttrib(instanceUpload, pointer, 3);
   near(decodedPads(xzPointer).flat(), layout.pads.slice(0, 3).flatMap((p) => [p.x, p.z]), "pad x/z must match the layout");
   near(decodedPads(tonePointer).flat(), layout.pads.slice(0, 3).flatMap((p) => [p.tone, p.phase]), "pad tone/phase must match the layout");
+});
+
+// ------------------------------------------- cinema mode (reel, 2026-11-18 plan)
+// cinemaState is pure and exported in both boot modes: the film driver scrubs
+// it frame by frame, and these tests scrub it in the reader's place.
+
+const cinemaTestsApi = () => {
+  const a = api();
+  for (const fn of ["cinemaState", "renderCinemaFrame"]) {
+    if (typeof a[fn] !== "function") throw new Error(`window.__api.${fn} is not a function`);
+  }
+  if (!a.CINEMA || a.CINEMA.durationMs !== 40000) {
+    throw new Error("window.__api.CINEMA must expose the 40000 ms timeline");
+  }
+  return a;
+};
+
+const CINEMA_PHASES = new Set(["closed", "unlatching", "opening", "open", "closing", "latching", "closed"]);
+
+const finiteRecord = (st) => {
+  const scalars = [st.plateAngleDeg, st.latchAngleDeg, st.titleAlpha, st.creditAlpha, st.fadeAlpha];
+  const cam = [st.camera.azDeg, st.camera.elevDeg, st.camera.dist];
+  const bad = [...scalars, ...cam].filter((v) => !Number.isFinite(v));
+  if (bad.length) throw new Error(`non-finite fields: ${bad.join(", ")}`);
+  if (!CINEMA_PHASES.has(st.phase)) throw new Error(`unknown phase "${st.phase}"`);
+};
+
+test("cinemaState_withTimelineMs0_returnsClosedPlateAndHeroCamera", () => {
+  const st = cinemaTestsApi().cinemaState(0);
+  finiteRecord(st);
+  if (st.plateAngleDeg !== 0 || st.latchAngleDeg !== 0) {
+    throw new Error(`t=0 must be fully stowed, got plate ${st.plateAngleDeg} latch ${st.latchAngleDeg}`);
+  }
+  if (st.camera.azDeg !== 34 || st.camera.elevDeg !== 56 || st.camera.dist !== 150) {
+    throw new Error(`t=0 must open on the hero pose, got ${JSON.stringify(st.camera)}`);
+  }
+  if (st.fadeAlpha !== 1) throw new Error(`reel must fade in from black, fadeAlpha ${st.fadeAlpha}`);
+  if (st.titleAlpha !== 0) throw new Error(`title card must not be up at t=0, titleAlpha ${st.titleAlpha}`);
+});
+
+test("cinemaState_atLatchPushIn_returnsCameraWithinLimitsAndUnlatching", () => {
+  const st = cinemaTestsApi().cinemaState(12000);
+  finiteRecord(st);
+  const { dist, elevDeg } = st.camera;
+  if (!(dist >= 45 && dist <= 280)) throw new Error(`dist ${dist} outside CAMERA_LIMITS`);
+  if (!(elevDeg >= 5 && elevDeg <= 75)) throw new Error(`elev ${elevDeg} outside CAMERA_LIMITS`);
+  if (!(st.latchAngleDeg > 10)) throw new Error(`latch ${st.latchAngleDeg} deg: lever should be mid-push at 12 s`);
+  if (!(st.plateAngleDeg > 0)) throw new Error(`plate ${st.plateAngleDeg} deg: lid should have begun lifting at 12 s`);
+});
+
+test("cinemaState_fullTimeline_plateSweepCoversFullRangeAndReturnsClosed", () => {
+  const a = cinemaTestsApi();
+  let maxPlate = -1, lastAz = -Infinity;
+  for (let ms = 0; ms <= 40000; ms += 100) {
+    const st = a.cinemaState(ms);
+    finiteRecord(st);
+    if (st.plateAngleDeg < 0 || st.plateAngleDeg > 105) {
+      throw new Error(`plate ${st.plateAngleDeg} deg outside 0..105 at t=${ms}`);
+    }
+    if (st.latchAngleDeg < 0 || st.latchAngleDeg > 20) {
+      throw new Error(`latch ${st.latchAngleDeg} deg outside 0..20 at t=${ms}`);
+    }
+    if (st.camera.azDeg < lastAz) throw new Error(`azimuth ${st.camera.azDeg} regressed at t=${ms}`);
+    lastAz = st.camera.azDeg;
+    maxPlate = Math.max(maxPlate, st.plateAngleDeg);
+  }
+  if (maxPlate < 104.9) throw new Error(`plate never swept open (max ${maxPlate} deg)`);
+  if (a.cinemaState(40000).plateAngleDeg !== 0) throw new Error("timeline must end closed");
+});
+
+test("cinemaState_atLastFrame_isFinite", () => {
+  // The 1200th frame of a 60 fps reel: the boundary past the last keyframe is
+  // exactly where an interpolation table is most likely to cough up a NaN.
+  finiteRecord(cinemaTestsApi().cinemaState(39983.333));
+});
+
+test("boot_withLocationCinema1_disablesAutoLoopAndMarksBody", () => {
+  const b = boot({ glFactory: () => stubGL(), locationSearch: "?cinema=1" });
+  if (!b.document.body.classList.contains("cinema")) throw new Error("boot did not mark body.cinema");
+  if (b.api.cinemaMode !== true) throw new Error(`cinemaMode ${b.api.cinemaMode}, want true`);
+  if (b.scene.frames !== 0) {
+    throw new Error(`scene.frames ${b.scene.frames}: cinema boot should not count a loop frame`);
+  }
+  try {
+    b.pumpFrame(Date.now());
+    throw new Error("expected no rAF loop under ?cinema=1: a wall-clock frame would repaint over the screenshot");
+  } catch (err) {
+    if (!/no rAF callback queued/.test(err.message)) throw err;
+  }
+  if (b.canvas.lastContextAttributes?.preserveDrawingBuffer !== true) {
+    throw new Error("cinema mode must request preserveDrawingBuffer or the screenshots come back empty");
+  }
+});
+
+test("boot_withoutLocation_searchStaysDefaultAndLoopQueues", () => {
+  const b = boot({ glFactory: () => stubGL() });
+  if (b.api.cinemaMode !== false) throw new Error(`cinemaMode ${b.api.cinemaMode}, want false (no location in sandbox)`);
+  if (b.document.body.classList.contains("cinema")) throw new Error("default boot must not mark body.cinema");
+  if (b.canvas.lastContextAttributes?.preserveDrawingBuffer) {
+    throw new Error("default mode must not ask for preserveDrawingBuffer: it drains the iGPU dry");
+  }
+  b.pumpFrame(Date.now()); // throws if the rAF loop was never queued
 });
 
 let failed = 0;
