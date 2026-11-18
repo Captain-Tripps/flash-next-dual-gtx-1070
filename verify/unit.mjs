@@ -67,6 +67,10 @@ function makeSandbox({ glFactory = () => null } = {}) {
   // The HUD readouts the page writes every frame. The stub has to model them,
   // or the page's own getElementById fallback would hide a missing element.
   for (const id of ["#hud", "#phase", "#padCount", "#azimuth"]) nodes.set(id, makeNode("span"));
+  // The cinema card layer: renderCinemaFrame writes opacity on these three,
+  // and the page guards each lookup with if (el). Without stubs here, the
+  // guard would let a missing card silently opt out of the assertion.
+  for (const id of ["#cinema-fade", "#cinema-title", "#cinema-credits"]) nodes.set(id, makeNode("div"));
 
   const document = {
     readyState: "complete",
@@ -1410,7 +1414,7 @@ test("cinemaState_fullTimeline_plateSweepCoversFullRangeAndReturnsClosed", () =>
 });
 
 test("cinemaState_atLastFrame_isFinite", () => {
-  // The 1200th frame of a 60 fps reel: the boundary past the last keyframe is
+  // The 2400th frame of a 60 fps reel: the boundary past the last keyframe is
   // exactly where an interpolation table is most likely to cough up a NaN.
   finiteRecord(cinemaTestsApi().cinemaState(39983.333));
 });
@@ -1441,6 +1445,74 @@ test("boot_withoutLocation_searchStaysDefaultAndLoopQueues", () => {
     throw new Error("default mode must not ask for preserveDrawingBuffer: it drains the iGPU dry");
   }
   b.pumpFrame(Date.now()); // throws if the rAF loop was never queued
+});
+
+// The film driver calls renderCinemaFrame(ms) 2400 times and trusts the return
+// value sight unseen: until these tests it had zero unit coverage. Pinning it
+// through a stub GL is the only place the wiring (cards written, frames bumped,
+// state returned pure) is checked without spawning Chrome.
+
+test("renderCinemaFrame_afterDefaultBoot_throwsBeforeDrawingAnyFrame", () => {
+  const b = boot({ glFactory: () => stubGL() });
+  try {
+    b.api.renderCinemaFrame(0);
+    throw new Error("expected renderCinemaFrame to refuse after a default boot: cinemaStage was never built");
+  } catch (err) {
+    if (!/before a \?cinema=1 boot/.test(err.message)) throw err;
+  }
+});
+
+test("renderCinemaFrame_withCinemaBoot_at12000_equalsCinemaStateOfSameTime", () => {
+  const b = boot({ glFactory: () => stubGL(), locationSearch: "?cinema=1" });
+  const rendered = b.api.renderCinemaFrame(12000);
+  const pure = b.api.cinemaState(12000);
+  if (JSON.stringify(rendered) !== JSON.stringify(pure)) {
+    throw new Error(`renderCinemaFrame returned a record that diverged from cinemaState: ${JSON.stringify(rendered)} vs ${JSON.stringify(pure)}`);
+  }
+});
+
+test("renderCinemaFrame_withCinemaBoot_bumpsSceneFramesOncePerRenderedFrame", () => {
+  const b = boot({ glFactory: () => stubGL(), locationSearch: "?cinema=1" });
+  if (b.scene.frames !== 0) throw new Error(`scene.frames ${b.scene.frames} after cinema boot, want 0`);
+  for (const ms of [0, 12000, 39983.333]) {
+    b.api.renderCinemaFrame(ms);
+  }
+  if (b.scene.frames !== 3) throw new Error(`scene.frames ${b.scene.frames} after three renders, want 3`);
+  if (!Number.isFinite(b.scene.drawCalls)) throw new Error(`drawCalls ${b.scene.drawCalls}: render must record the draw tally`);
+});
+
+test("renderCinemaFrame_withCinemaBoot_writesCardOpacityMatchingCinemaState", () => {
+  const b = boot({ glFactory: () => stubGL(), locationSearch: "?cinema=1" });
+  // 38000 ms: credits up, title down. 2000 ms: title mid-cross. Both must land
+  // on the DOM cards as opacity strings, or the reel films invisible overlays.
+  for (const ms of [38000, 2000]) {
+    const st = b.api.renderCinemaFrame(ms);
+    for (const [id, alpha] of [
+      ["#cinema-fade", st.fadeAlpha],
+      ["#cinema-title", st.titleAlpha],
+      ["#cinema-credits", st.creditAlpha],
+    ]) {
+      const node = b.nodes.get(id);
+      if (!node) throw new Error(`sandbox is missing ${id}: the page's card layer is not modelled`);
+      if (node.style.opacity !== String(alpha)) {
+        throw new Error(`${id} opacity "${node.style.opacity}" != ${String(alpha)} at t=${ms}`);
+      }
+    }
+  }
+});
+
+test("boot_html_pinsJonVerbatimCinemaCardCopy", () => {
+  const b = boot({ glFactory: () => stubGL() });
+  // Jon's exact words: the spaced hyphen and the 1070's apostrophe are deliberate,
+  // and a curly-quoted "correct" edit must be caught, not politely skipped past.
+  for (const copy of [
+    "LGA 3647 - 3,647 gold contacts",
+    "Dual GTX 1070's",
+    "Qwen3.8 Flash Next Strata",
+  ]) {
+    if (!b.html.includes(copy)) throw new Error(`card copy "${copy}" is missing from index.html`);
+  }
+  if (b.html.includes("1070\u2019s")) throw new Error("curly apostrophe in 1070's: a smart-quote autocorrect crept in");
 });
 
 let failed = 0;
