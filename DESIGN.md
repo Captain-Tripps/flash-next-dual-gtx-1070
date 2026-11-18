@@ -84,7 +84,8 @@ function `cinemaState(ms)` - a keyframe table covering camera pose, plate/latch
 angle, and card opacity - and the capture driver renders one deterministic frame
 per frame index, `ms = frame * 1000/60`, via `__api.renderCinemaFrame(ms)`. The
 director is therefore unit-testable (hinge angle at 13 s, camera distance at 9 s),
-and the MP4 is exactly 1200 frames at 60 fps = 40.000 s. The screenshot path needs
+and the MP4 is exactly 2400 frames at 60 fps = 40.000 s. (The plan's first
+draft said 1200: at 60 fps that is 20 s. Arithmetic, caught by the frame-count gate.) The screenshot path needs
 `preserveDrawingBuffer: true`, but only in cinema mode - the default mode keeps
 its zero-copy swap chain.
 
@@ -93,10 +94,10 @@ its zero-copy swap chain.
 |---|------|--------|-------------|
 | 0.0-2.6 s | fade in; title card | hero arc, dist ~150, elev ~52 | closed |
 | 2.6-9.5 s | closed-lid beauty orbit, latch posts in frame | slow azimuth arc | closed |
-| 9.5-13 s | push in on the latch side | dist 150 to ~65, elev to ~30 | latch flips, plate breaks free |
-| 13-18 s | cover opens: camera arcs at the hinge rod | follows the plate | plate 0 to 105 deg |
-| 18-27.5 s | the gold: macro pan over ILS cross and pad rows | dist ~60, elevation sweep | open, held |
-| 27.5-33 s | cover closes, latch re-hooks | pulls to wide | plate 105 to 0, latch hooks |
+| 9.5-13 s | push in on the latch side | dist 150 to ~65, elev to ~30 | latch flips by 11.0 s, plate breaks free at 10.8 s |
+| 10.8-15.5 s | cover opens: camera arcs at the hinge rod | follows the plate | plate 0 to 105 deg |
+| 15.5-26.5 s | the gold: macro pan over ILS cross and pad rows | dist ~60, elevation sweep | open, held |
+| 26.5-33 s | cover closes, latch re-hooks | pulls to wide | plate 105 to 0 by 30.5 s, latch re-hooks by 32 s |
 | 33-36.5 s | final hero orbit settles into the default view | dist ~150 | closed |
 | 36.5-39.3 s | credit cards (the two Jon-supplied lines) | static hero | closed |
 | 39.3-40.0 s | fade out | - | closed |
@@ -115,9 +116,10 @@ its zero-copy swap chain.
 ### Verification
 - Unit: `cinemaState` end states - full plate sweep covered, monotonic reveal,
   camera within `CAMERA_LIMITS`, card opacity envelopes, timeline exactly 40000 ms.
-- Film gate (after encode): `ffprobe` says exactly 1200 frames at 1920x1080 60 fps,
-  duration 40.0 +/- 0.1 s; plus three frames extracted at pinned times decoded
-  through the same gold/coverage pixel definitions as the render suite.
-- The existing 66-unit/12-render suite stays green: cinema code must not disturb
+- Film gate (after encode): `ffprobe` says exactly 2400 frames at 1920x1080 60 fps,
+  duration 40.0 +/- 0.15 s; plus one pinned macro-beat frame (t=22 s) decoded
+  back to raw RGB and demanded to carry real gold, using the same gold definition
+  as the render suite (gold ratio >= 0.03 against the macro beat's measured 0.38).
+- The existing unit/render suite stays green: cinema code must not disturb
   default boot (sandbox has no `location`, so the mode flag reads `location.search`
   through a guard).
