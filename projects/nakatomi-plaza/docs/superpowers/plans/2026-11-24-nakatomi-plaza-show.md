@@ -303,14 +303,16 @@ wiring moves ahead of the content tasks so Tasks 7-12 land visibly.
 **Files:** Create: `src/10-blast-storm.txt`.
 - Test: "blast at 360, storm dur 95, shatter outside envelope after 365".
 
-- [ ] Step 1: failing test "blast timing pins v1": `seekTo("blast")` 360, storm dur 95,
-  shatter voxels for the storm beat only exist for t in [360, 360+95).
-- [ ] Step 2: failing test "facade break leaves the envelope": broken glass voxels drift
+- [x] Step 1: failing test "blast timing pins v1": `seekTo("blast")` 360, storm dur 95,
+  shatter voxels for the storm beat only exist for t in [360, 360+95). (The literal
+  window here is a slip: the storm beat opens at 390, so the shatter spans [390, 485) -
+  read from `clock.start("storm")`/`clock.dur("storm")`, not a hand-kept number. See R15.)
+- [x] Step 2: failing test "facade break leaves the envelope": broken glass voxels drift
   outside the envelope after the blast and restore on the wrap.
-- [ ] Step 3: run; expect FAIL.
-- [ ] Step 4: implement blast volume + shatter burst + the curtain-wall break (glass ids
+- [x] Step 3: run; expect FAIL.
+- [x] Step 4: implement blast volume + shatter burst + the curtain-wall break (glass ids
   swap to dark-shatter ids inside the storm window only).
-- [ ] Step 5: run; PASS. Commit: "blast@360 + storm(95) glass-break shatter".
+- [x] Step 5: run; PASS. Commit: "blast@360 + storm(95) glass-break shatter".
 
 ### Task 11: Police convoy + fed arrival
 

@@ -115,6 +115,47 @@ Object.assign(NAKATOMIC, (() => {
     return pos;
   };
 
+  // --- the blast/storm fx: the one overlay that is a function of t. It never
+  // joins the static cloud - the base glass line is one build, once, and the
+  // fx only draws *over* it, which is what lets the wrap restore everything by
+  // returning empty cells outside the window. The overlay is a fixed-size
+  // Points buffer repainted per frame inside the window; outside it, drawRange
+  // goes to zero and the layer is gone. ---------------------------------------
+  let fxObj = null;
+  const FX_MAX = 512;
+  const paintFx = (t) => {
+    if (!NAKATOMIC.fx) return;
+    const cells = NAKATOMIC.fx.at(t);
+    if (!fxObj) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(FX_MAX * 3), 3));
+      geo.setAttribute("color", new THREE.Float32BufferAttribute(new Float32Array(FX_MAX * 3), 3));
+      geo.setDrawRange(0, 0);
+      const mat = new THREE.PointsMaterial({
+        size: 1.15, sizeAttenuation: true, vertexColors: true, fog: true, depthWrite: false,
+      });
+      mat.depthTest = true;
+      fxObj = new THREE.Points(geo, mat);
+      fxObj.renderOrder = 2;                       // after the cloud, over the glass it replaces
+      sceneObj.add(fxObj);
+    }
+    const pos = fxObj.geometry.attributes.position.array;
+    const col = fxObj.geometry.attributes.color.array;
+    let n = 0;
+    for (const c of cells) {
+      if (n >= FX_MAX) break;
+      const hex = NAKATOMIC.palette.hexOf(c.id);
+      const lin = colorLinear(hex);
+      pos[n * 3] = c.x; pos[n * 3 + 1] = c.y; pos[n * 3 + 2] = c.z + (c.zShift || 0);
+      col[n * 3] = lin[0]; col[n * 3 + 1] = lin[1]; col[n * 3 + 2] = lin[2];
+      n++;
+    }
+    fxObj.geometry.setDrawRange(0, n);
+    fxObj.geometry.attributes.position.needsUpdate = true;
+    fxObj.geometry.attributes.color.needsUpdate = true;
+    scene.stats.fx = n;
+  };
+
   // rig state: spherical orbit around a target. `pose` is the show's own camera
   // (Task 12's rig feeds it through setPose); while it is set, orbit state idles.
   const rig = {
@@ -152,7 +193,7 @@ Object.assign(NAKATOMIC, (() => {
     domElement: null,
     fov: FRAMINGS[0].fov,
     framing: 1,
-    stats: { points: 0, voxels: 0, fps: 0 },
+    stats: { points: 0, voxels: 0, fps: 0, fx: 0 },
 
     // The HUD's label rule, as a pure function: beatAt is null through the hold,
     // so a null beat is not a missing label - it is the hold, and it needs a label.
@@ -240,6 +281,7 @@ Object.assign(NAKATOMIC, (() => {
         if (key) scene.setPose(key);
       }
       if (rigReady) {
+        paintFx(frame.t);
         if (pose) applyPose(scene.camera, pose.pos, pose.target, pose.fov);
         else applyPose(scene.camera, orbitPos(), rig.target, scene.fov);
         if (hud) paintHud(frame);

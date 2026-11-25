@@ -681,7 +681,9 @@ describe("scene assembly", () => {
       assert.strictEqual(typeof N.scene[k], "function", `scene.${k} is a function`);
     assert.strictEqual(N.scene.running, false, "the loop is not running until start()");
     assert.strictEqual(N.scene.gl, null, "no renderer before start()");
-    assert.deepStrictEqual(Object.keys(N.scene.stats).sort(), "fps points voxels".split(" ").sort(), "stats keys");
+    // fx joins the pinned shape in Task 10: the overlay's per-frame count is part of
+    // the rig's public stats, which is how the live driver proves the burst painted.
+    assert.deepStrictEqual(Object.keys(N.scene.stats).sort(), "fps fx points voxels".split(" ").sort(), "stats keys");
     // The hold fallback needs no beat label to exist: label() answers for the hold.
     assert.strictEqual(N.scene.label({ t: N.clock.BEAT_END + 1, beat: null }), N.clock.HOLD_LABEL, "hold fallback label");
     assert.strictEqual(N.scene.label({ t: 360, beat: N.clock.beatAt(360) }), N.clock.beatAt(360).label, "beat label");
@@ -1012,6 +1014,107 @@ describe("roof, run, helo", () => {
     assert.strictEqual(second, roof, "the cached batch is the same object");
     assert.strictEqual(N.vox.runs().length, runs, "run count unchanged");
     assert.strictEqual(N.vox.count, voxCount, "voxel count unchanged");
+  });
+});
+
+// --- Task 10: blast + storm ----------------------------------------------
+// The fx is the one batch that is not a batch: it is a function of t, so the
+// whole contract is "what does the show look like at this instant". The storm
+// window belongs to the clock (R15: shatter lives inside that window and
+// restores on the wrap), the blast flash belongs to the blast beat, and the
+// fx never writes the shared voxel buffer - the base glass line and the tower
+// are never mutated, which is what "restores on the wrap" means mechanically.
+describe("blast + storm", () => {
+  test("the shatter window is the storm beat, and the broken panes are real curtain glass", () => {
+    build();
+    const { N } = boot();
+    const fx = N.fx;
+    assert.strictEqual(fx.window[0], N.clock.start("storm"), "the window does not open on the storm beat");
+    assert.strictEqual(fx.window[1] - fx.window[0], N.clock.dur("storm"),
+      "the window does not span the storm beat's 95 s");
+    for (const t of [0, 300, 389, 485, 700, 734])
+      assert.strictEqual(fx.paneCells(t).length, 0, `the facade reads broken at t=${t}, outside the storm`);
+    const pane = fx.paneCells(437);
+    assert.ok(pane.length > 0, "no broken facade panes mid-storm");
+    const glassLine = new Set(N.glass.cells.map((c) => `${c.x},${c.y},${c.z}`));
+    const seen = new Set();
+    for (const c of pane) {
+      const k = `${c.x},${c.y},${c.z}`;
+      assert.strictEqual(seen.has(k), false, `pane cell ${k} repeated`);
+      seen.add(k);
+      assert.strictEqual(glassLine.has(k), true, `pane cell ${k} is not curtain-wall glass`);
+      assert.strictEqual(c.id, N.glass.ids.shatter, `pane cell ${k} is not the pinned shatter id`);
+    }
+    // and the wrap restores it: the base glass line was never mutated, so the
+    // same positions read as the glass they were before the window opened
+    for (const c of pane)
+      assert.notStrictEqual(N.glass.cells.find((g) => g.x === c.x && g.y === c.y && g.z === c.z).id, c.id,
+        `pane cell ${c.x},${c.y},${c.z} was swapped in the base glass - a mutation, not a restore`);
+  });
+
+  test("the blast flash stands only through the blast beat, clear outside the glass", () => {
+    build();
+    const { N } = boot();
+    const fx = N.fx;
+    assert.strictEqual(N.clock.start("blast"), 360, "blast timing must pin v1: first break at 360");
+    assert.strictEqual(fx.flashWindow[0], N.clock.start("blast"), "the flash does not open on the blast beat");
+    assert.strictEqual(fx.flashWindow[1] - fx.flashWindow[0], N.clock.dur("blast"),
+      "the flash does not span the blast beat");
+    for (const t of [0, 359, 390, 484, 700])
+      assert.strictEqual(fx.flashCells(t).length, 0, `flash visible at t=${t}`);
+    const flash = fx.flashCells(370);
+    assert.ok(flash.length > 0, "the blast lands without a flash");
+    for (const c of flash) {
+      assert.strictEqual(N.envelope.isOutside({ x: c.x, y: c.y, z: c.z }), true,
+        `flash cell ${c.x},${c.y},${c.z} is inside the envelope - the lens could never stay clear of it`);
+      assert.strictEqual(c.id, N.glass.ids.shatter, `flash cell ${c.x},${c.y},${c.z} is not the pinned shatter id`);
+    }
+  });
+
+  test("the shards fall and drift away from the facade, never inside the envelope", () => {
+    build();
+    const { N } = boot();
+    const fx = N.fx;
+    for (const t of [0, 389, 485, 700])
+      assert.strictEqual(fx.shardCells(t).length, 0, `shards on screen at t=${t}, outside the storm`);
+    const minZ = (cells) => Math.min(...cells.map((c) => c.z));
+    const maxY = (cells) => Math.max(...cells.map((c) => c.y));
+    const early = fx.shardCells(400), late = fx.shardCells(460), last = fx.shardCells(484);
+    assert.ok(early.length > 0 && late.length > 0 && last.length > 0, "the burst needs shards throughout the window");
+    for (const cells of [early, late, last])
+      for (const c of cells) {
+        assert.strictEqual(N.envelope.isOutside({ x: c.x, y: c.y, z: c.z }), true,
+          `shard ${c.x},${c.y},${c.z} is inside the envelope - a falling shard must clear the camera's shell`);
+        assert.ok(c.y >= 2, `shard ${c.x},${c.y},${c.z} has already hit the street`);
+      }
+    assert.ok(minZ(late) < minZ(early), "the burst never drifts away from the facade - shards need an outward push");
+    assert.ok(maxY(last) < maxY(early), "the shards never fall - the glass must drop toward the street");
+  });
+
+  test("the fx is a deterministic function of t and never touches the shared buffer", () => {
+    build();
+    const { N } = boot();
+    const join = (cells) => cells.map((c) => `${c.x},${c.y},${c.z},${c.id}`).join("|");
+    assert.strictEqual(join(N.fx.shardCells(437)), join(N.fx.shardCells(437)), "the same t must draw the same burst");
+    assert.strictEqual(join(N.fx.paneCells(437)), join(N.fx.paneCells(437)), "the same t must draw the same pane");
+    const runs = N.vox.runs().length, voxCount = N.vox.count, glassCells = N.glass.cells.length;
+    for (let t = 355; t < 500; t += 7) {
+      N.fx.paneCells(t); N.fx.shardCells(t); N.fx.flashCells(t);
+    }
+    assert.strictEqual(N.vox.runs().length, runs, "the fx emitted into the shared buffer - it must stay a overlay layer");
+    assert.strictEqual(N.vox.count, voxCount, "the voxel count changed - the world is not the world after the fx");
+    assert.strictEqual(N.glass.cells.length, glassCells, "the glass line was mutated - there is nothing to restore on the wrap");
+  });
+
+  test("every fx cell wears the pinned shatter id 0xd003", () => {
+    build();
+    const { N } = boot();
+    assert.strictEqual(N.glass.ids.shatter, 0xd003, "the appendix pins the shard id at 0xd003");
+    const all = []
+      .concat(N.fx.paneCells(437), N.fx.flashCells(370), N.fx.shardCells(437));
+    assert.ok(all.length > 0, "the fx needs visible cells to name");
+    for (const c of all)
+      assert.strictEqual(c.id, 0xd003, `fx cell ${c.x},${c.y},${c.z} wears id 0x${Number(c.id).toString(16)} - the appendix says 0xd003`);
   });
 });
 

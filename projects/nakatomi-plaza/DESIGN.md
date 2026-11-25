@@ -47,7 +47,14 @@ before that cut. Timings are derived with `seekTo(id)`, never from a start colum
   glass line; its top is the roof deck, so a camera over the roof is outside by definition.
 - **R14 - HOLD.** Twenty seconds of still frame at the end of the show.
 - **R15 - storm/blast timing.** The blast beat starts at 360; `storm` follows with dur 95;
-  the glass-break shatter lives inside that window and restores on the wrap.
+  the glass-break shatter lives inside that window and restores on the wrap. The window
+  is read from the clock (`clock.start("storm")` and `clock.dur("storm")`), never a
+  hand-kept number: the plan's literal `[360, 360+95)` is a slip, because the storm beat
+  it names opens at 360+30 = 390. The shatter spans **[390, 485)** - the storm beat's own
+  span. The blast flash is a separate window over the blast beat, **[360, 390)**.
+  "Restores on the wrap" is mechanical, not a restore path: the overlay never writes the
+  shared voxel buffer, so every base cell keeps the colour it had before the window
+  opened, and outside the window the overlay answers "nothing".
 - **R16 - fade to black before the loop cut.** Not a hard cut to the next loop.
 - **R17 - two glazing numbers, not one.** The plan's sentence "litFraction between
   0.55 and 0.75 at dusk - most dark, lobby bright" pins one count two ways, which a
@@ -167,6 +174,18 @@ bounding-sphere radius about the envelope centre.
   off the curtain wall, so they wear the pinned `shatter` id (`0xd003`) rather than a
   new allocation; the helo's winch line drops to a panel at deck height and its
   lights glow warm.
+- `NAKATOMIC.fx` - the blast and the storm, the one batch that is not a batch: a
+  function of `t`. Exactly `{ ids, window, flashWindow, pane, paneCells, flashCells,
+  shardCells, at }`, and every cell wears the pinned `shatter` id `0xd003`. The panes
+  are a rectangle of the atrium face, x -6..6, storey bands 5..8, and each one is
+  looked up in `glass.cells` - a mullion cell can not become a broken pane. Shards
+  enter at z -18, already clear of the shaft skirt at -16, drift out along -z by their
+  own reach (3..7 cells) and fall to the terrace line at y 4; they never dip into the
+  podium bands, whose skirt stands further out, so `envelope.isOutside` holds for every
+  cell at every height the burst occupies. The overlay paints in its own `Points` pass
+  over the cloud it replaces, and `scene.stats.fx` reports how many cells that frame
+  drew - which is how the live driver proves the burst reached the pixels rather than
+  only the data.
 - `NAKATOMIC.ensureWorld()` - builds the ground, lobby, dressing and roof batches into
   the shared buffer once and returns `{ ground, lobby, dressing, roof, bounds, voxels,
   buffer }`; a second call returns the same object.
@@ -177,8 +196,10 @@ bounding-sphere radius about the envelope centre.
   renders as white sheets. The fx tasks read colours through this, not a private copy.
 - `NAKATOMIC.scene` - exactly `start rebuild running paused follow stats camera gl fov
   framing setFraming setPose step label togglePause restart domElement`. `stats` is
-  `{ points, voxels, fps }`; `step(dt)` is the one-frame function the rAF loop wraps, so
-  the pixel gates drive the same code path as the page. `label(f)` answers `HOLD_LABEL`
+  `{ points, voxels, fps, fx }`; `step(dt)` is the one-frame function the rAF loop wraps,
+  so the pixel gates drive the same code path as the page. `stats.fx` is the overlay's
+  per-frame cell count (Task 10) - the number the live driver compares against
+  `fx.at(t).length` to prove the burst painted rather than only counted. `label(f)` answers `HOLD_LABEL`
   when `beatAt()` is null, and the camera never comes to rest inside the tower envelope.
 
 Appendix B is the beat table the clock fragment carries verbatim.
@@ -193,7 +214,7 @@ Appendix B is the beat table the clock fragment carries verbatim.
 | mullion | `0x2c3038` | curtain-wall frame |
 | glassDark | `0xd001` | unlit curtain-wall cells, `#2b3243`, the dusk sky in the pane |
 | glass | `0xd002` | lit curtain-wall cells, `#ffcc77`, the warm interior glow |
-| glassShatter | `0xd003` | post-blast shards, `#e8f4ff` (Task 10) |
+| glassShatter | `0xd003` | post-blast shards, `#e8f4ff` - in use since Task 10 |
 | wet | `0x15181f` | wet plaza / asphalt |
 | brake | `0xc050` | police flash bar (scene id, below the glass block) |
 

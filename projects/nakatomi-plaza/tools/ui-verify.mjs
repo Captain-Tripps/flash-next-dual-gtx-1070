@@ -18,11 +18,11 @@ const file = resolve(process.argv[2] || "index.html");
 const dir = dirname(file);
 const url = pathToFileURL(file).href;
 const run = (cmd, opts = {}) => execSync(cmd, { encoding: "utf8", ...opts }).trim();
-// Payload goes to the CLI base64-encoded (--base64), so no shell layer can touch it:
-// PowerShell 5.1 strips embedded double quotes from native-command args, and the clock
-// payload is full of them. Base64 has no characters that any shell can reinterpret.
-const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
-const evalJs = (js) => decode(run(`agent-browser eval -b ${b64(js)}`));
+// Payload goes to the CLI over stdin (--stdin), not in argv: the scene probe is a few
+// KB of JavaScript, and a base64 argv runs into the Windows command-line limit (~8 KB
+// through cmd.exe), so the whole run dies before the page sees a line of it. stdin has
+// no length limit and no shell layer to reinterpret quotes, $ or backslashes.
+const evalJs = (js) => decode(run(`agent-browser eval --stdin`, { input: js }));
 // The CLI JSON-encodes whatever the page returned, so a JSON string returned by the page
 // arrives double-encoded: one parse for the CLI wrapper, one more for the payload.
 const decode = (raw) => {
@@ -42,6 +42,10 @@ const MIN_TOWER_FRAC = 0.08;
 const MIN_TOWER_WIDE = 0.18;   // framing 1 only: the establishing shot
 const MIN_BOX_H = 0.6;         // framing 1 only: the massing spans the frame's height
 const BOX_TOP_MARGIN = 2;      // framing 1 only: sky rows above the roofline
+// The overlay's floor: the cool pixels a burst has to add over a frame the same
+// lens sees without it. Set well below what a real frame measures, so it catches
+// a missing overlay without tracking the last pixel.
+const MIN_OVERLAY_PIXELS = 8;
 // Bars sit below what a real frame measures, not guesses: framing 1 was 21.7% content
 // (towerFrac), a content box 94% of the frame height starting at row 3, and 41 warm
 // pixels; framings 2..4 measured 0.14-0.26 towerFrac with 38-74 warm. Retune these from
@@ -51,6 +55,7 @@ const BOX_TOP_MARGIN = 2;      // framing 1 only: sky rows above the roofline
 const FRAMINGS_SHOTS = [
   [1, "storm", "boulevard-wide"],
   [2, "blast", "tower-close"],
+  [3, "storm", "shatter-lobby"],
 ];
 
 run(`agent-browser open ${JSON.stringify(url)}`);
@@ -111,14 +116,13 @@ const sceneReport = evalJs(`(() => {
   const bg = [10, 12, 18];               // #0a0c12: the page colour and the clear colour
   // Down-scale the live canvas into a small 2D surface and read it once: one
   // getImageData covers the whole frame instead of 75 lucky-pixel guesses.
-  const look = () => {
-    const sw = 96, sh = 54;
+  const look = (sw = 96, sh = 54) => {
     const c = document.createElement("canvas");
     c.width = sw; c.height = sh;
     const g2 = c.getContext("2d", { willReadFrequently: true });
     g2.drawImage(canvas, 0, 0, sw, sh);
     const d = g2.getImageData(0, 0, sw, sh).data;
-    let tower = 0, warm = 0;
+    let tower = 0, warm = 0, cool = 0;
     let r0 = sh, r1 = -1, c0 = sw, c1 = -1;
     const total = sw * sh;
     // One linear index over the scan, and the row/column derived from it. The box is
@@ -139,6 +143,9 @@ const sceneReport = evalJs(`(() => {
       // A warm pixel: the lobby/glass glow is amber, and even when downscaling
       // blends it with the dark glass beside it, red still beats blue by a margin.
       if (d[i] > 110 && d[i] > d[i + 2] + 25) warm++;
+      // A bright, cool pixel: the only thing in the show that pale and cold - the
+      // dusk palette is warm amber and deep blue-grey, so this is the shatter id.
+      if (d[i] > 90 && d[i + 1] > 100 && d[i + 2] > 120 && d[i + 2] >= d[i] - 6) cool++;
     }
     // The content bounding box, in scan rows/columns: what the framing actually
     // contains. A wide shot whose content touches the top row is a tower clipped at
@@ -148,7 +155,7 @@ const sceneReport = evalJs(`(() => {
     const boxH = r1 >= r0 ? (r1 - r0 + 1) / sh : 0;
     const boxW = c1 >= c0 ? (c1 - c0 + 1) / sw : 0;
     return {
-      tower, warm, total, towerFrac: tower / total, warmFrac: warm / total,
+      tower, warm, cool, total, towerFrac: tower / total, warmFrac: warm / total,
       boxH, boxW, boxTop: r0, boxBottom: r1, boxLeft: c0, boxRight: c1,
     };
   };
@@ -169,6 +176,43 @@ const sceneReport = evalJs(`(() => {
       pixels: look(),
     });
   }
+
+  const fx = (function probeFx() {
+    // The overlay's real test: same framing, same camera, two clock positions.
+    // The rig is not per-beat yet (Task 12), so setFraming pins the lens and the
+    // only difference between the two frames is what the fx drew. A cool-pixel
+    // delta is therefore the burst reaching the screen, not a counter reading.
+    // The break lives on the atrium face at storey bands 5..8, so the framing that
+    // can see it is the lobby-level pass, not the mid-shaft close-up.
+    N.scene.setFraming(3);
+    const seekTime = (target) => {
+      let id = N.clock.order[0];
+      for (const b of N.clock.BEATS) if (b.start <= target) id = b.id;
+      N.clock.seekTo(id);
+      let guard = 0;
+      while (N.clock.t < target - 1e-9 && guard++ < 40000) N.clock.tick(0.05);
+      return N.clock.t;
+    };
+    const snap = (target) => {
+      const t = seekTime(target);
+      const fr = N.scene.step(0);              // the frame has to be painted at this t
+      // The overlay pixels are small splats, so the probe scans at 240x135 rather
+      // than the 96x54 the framings use: a splat that covers a third of a scan
+      // pixel in the coarse scan is a whole one in the fine scan.
+      const px = look(240, 135);
+      return { t: fr.t, cool: px.cool, drawn: N.scene.stats.fx, cells: N.fx.at(fr.t).length };
+    };
+    // one frame before either window opens, and instants inside each: the overlay
+    // is on the clock's terms, and only the clock's terms, all the way to the pixel
+    const quiet = snap(N.fx.flashWindow[0] - 1);       // 359: before the blast beat
+    const endQ = snap(N.fx.window[1]);                 // the storm's half-open end
+    const mid = snap(N.fx.window[0] + 47);             // mid-storm: panes and shards
+    const flash = snap(N.fx.flashWindow[0] + 5);       // inside the blast beat
+    return {
+      quiet, endQ, mid, flash,
+      delta: mid.cool - quiet.cool, flashDelta: flash.cool - quiet.cool,
+    };
+  })();
 
   // The fade has to track clock.fade.black, in both directions, on the element that
   // actually does the fading. Both the inline value the page wrote (exact) and the
@@ -199,6 +243,7 @@ const sceneReport = evalJs(`(() => {
     bufferVoxels: N.vox.count,
     splatPoints: N.splats(N.vox.buffer()).points.length,
     holdLabel: N.clock.HOLD_LABEL,
+    fx,
     views,
     fadeMid,
     fadeBlack,
@@ -269,6 +314,25 @@ if (!sceneReport.fatal) {
     `the fade element reaches full black, got ${JSON.stringify(sceneReport.fadeBlack)}`);
   check(sceneReport.fadeMid.label === sceneReport.holdLabel,
     `the HUD shows the hold label through the hold, got ${JSON.stringify(sceneReport.fadeMid.label)}`);
+
+  // --- the blast/storm overlay, asserted end-to-end -------------------------
+  // The overlay is a function of t, so the proof has two halves: the data never
+  // paints outside its window, and inside the window the shards and the flash
+  // actually change pixels. Same framing, same lens for every pair, so a cool
+  // pixel can only come from the overlay.
+  for (const s of [sceneReport.fx.quiet, sceneReport.fx.endQ])
+    check(s.cells === 0 && s.drawn === 0,
+      `the overlay paints at t=${s.t}, outside its window (${s.cells} cells, ${s.drawn} drawn)`);
+  for (const s of [sceneReport.fx.mid, sceneReport.fx.flash]) {
+    check(s.cells > 0 && s.drawn === s.cells,
+      `t=${s.t}: the overlay drew ${s.drawn} of ${s.cells} cells`);
+  }
+  check(sceneReport.fx.delta >= MIN_OVERLAY_PIXELS,
+    `the shard burst reaches the screen at mid-storm: ${sceneReport.fx.delta} cool pixels over the quiet frame `
+    + `(quiet ${sceneReport.fx.quiet.cool}, mid ${sceneReport.fx.mid.cool})`);
+  check(sceneReport.fx.flashDelta >= MIN_OVERLAY_PIXELS,
+    `the blast flash reaches the screen: ${sceneReport.fx.flashDelta} cool pixels over the quiet frame `
+    + `(quiet ${sceneReport.fx.quiet.cool}, flash ${sceneReport.fx.flash.cool})`);
 }
 
 // --- screenshots for review: two framings, both mid-show, no fade overlay. -----
