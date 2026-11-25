@@ -83,6 +83,7 @@ way the real plaza does. Street level (`streetY`) is y = 0.
 | Sunken garage lot | -15..15 | -31..-21 | floor y = -6, retaining walls y = -5..-1 |
 | Sunken driveway (ditch) + bridge | -22..22 | -20..-18 | floor y = -3, walls y = -2..-1, bridge deck y = 0 |
 | Reflecting pool | -5..5 | 25..27 | basin band y = -1, water flush y = 0 |
+| Arrival court (dressing lane) | -20..20 | 20..24 | vehicles y = 0..1, marquee posts y = 0..2, beam y = 3 |
 | Palm grove (12) | 24/30/36 and mirrored | -25 and 25 | trunk y = 0..3, canopy y = 4 |
 | Distant skyline (3 walls) | -55..54 | z = 44, 56, 70 | full-width splices, 6 + 12 + 8 bands |
 | Podium (arcade + lobby) | -20..20 | -17..17 | 0..3 (arcade rows 0..2, deck slab row 3) |
@@ -148,9 +149,18 @@ bounding-sphere radius about the envelope centre.
   ground batch. The glow uses the glass's own lit id, one cell behind the glass line
   (`glass.cells` is checked at build time, and the tests check the tree, glow and
   fountain cells against `envelope.isOutside`).
-- `NAKATOMIC.ensureWorld()` - builds the ground and lobby batches into the shared buffer
-  once and returns `{ ground, lobby, bounds, voxels, buffer }`; a second call returns the
-  same object.
+- `NAKATOMIC.plazaDressing()` - the arrival-court batch, cached once: exactly
+  `{ voxels, batchVox, countVox, ids, lane, vehicleCells, marqueeCells, lightCells,
+  vehicleCount, marqueeCount, lightCount, vehicleMinY, marqueeZ, beamY }`. It is the
+  mirror of the lobby batch on the camera side of the contract: every cell passes
+  `envelope.isOutside`, stands on the block (`isOnGround`), and re-claims nothing the
+  ground batch or the glass line owns - all three are checked in the tests. The lane
+  is `{ x -20..20, z 20..24 }`: the court outside the 2 m skirt, clear of the pool,
+  the kerbs and the palm grove. The lamps and marquee banner glow with the glass's
+  own lit id.
+- `NAKATOMIC.ensureWorld()` - builds the ground, lobby and dressing batches into the
+  shared buffer once and returns `{ ground, lobby, dressing, bounds, voxels, buffer }`;
+  a second call returns the same object.
 - `NAKATOMIC.colorLinear(hex)` - the palette's sRGB hex in the renderer's working space:
   three 0..1 linear channels. `#ffcc77` goes out as `1, 0.6039, 0.1845`, `#ffffff` as
   `1,1,1`. One test runs every palette entry through it, because feeding the raw 0-255

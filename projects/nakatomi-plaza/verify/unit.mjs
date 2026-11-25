@@ -802,6 +802,124 @@ describe("lobby, fountain, tree", () => {
   });
 });
 
+// --- Task 8: plaza dressings ----------------------------------------------
+// The dressings are the mirror image of Task 7: the lobby stuff lives *inside* the
+// envelope and the camera sees it through glass, but everything in this batch lives
+// *outside* it, on the street, because it is a thing the camera may sit beside.
+// Two rules from the plan: every dressing volume is on ground and not inside the
+// envelope; and the arrival lanes must not collide with the palm grove.
+describe("plaza dressing", () => {
+  // Sandbox arrays carry the sandbox prototype, so pull plain values out by index
+  // before iterating them in host code.
+  const palmColumns = (N) => N._plan.PALMS.map((p) => [p[0], p[1]]);
+
+  test("every dressing volume stands on the ground, outside the envelope, and never re-claims one", () => {
+    build();
+    const { N } = boot();
+    const dressing = N.plazaDressing();
+    const g = N.ground();
+    const street = N._plan.STREET;
+    const all = dressing.vehicleCells
+      .concat(dressing.marqueeCells, dressing.lightCells);
+    assert.ok(all.length > 0, "the plaza has dressings at all");
+    // The ground batch as a cell set, expanded from its runs.
+    const groundCells = new Set();
+    for (let i = 0; i < g.voxels.length; i++) {
+      const r = g.voxels[i];
+      for (let k = 0; k < r.len; k++) groundCells.add(`${r.x + k}|${r.y}|${r.z}`);
+    }
+    const glassPlane = new Set(N.glass.cells.map((c) => `${c.x},${c.y},${c.z}`));
+    for (const c of all) {
+      assert.strictEqual(N.envelope.isOutside({ x: c.x, y: c.y, z: c.z }), true,
+        `dressing cell ${c.x},${c.y},${c.z} is not outside the envelope - the camera could not sit clear of it`);
+      assert.strictEqual(N.isOnGround(c.x, c.z), true,
+        `dressing cell ${c.x},${c.y},${c.z} is off the block`);
+      assert.ok(c.y >= street, `dressing cell ${c.x},${c.y},${c.z} is below the street band`);
+      assert.strictEqual(groundCells.has(`${c.x},${c.y},${c.z}`), false,
+        `dressing cell ${c.x},${c.y},${c.z} re-claims a ground cell`);
+      assert.strictEqual(glassPlane.has(`${c.x},${c.y},${c.z}`), false,
+        `dressing cell ${c.x},${c.y},${c.z} sits on the glass line`);
+    }
+    assert.strictEqual(dressing.vehicleMinY, street, "the vehicles do not stand on the street band");
+  });
+
+  test("arrival lanes clear palms", () => {
+    build();
+    const { N } = boot();
+    const dressing = N.plazaDressing();
+    const lane = dressing.lane;
+    const overlaps = (r, cx0, cx1, cz0, cz1) =>
+      r.x0 <= cx1 && cx0 <= r.x1 && r.z0 <= cz1 && cz0 <= r.z1;
+    for (const [px, pz] of palmColumns(N))
+      // a palm owns its trunk column and the 3 x 3 canopy one band up
+      assert.strictEqual(overlaps(lane, px - 1, px + 1, pz - 1, pz + 1), false,
+        `the arrival lane cuts through the palm at ${px},${pz}`);
+    const pool = N._plan.POOL;
+    assert.strictEqual(overlaps(lane, pool.x0, pool.x1, pool.z0, pool.z1), false,
+      "the arrival lane blocks the reflecting pool");
+    for (const cx of N._plan.KERB_X.map((v) => v))
+      assert.strictEqual(overlaps(lane, cx, cx + 1, -999, 999), false,
+        "the arrival lane drives onto the boulevard kerbs");
+    // and the vehicles actually park inside that lane
+    for (const c of dressing.vehicleCells)
+      assert.ok(c.x >= lane.x0 && c.x <= lane.x1 && c.z >= lane.z0 && c.z <= lane.z1,
+        `vehicle cell ${c.x},${c.y},${c.z} is outside the arrival lane`);
+  });
+
+  test("the marquee stands its posts on the ground and spans the lane overhead", () => {
+    build();
+    const { N } = boot();
+    const dressing = N.plazaDressing();
+    assert.ok(dressing.marqueeCells.length > 0, "there is no marquee");
+    const street = N._plan.STREET;
+    let baseY = Infinity, topY = -Infinity, xs = [];
+    const topBand = new Set();
+    for (const c of dressing.marqueeCells) {
+      baseY = Math.min(baseY, c.y);
+      topY = Math.max(topY, c.y);
+    }
+    for (const c of dressing.marqueeCells) if (c.y === topY) topBand.add(c.x);
+    for (const x of topBand) xs.push(x);
+    xs.sort((a, b) => a - b);
+    assert.strictEqual(baseY, street, "the marquee posts do not touch the ground");
+    assert.ok(topY > street + 1, "the marquee beam sits low enough to block the lane view");
+    const span = xs[xs.length - 1] - xs[0];
+    assert.ok(span >= 16, `the beam spans only ${span} cells - too short to cross the entrance`);
+  });
+
+  test("the dressings light up warm", () => {
+    build();
+    const { N } = boot();
+    const dressing = N.plazaDressing();
+    assert.ok(dressing.lightCells.length > 0, "no lights on the dressings");
+    for (const c of dressing.lightCells)
+      assert.strictEqual(N.glass.lit(c.id), true,
+        `light cell ${c.x},${c.y},${c.z} is not a warm id`);
+    // both kinds: vehicle lamps at the cars (low band) and the marquee banner (high)
+    assert.ok(dressing.lightCells.some((c) => c.y <= 1), "no vehicle lamps");
+    assert.ok(dressing.lightCells.some((c) => c.y >= 2), "no marquee banner lights");
+  });
+
+  test("the dressing batch claims each cell exactly once, and caches its batch", () => {
+    build();
+    const { N } = boot();
+    const dressing = N.plazaDressing();
+    const parts = dressing.vehicleCount + dressing.marqueeCount + dressing.lightCount;
+    assert.strictEqual(dressing.countVox, parts,
+      `occupancy holds ${dressing.countVox} cells but the parts add up to ${parts} - a cell is claimed twice`);
+    let emissions = 0;
+    const orig = N.vox.addRun;
+    N.vox.addRun = (...a) => { emissions++; return orig(...a); };
+    const runs = N.vox.runs().length, voxCount = N.vox.count;
+    const second = N.plazaDressing();
+    N.vox.addRun = orig;
+    assert.strictEqual(emissions, 0, "the second call must not re-emit into the shared buffer");
+    assert.strictEqual(second, dressing, "the cached batch is the same object");
+    assert.strictEqual(N.vox.runs().length, runs, "run count unchanged");
+    assert.strictEqual(N.vox.count, voxCount, "voxel count unchanged");
+  });
+});
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   await run(process.argv[2] || null);
 }

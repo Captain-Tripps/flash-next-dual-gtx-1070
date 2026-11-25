@@ -37,17 +37,20 @@ Object.assign(NAKATOMIC, (() => {
     return { points, colors };
   };
 
-  // --- one world, built once. Fragments 03/04 emitted at boot; the ground and
-  // lobby batches are on demand, so this is the place that pulls them in. A second
-  // call returns the cached world: the render loop must never rebuild per frame. --
+  // --- one world, built once. Fragments 03/04 emitted at boot; the ground,
+  // lobby and dressing batches are on demand, so this is the place that pulls
+  // them in. A second call returns the cached world: the render loop must never
+  // rebuild the plaza per frame. --------------------------------------------
   let world = null;
   const ensureWorld = () => {
     if (world === null) {
       const ground = NAKATOMIC.ground();
       const lobby = NAKATOMIC.lobbyWorld();
+      const dressing = NAKATOMIC.plazaDressing();
       world = {
         ground,
         lobby,
+        dressing,
         bounds: vox.bounds(),
         voxels: vox.count,
         buffer: vox.buffer(),
