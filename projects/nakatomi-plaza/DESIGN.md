@@ -97,6 +97,17 @@ each face, corner posts on every row so the two face rules agree at the corner -
 and glass in the bays between. The facade ring stays fully claimed and no cell is
 claimed by two palette ids.
 
+Lobby, fountain, tree (Task 7): everything in the arcade band, and none of it on the
+glass line or the deck slab. The lobby's interior rectangle is the podium footprint
+shrunk by one cell - `-19..19` by `-16..16`, bands `0..2`, with the deck slab at y = 3
+over it - and the lit lobby wall sits on that rectangle's edge, one cell behind the
+curtain wall, so the arcade glow has depth instead of being a bright sheet on the glass
+plane. The tree stands at `(8, 14)`: a 5x5 foot at y = 0, a 3x3 one band up, and the
+star cell at y = 2, all of it under the deck. The fountain reports the ground's water
+(the reflecting pool at `-5..5` / `25..27`, 33 voxels at the water line) and puts its
+own coping at y = 1, stem and basin at y = 2 and the jet at y = 3 - none of it re-claims
+a water cell.
+
 Envelope (R12/13): the outer box is the podium footprint plus a 2 m skirt,
 `min = (-22, 0, -19)` to `max = (22, 46, 19)`, and its top is the roof deck, which
 makes a camera over the roof outside by definition. But `isOutside` is not that
@@ -129,8 +140,17 @@ bounding-sphere radius about the envelope centre.
 - `NAKATOMIC.rig` - `keys(id)`, `sample(id, t)`; one continuous take, fov clamped 35..60.
 - `NAKATOMIC.splats(buffer)` - the page-side twin of `tools/jsp.mjs`: `{ points, colors }`,
   one splat per voxel, in run order. Asserted against the Node tool, so both sides match.
-- `NAKATOMIC.ensureWorld()` - builds the ground batch into the shared buffer once and
-  returns `{ ground, bounds, voxels, buffer }`; a second call returns the same object.
+- `NAKATOMIC.lobbyWorld()` - the arcade band, cached once, with its own occupancy map:
+  exactly `{ voxels, batchVox, countVox, ids, floorCount, glowCount, treeCount,
+  lightsCount, starCount, fountainCount, treeCells, treeMinY, treeTopY, starCell,
+  glowCells, fountainCells, waterCells, waterBand, waterFootprint }`. `countVox` is the
+  sum of the parts; `waterCells === ground().waterVolume` because the pool belongs to the
+  ground batch. The glow uses the glass's own lit id, one cell behind the glass line
+  (`glass.cells` is checked at build time, and the tests check the tree, glow and
+  fountain cells against `envelope.isOutside`).
+- `NAKATOMIC.ensureWorld()` - builds the ground and lobby batches into the shared buffer
+  once and returns `{ ground, lobby, bounds, voxels, buffer }`; a second call returns the
+  same object.
 - `NAKATOMIC.colorLinear(hex)` - the palette's sRGB hex in the renderer's working space:
   three 0..1 linear channels. `#ffcc77` goes out as `1, 0.6039, 0.1845`, `#ffffff` as
   `1,1,1`. One test runs every palette entry through it, because feeding the raw 0-255
@@ -163,7 +183,7 @@ one call to `palette.id(hex)` or `palette.define(id, hex)` per material, and the
 ids are auto-allocated from `0x0100` up. Two of the sky rows are not palette entries at
 all: dusk sits in the renderer's clear colour and `FogExp2`, both `#0a0c12`, and the far
 city's window bands carry the warm (`#8a6a4a`). Treat this appendix as the intent, and
-read `src/0[3-5]*.txt` for what is in the buffer.
+read `src/0[3-7]*.txt` for what is in the buffer.
 
 The gate test in Task 2 fails if any scene id lands at `0xe001` or above. The glass block
 runs `0xd001` to `0xdfff`; anything at `0xe001` and up is reserved and never used by

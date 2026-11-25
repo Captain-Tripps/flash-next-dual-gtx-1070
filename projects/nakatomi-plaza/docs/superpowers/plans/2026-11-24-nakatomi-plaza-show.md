@@ -276,8 +276,10 @@ wiring moves ahead of the content tasks so Tasks 7-12 land visibly.
 - Consumes: `envelope.isOutside` (tree must NOT be outside - it is inside the envelope,
   behind glass), `ground().waterVolume`, `glass.lit`.
 
-- [ ] Steps 1-5: failing tests (tree is a voxel volume inside the envelope and on ground;
-  fountain water voxels coincide with `waterVolume`); implement; PASS; commit.
+- [x] Steps 1-5: failing tests (tree is a voxel volume inside the envelope and on ground;
+  fountain water voxels coincide with `waterVolume`); implement; PASS; commit. The live
+  pixel gate (`tools/ui-verify.mjs`) is part of Step 5 from Task 7.5 onward: the lobby,
+  tree and fountain have to be in the end-state frame, not just in the buffer.
 
 ### Task 8: Plaza dressings - taxis, limo, tree truck, lights, marquee
 

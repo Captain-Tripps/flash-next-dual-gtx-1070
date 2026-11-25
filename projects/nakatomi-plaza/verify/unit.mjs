@@ -688,6 +688,120 @@ describe("scene assembly", () => {
   });
 });
 
+// --- Task 7: the lobby, the fountain and the Christmas tree --------------
+// These stand behind the glass line, so the one thing every test checks is that
+// the camera's own contract agrees with them: the tree is NOT a point the
+// envelope allows (envelope.isOutside is false), the glow is glass the camera
+// sees from outside, and the fountain never re-claims the pool's water.
+describe("lobby, fountain, tree", () => {
+  test("the Christmas tree stands inside the glass line, on ground", () => {
+    build();
+    const { N } = boot();
+    const lobby = N.lobbyWorld();
+    const g = N.ground();
+    const P = N.tower.sections.podium;
+    assert.ok(lobby.treeCells.length > 0, "the tree is a volume, not one cell");
+    const e = N.envelope;
+    for (const c of lobby.treeCells) {
+      // The brief's own wording: a tree voxel is NOT outside the envelope. If it
+      // were, the camera would be allowed to sit inside the tree.
+      assert.strictEqual(e.isOutside({ x: c.x, y: c.y, z: c.z }), false,
+        `tree cell ${c.x},${c.y},${c.z} is outside the envelope`);
+      assert.ok(c.y >= g.streetY, `tree cell ${c.x},${c.y},${c.z} is not on the ground band`);
+      assert.ok(c.x >= P.x0 && c.x <= P.x1 && c.z >= P.z0 && c.z <= P.z1,
+        `tree cell ${c.x},${c.y},${c.z} is outside the podium footprint`);
+    }
+    // Standing on the street band, and under the lobby deck - the podium's top row
+    // is a concrete slab, so a tree that reached it would claim a tower cell.
+    assert.strictEqual(lobby.treeMinY, g.streetY, "the tree's base is on the ground band");
+    assert.ok(lobby.treeTopY <= P.y1 - 1, `tree top ${lobby.treeTopY} reaches the podium deck at ${P.y1}`);
+    // The tree tapers: every band is no wider than the one under it.
+    const bands = new Map();
+    for (const c of lobby.treeCells) bands.set(c.y, (bands.get(c.y) || 0) + 1);
+    const widths = [...bands.keys()].sort((a, b) => a - b).map((y) => bands.get(y));
+    assert.ok(widths.every((w, i) => i === 0 || w <= widths[i - 1]), `tree bands do not taper: ${widths.join("/")}`);
+  });
+
+  test("the lobby glow is glass, seen from outside, but not the glass line itself", () => {
+    build();
+    const { N } = boot();
+    const lobby = N.lobbyWorld();
+    assert.ok(lobby.glowCells.length > 0, "the lobby interior glows");
+    const glassPlane = new Set(N.glass.cells.map((c) => `${c.x},${c.y},${c.z}`));
+    for (const c of lobby.glowCells) {
+      assert.strictEqual(N.glass.lit(c.id), true, `glow cell ${c.x},${c.y},${c.z} is not a lit glass id`);
+      assert.strictEqual(glassPlane.has(`${c.x},${c.y},${c.z}`), false,
+        `glow cell ${c.x},${c.y},${c.z} sits on the glass line itself`);
+      assert.strictEqual(N.envelope.isOutside({ x: c.x, y: c.y, z: c.z }), false,
+        `glow cell ${c.x},${c.y},${c.z} is outside the envelope`);
+    }
+  });
+
+  test("the fountain's water is the ground contract's water", () => {
+    build();
+    const { N } = boot();
+    const lobby = N.lobbyWorld();
+    const g = N.ground();
+    const pool = N._plan.POOL;
+    assert.strictEqual(lobby.waterCells, g.waterVolume,
+      `the fountain counts ${lobby.waterCells} water voxels, the ground contract is ${g.waterVolume}`);
+    // Same footprint, read as a join so the sandbox prototype never enters the way.
+    const cells = new Set();
+    for (let x = pool.x0; x <= pool.x1; x++)
+      for (let z = pool.z0; z <= pool.z1; z++) cells.add(`${x},${z}`);
+    assert.strictEqual(lobby.waterFootprint.slice().sort().join("|"),
+      [...cells].sort().join("|"), "the fountain basin is the pool the ground carved");
+  });
+
+  test("the fountain stands above the water line, and never re-claims it", () => {
+    build();
+    const { N } = boot();
+    const lobby = N.lobbyWorld();
+    const pool = N._plan.POOL;
+    const street = N._plan.STREET;
+    assert.ok(lobby.fountainCells.length > 0, "the fountain has a volume above the water");
+    const water = new Set();
+    for (let x = pool.x0; x <= pool.x1; x++)
+      for (let z = pool.z0; z <= pool.z1; z++) water.add(`${x},${z}`);
+    for (const c of lobby.fountainCells) {
+      assert.ok(c.y > street, `fountain cell ${c.x},${c.y},${c.z} is at or below the water line`);
+      assert.strictEqual(water.has(`${c.x},${c.z}`), true,
+        `fountain cell ${c.x},${c.y},${c.z} is outside the basin it should stand in`);
+    }
+    // The water itself belongs to the ground batch: this fragment emits none of it.
+    // The water id is read straight out of that batch, so the check can't drift
+    // from whichever hex the ground happens to pave the basin with.
+    const g = N.ground();
+    const waterId = g.voxels.find((r) => r.y === street && water.has(`${r.x},${r.z}`)).id;
+    for (const c of lobby.fountainCells)
+      assert.notStrictEqual(c.id, waterId,
+        `fountain cell ${c.x},${c.y},${c.z} re-claims water`);
+    assert.ok(new Set(lobby.fountainCells.map((c) => c.id)).size > 0,
+      "the fountain structure has its own material");
+  });
+
+  test("the lobby batch claims each cell exactly once", () => {
+    build();
+    const { N } = boot();
+    const lobby = N.lobbyWorld();
+    const parts = lobby.floorCount + lobby.glowCount + lobby.treeCount +
+      lobby.lightsCount + lobby.starCount + lobby.fountainCount;
+    assert.strictEqual(lobby.countVox, parts,
+      `occupancy holds ${lobby.countVox} cells but the parts add up to ${parts} - a cell is claimed twice`);
+    // Idempotent, like ground(): a rebuild must not push the batch through addRun again.
+    let emissions = 0;
+    const orig = N.vox.addRun;
+    N.vox.addRun = (...a) => { emissions++; return orig(...a); };
+    const runs = N.vox.runs().length, voxCount = N.vox.count;
+    const second = N.lobbyWorld();
+    N.vox.addRun = orig;
+    assert.strictEqual(emissions, 0, "the second call must not re-emit into the shared buffer");
+    assert.strictEqual(second, lobby, "the cached batch is the same object");
+    assert.strictEqual(N.vox.runs().length, runs, "run count unchanged");
+    assert.strictEqual(N.vox.count, voxCount, "voxel count unchanged");
+  });
+});
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   await run(process.argv[2] || null);
 }

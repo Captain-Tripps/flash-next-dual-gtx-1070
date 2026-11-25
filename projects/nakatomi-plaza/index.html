@@ -661,6 +661,175 @@ Object.assign(NAKATOMIC, (() => {
   return { clock };
 })());
 
+// Fragment 07: the lobby, the fountain and the Christmas tree.
+//
+// All three sit behind the curtain wall, in the podium's arcade band - the band
+// the camera only ever sees through glass (R12/R13 keep the lens outside the
+// envelope). So the shape of this batch is decided by two rules:
+//
+//   1. Nothing here may claim a cell the tower or the curtain wall already owns.
+//      The podium's top row (y = P.y1) is a concrete deck slab, and the podium's
+//      face rings (x = +-20, z = +-17) are mullions and bays, so everything below
+//      stays in the interior rectangle and below the deck.
+//   2. The fountain's water is the ground's water. The ground batch already
+//      carved the reflecting pool (POOL, basin band + water band) and counts it
+//      as waterVolume; this fragment reports that volume and puts the fountain's
+//      rim, stem and spray above the water line instead, never re-claiming it.
+//
+// What the camera reads: warm glass at the arcade (Task 4's dusk rule), and
+// behind it a lit interior - the lobby's own walls and downlights - so the glow
+// has depth instead of being one bright sheet on the glass plane. The tree is
+// dark green with one bright star on top, which is how a Christmas tree reads at
+// dusk: silhouette first, then the star.
+//
+// The batch reports per-part counts, and its own occupancy map is what makes
+// `countVox` the sum of the parts: a cell claimed by two materials throws.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const palette = NAKATOMIC.palette;
+  const plan = NAKATOMIC._plan;
+  const P = NAKATOMIC.tower.sections.podium;
+  const POOL = plan.POOL;
+  const STREET = plan.STREET;
+  const idGlow = NAKATOMIC.glass.ids.lit;   // the lobby glows with the glass's own warm
+
+  // --- materials, all auto-allocated from the scene range ---
+  const ids = {
+    floor: palette.id("#3a332c"),   // lobby floor, dark marble under the glow
+    wall: palette.id("#6a5c4c"),    // lobby interior wall, warm stone
+    bough: palette.id("#1c3a24"),   // the tree
+    light: palette.id("#fff2c0"),   // downlights, and the star on the tree
+    rim: palette.id("#8a8d94"),     // fountain coping and stem
+    spray: palette.id("#7fb2d8"),   // the jet, above the water line
+  };
+
+  // --- where things stand, as one fact per feature ---
+  const IL = { x0: P.x0 + 1, x1: P.x1 - 1, z0: P.z0 + 1, z1: P.z1 - 1 };  // interior, clear of the face rings
+  const TC = { x: 8, z: 14 };          // the tree, in front of the lobby's front glass
+  const TREE_FOOT = 2;                 // 5 x 5 at the base, 3 x 3 one band up
+  const GLOW_BANDS = [STREET + 1, STREET + 2];   // the arcade is three bands tall: floor, wall, wall
+  const LIGHT_ROW = [-15, -5, 5, 15];
+  const LIGHT_COL = [-10, 0, 10];
+
+  // --- the batch, with its own occupancy map: a cell may only have one material ---
+  const insidePodium = (x, z) => x >= IL.x0 && x <= IL.x1 && z >= IL.z0 && z <= IL.z1;
+  const cells = new Map();
+  const runs = [];
+  const parts = { floor: [], wall: [], bough: [], light: [], star: [], rim: [], spray: [] };
+  const claim = (x, y, z, id, part) => {
+    const key = `${x}|${y}|${z}`;
+    const seen = cells.get(key);
+    if (seen !== undefined) {
+      if (seen !== id) throw new Error(`lobby cell ${key} claimed by two palette ids`);
+      return;
+    }
+    if (insidePodium(x, z) && y >= P.y1) throw new Error(`lobby cell ${key} reaches the podium deck at y = ${P.y1}`);
+    cells.set(key, id);
+    parts[part].push({ x, y, z, id });
+  };
+  const put = (x, y, z, len, id, part) => {
+    if (len <= 0) return;
+    for (let i = 0; i < len; i++) claim(x + i, y, z, id, part);
+    vox.addRun(x, y, z, len, id);
+    runs.push({ x, y, z, len, id, part });
+  };
+  const one = (x, y, z, id, part) => put(x, y, z, 1, id, part);
+  const rect = (x0, x1, y, z0, z1, id, part) => {
+    for (let z = z0; z <= z1; z++) put(x0, y, z, x1 - x0 + 1, id, part);
+  };
+  // The edge of a rectangle, as one run per row. The lobby's lit wall sits on the
+  // interior rectangle's edge - one cell behind the curtain wall - and the
+  // fountain's coping sits on the pool's edge, above the water line.
+  const ring = (r, y, id, part) => {
+    put(r.x0, y, r.z0, r.x1 - r.x0 + 1, id, part);
+    put(r.x0, y, r.z1, r.x1 - r.x0 + 1, id, part);
+    for (let z = r.z0 + 1; z <= r.z1 - 1; z++) {
+      put(r.x0, y, z, 1, id, part);
+      put(r.x1, y, z, 1, id, part);
+    }
+  };
+
+  const emit = () => {
+    // ---- the lobby floor, cut around the tree's foot ----
+    const hole = { x0: TC.x - TREE_FOOT, x1: TC.x + TREE_FOOT, z0: TC.z - TREE_FOOT, z1: TC.z + TREE_FOOT };
+    for (let z = IL.z0; z <= IL.z1; z++) {
+      let x = IL.x0;
+      if (z >= hole.z0 && z <= hole.z1) {
+        if (hole.x0 > x) put(x, STREET, z, hole.x0 - x, ids.floor, "floor");
+        x = Math.max(x, hole.x1 + 1);
+      }
+      if (x <= IL.x1) put(x, STREET, z, IL.x1 - x + 1, ids.floor, "floor");
+    }
+
+    // ---- the tree: silhouette bands, then the star ----
+    for (let y = STREET; y <= STREET + 1; y++) {
+      const h = TREE_FOOT - (y - STREET);
+      rect(TC.x - h, TC.x + h, y, TC.z - h, TC.z + h, ids.bough, "bough");
+    }
+    one(TC.x, STREET + 2, TC.z, ids.light, "star");
+
+    // ---- the lobby's lit walls, one cell behind the glass line ----
+    for (const y of GLOW_BANDS) ring(IL, y, idGlow, "wall");
+
+    // ---- the lobby's downlights, at the ceiling band ----
+    for (const lx of LIGHT_ROW)
+      for (const lz of LIGHT_COL) one(lx, STREET + 2, lz, ids.light, "light");
+
+    // ---- the fountain, above the water the ground already carved ----
+    ring(POOL, STREET + 1, ids.rim, "rim");
+    const cx = (POOL.x0 + POOL.x1) >> 1, cz = (POOL.z0 + POOL.z1) >> 1;
+    one(cx, STREET + 1, cz, ids.rim, "rim");                                  // stem
+    for (let x = cx - 1; x <= cx + 1; x++)
+      for (let z = cz - 1; z <= cz + 1; z++)
+        if (x !== cx || z !== cz) one(x, STREET + 2, z, ids.rim, "rim");       // upper basin
+    for (let y = STREET + 2; y <= STREET + 3; y++) one(cx, y, cz, ids.spray, "spray");
+
+    // ---- the numbers, and the cross-contract checks ------------------------
+    // The curtain wall owns the facade ring; a lobby cell may never sit on it.
+    const glassPlane = new Set(NAKATOMIC.glass.cells.map((c) => `${c.x}|${c.y}|${c.z}`));
+    for (const key of cells.keys())
+      if (glassPlane.has(key)) throw new Error(`lobby cell ${key} sits on the glass line`);
+
+    const footprint = [];
+    for (let x = POOL.x0; x <= POOL.x1; x++)
+      for (let z = POOL.z0; z <= POOL.z1; z++) footprint.push(`${x},${z}`);
+
+    return {
+      voxels: runs.slice(),
+      batchVox: runs.length,
+      countVox: cells.size,
+      ids,
+      floorCount: parts.floor.length,
+      glowCount: parts.wall.length,
+      treeCount: parts.bough.length,
+      lightsCount: parts.light.length,
+      starCount: parts.star.length,
+      fountainCount: parts.rim.length + parts.spray.length,
+      treeCells: parts.bough.slice(),
+      treeMinY: STREET,
+      treeTopY: STREET + 1,
+      starCell: parts.star[0],
+      glowCells: parts.wall.slice(),
+      fountainCells: parts.rim.concat(parts.spray),
+      // the pool is the ground's, so its water is reported, not re-claimed
+      waterCells: footprint.length,
+      waterBand: STREET,
+      waterFootprint: footprint,
+    };
+  };
+
+  // One batch, once: like the ground, a rebuild would push the same cells through
+  // addRun again while the coalesced buffer stayed put.
+  let cached = null;
+  const lobbyWorld = () => { if (cached === null) cached = emit(); return cached; };
+
+  return {
+    lobbyWorld,
+    lobby: { interior: IL, tree: TC, pool: POOL, glowBands: [...GLOW_BANDS] },
+  };
+})());
+
 // Fragment 99: the render rig - world to screen. First pixels.
 //
 // R18 said the wiring belonged in Task 13; Jon pulled it forward as Task 7.5 on
@@ -700,15 +869,17 @@ Object.assign(NAKATOMIC, (() => {
     return { points, colors };
   };
 
-  // --- one world, built once. Fragments 03/04 emitted at boot; the ground batch
-  // is on demand, so this is the place that pulls it in. A second call returns the
-  // cached world: the render loop must never rebuild the plaza per frame. --------
+  // --- one world, built once. Fragments 03/04 emitted at boot; the ground and
+  // lobby batches are on demand, so this is the place that pulls them in. A second
+  // call returns the cached world: the render loop must never rebuild per frame. --
   let world = null;
   const ensureWorld = () => {
     if (world === null) {
       const ground = NAKATOMIC.ground();
+      const lobby = NAKATOMIC.lobbyWorld();
       world = {
         ground,
+        lobby,
         bounds: vox.bounds(),
         voxels: vox.count,
         buffer: vox.buffer(),
