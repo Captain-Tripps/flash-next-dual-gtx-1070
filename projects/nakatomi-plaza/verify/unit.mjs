@@ -235,7 +235,12 @@ describe("voxel contract", () => {
     for (let id = 0x0100; id <= 0xd000; id++)
       N.palette.define(id, "#" + id.toString(16).padStart(6, "0"));
     assert.throws(() => N.palette.id("#ad1044"), /exhausted/, "allocator must stop below 0xd001");
-    assert.strictEqual(N.palette.hexOf(0xd001), null, "glass block must stay unclaimed");
+    // Unclaimed block ids stay empty: only an explicit define() may put a colour
+    // in 0xd001..0xdfff, and whatever is pinned there must map back to its hex.
+    assert.strictEqual(N.palette.hexOf(0xdfff), null, "unclaimed block id stays null");
+    for (const [id, hex] of N.palette.entries)
+      if (id >= 0xd001 && id <= 0xdfff)
+        assert.strictEqual(N.palette.id(hex), id, `block id 0x${id.toString(16)} must be pinned by hex`);
   });
 
   test("gate rejects reserved-range ids", () => {
@@ -317,6 +322,100 @@ describe("tower core", () => {
       for (const x of [e.min.x, e.max.x])
         for (const z of [e.min.z, e.max.z])
           assert.ok(e.radius >= Math.hypot(x - cx, y - cy, z - cz) - 1e-9, "radius covers corner");
+  });
+});
+
+// --- Task 4: curtain wall + the dusk lit rule ---------------------------
+describe("curtain wall", () => {
+  // The perimeter ring of a band, cell by cell, corners once.
+  const ringCells = (f, y0, y1) => {
+    const out = [];
+    for (let y = y0; y <= y1; y++) {
+      for (let x = f.x0; x <= f.x1; x++) out.push([x, y, f.z0], [x, y, f.z1]);
+      for (let z = f.z0 + 1; z <= f.z1 - 1; z++) out.push([f.x0, y, z], [f.x1, y, z]);
+    }
+    return out;
+  };
+
+  const cellKeysOf = (N) => {
+    const seen = new Map();
+    for (const r of N.vox.runs())
+      for (let i = 0; i < r.len; i++) {
+        const k = `${r.x + i}|${r.y}|${r.z}`;
+        seen.set(k, (seen.get(k) || []).concat(r.id));
+      }
+    return seen;
+  };
+
+  test("glass ids sit in the 0xd001 block, none reserved", () => {
+    build();
+    const { N } = boot();
+    assert.ok(N.glass.cells.length > 500, "the shaft is glazed");
+    for (const name of ["lit", "dark", "shatter"]) {
+      const id = N.glass.ids[name];
+      assert.ok(id >= 0xd001 && id <= 0xdfff, `glass id ${name} = 0x${id.toString(16)} not in the 0xd001 block`);
+    }
+    // Every glass cell the buffer holds carries one of the block ids, and the
+    // gate stays clean with the glass in it.
+    const ids = Object.values(N.glass.ids);
+    for (const c of N.glass.cells) assert.ok(ids.includes(c.id), `cell id 0x${c.id.toString(16)} not a glass id`);
+    assert.strictEqual(N.palette.gate(), true, "the palette gate must stay clean");
+  });
+
+  test("mullion density - the wall covers every facade cell, once", () => {
+    build();
+    const { N } = boot();
+    // No cell claimed by two different ids: voxel total equals distinct cells.
+    const claims = cellKeysOf(N);
+    assert.strictEqual(claims.size, N.vox.count, "a voxel is drawn twice at the same cell");
+    for (const [k, list] of claims)
+      assert.strictEqual(new Set(list).size, 1, `cell ${k} claimed by ${list.length} ids`);
+
+    // Every facade cell of every band is claimed by the curtain wall or the
+    // structure: no holes in the envelope of the tower.
+    const s = N.tower.sections;
+    for (const f of [s.podium, s.lower, s.setback, s.upper]) {
+      const hi = f === s.podium ? f.y1 - 1 : f.y1;    // the podium deck row is a slab
+      for (const [x, y, z] of ringCells(f, f.y0, hi))
+        assert.ok(claims.has(`${x}|${y}|${z}`), `facade cell ${x},${y},${z} is empty`);
+    }
+
+    // The glaze is most of the wall; the mullion frame is the rest. Coverage is
+    // measured over the facade ring, and the brief pins it at 0.55..0.75.
+    const facade = new Set();
+    for (const f of [s.podium, s.lower, s.setback, s.upper]) {
+      const hi = f === s.podium ? f.y1 - 1 : f.y1;
+      for (const [x, y, z] of ringCells(f, f.y0, hi)) facade.add(`${x}|${y}|${z}`);
+    }
+    assert.ok(facade.size > 4000, `facade ring is ${facade.size} cells`);
+    const share = N.glass.cells.length / facade.size;
+    assert.ok(share > 0.55 && share < 0.75, `glazing share ${share.toFixed(3)} outside 0.55..0.75`);
+    assert.strictEqual(N.glass.litFraction, share, "litFraction is the glazing coverage share");
+    assert.strictEqual(N.glass.facadeCells, facade.size, "facadeCells is the ring the wall covers");
+  });
+
+  test("lit cells follow the dusk rule - most dark, lobby bright", () => {
+    build();
+    const { N } = boot();
+    const lit = N.glass.cells.filter((c) => c.lit);
+    const share = lit.length / N.glass.cells.length;
+    assert.ok(share > 0.15 && share < 0.4, `lit share ${share.toFixed(3)} of the glaze is not "most dark"`);
+    assert.strictEqual(N.glass.litShare, share, "litShare is the dusk rule's lit fraction");
+
+    // Lobby bright: every podium arcade cell and the atrium bands glow warm.
+    const lobby = N.glass.cells.filter((c) => c.y <= 2 && c.z === -17);
+    assert.ok(lobby.length > 20 && lobby.every((c) => c.lit), "podium lobby glow");
+    const atrium = N.glass.cells.filter((c) => c.y >= 4 && c.y <= 9 && c.z === -12);
+    assert.ok(atrium.length > 20 && atrium.every((c) => c.lit), "atrium glow");
+    assert.ok(atrium.every((c) => N.glass.lit(c.id)), "lit(id) marks the glow ids");
+    assert.ok(!N.glass.lit(N.glass.ids.dark), "lit(dark glass id) is false");
+
+    // And the upper shaft is dark at dusk - the finale floors are the exception.
+    for (const y of [16, 17, 18, 19, 20, 21, 24, 30, 34]) {
+      const row = N.glass.cells.filter((c) => c.y === y);
+      assert.ok(row.length > 0, `band ${y} has glazing`);
+      assert.ok(row.filter((c) => c.lit).length / row.length < 0.3, `band ${y} should read dark`);
+    }
   });
 });
 

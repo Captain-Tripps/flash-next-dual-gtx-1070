@@ -196,26 +196,27 @@ Object.assign(NAKATOMIC, (() => {
     for (let z = f.z0; z <= f.z1; z++) vox.addRun(f.x0, y, z, f.x1 - f.x0 + 1, id);
   };
 
-  // The outer wall of a band: corner posts on every edge, plus a mullion column
-  // every second cell. The bays between stay open for the glass cells.
+  // The outer wall of a band: a mullion column every third cell on each face.
+  // The two-cell bays between them are glazing - Task 4 fills them, so no cell
+  // is claimed twice.
   const wallBand = (y, f, id) => {
+    // Corner posts stand on every row, so both face grids agree on the corner
+    // cell and the glazing rule always sees a closed frame at the corners.
+    for (const [cx, cz] of [[f.x0, f.z0], [f.x0, f.z1], [f.x1, f.z0], [f.x1, f.z1]])
+      vox.addRun(cx, y, cz, 1, id);
     for (let x = f.x0; x <= f.x1; x++)
-      if ((x - f.x0) % 2 === 0) { vox.addRun(x, y, f.z0, 1, id); vox.addRun(x, y, f.z1, 1, id); }
+      if ((x - f.x0) % 3 === 0) { vox.addRun(x, y, f.z0, 1, id); vox.addRun(x, y, f.z1, 1, id); }
     for (let z = f.z0; z <= f.z1; z++)
-      if ((z - f.z0) % 2 === 0) { vox.addRun(f.x0, y, z, 1, id); vox.addRun(f.x1, y, z, 1, id); }
+      if ((z - f.z0) % 3 === 0) { vox.addRun(f.x0, y, z, 1, id); vox.addRun(f.x1, y, z, 1, id); }
   };
 
   const section = (f, id) => { for (let y = f.y0; y <= f.y1; y++) wallBand(y, f, id); };
 
   // ---- the build ----
-  section(P, idC);                                 // podium walls, arcade level
+  section(P, idC);                                 // podium mullion grid, arcade level
   slabBand(P.y1, P, idC);                          // podium deck (plaza terrace)
-  // Arcade piers on the podium face, offset from the concrete posts so the two
-  // palette ids never land on one cell.
-  for (let y = P.y0; y <= P.y1; y++)
-    for (let x = P.x0 + 1; x <= P.x1 - 1; x++)
-      if ((x - P.x0) % 6 === 3)
-        for (const z of [P.z0, P.z1]) vox.addRun(x, y, z, 1, idM);
+  // The arcade glazing between the podium mullions is Task 4's job, along with
+  // the shaft bays - one curtain wall, one grid, so no cell is claimed twice.
 
   section(S, idM);                                 // shaft, storeys 1-24
   section(K, idM);                                 // shaft, storeys 25-35 (setback)
@@ -268,6 +269,112 @@ Object.assign(NAKATOMIC, (() => {
       storeys: 42,
       footprint: { shaft: [S.x1 - S.x0 + 1, S.z1 - S.z0 + 1], podium: [P.x1 - P.x0 + 1, P.z1 - P.z0 + 1] },
       sections: { podium: P, lower: S, setback: K, upper: U, penthouse: PH },
+    },
+  };
+})());
+
+// Fragment 04: the curtain wall - glass cells over every shaft and podium bay,
+// plus the dusk lit rule that decides which bays glow at 6 pm on Christmas Eve.
+//
+// Task 3 drew the mullion grid: a frame column every third cell of each face,
+// corners always on the frame. This fragment fills the bays between them with
+// glass, so the facade ring is fully covered and no cell is claimed twice.
+//
+// Two quantities carry the look:
+//   litFraction - the glazing coverage of the facade ring (brief: 0.55..0.75).
+//   litShare    - the share of glazed cells that glow from inside (brief's
+//                 ruling "most dark, lobby bright", so well under half).
+// The glow itself is an additive layer in the render (Task 14 samples it); the
+// buffer here carries the warm colour so the lit bays read warm in the splats.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const palette = NAKATOMIC.palette;
+
+  // Glass ids are pinned inside the 0xd001 block - never auto-allocated, so the
+  // block stays reserved for glazing and the gate never sees an id it can't name.
+  const ids = {
+    dark: palette.define(0xd001, "#2b3243"),    // dusk glass, reflecting the sky
+    lit: palette.define(0xd002, "#ffcc77"),     // warm interior glow
+    shatter: palette.define(0xd003, "#e8f4ff"), // the blast panes (Task 10)
+  };
+  const glassIds = Object.values(ids);
+
+  const S = NAKATOMIC.tower.sections;
+  const bands = [S.podium, S.lower, S.setback, S.upper];
+
+  // The facade ring of a band, cell by cell, corners once. The podium's top row
+  // is a deck slab, not a bay.
+  const ring = (f) => {
+    const y1 = f === S.podium ? f.y1 - 1 : f.y1;
+    const out = [];
+    for (let y = f.y0; y <= y1; y++) {
+      for (let x = f.x0; x <= f.x1; x++) out.push({ x, y, z: f.z0, f, face: "z" });
+      for (let x = f.x0; x <= f.x1; x++) out.push({ x, y, z: f.z1, f, face: "z" });
+      for (let z = f.z0 + 1; z <= f.z1 - 1; z++) {
+        out.push({ x: f.x0, y, z, f, face: "x" });
+        out.push({ x: f.x1, y, z, f, face: "x" });
+      }
+    }
+    return out;
+  };
+
+  // A bay is glazed when it sits between mullions. Corner cells are always frame,
+  // which keeps the two face rules agreeing on the corner cell.
+  const isFrame = (c) => {
+    const f = c.f;
+    if (c.x === f.x0 || c.x === f.x1) {
+      if (c.z === f.z0 || c.z === f.z1) return true;
+      return (c.z - f.z0) % 3 === 0;
+    }
+    return (c.x - f.x0) % 3 === 0;
+  };
+
+  // The dusk rule. The arcade and the atrium glow warm; the tower above is dark
+  // at dusk except the odd office left on after work.
+  const ATRIUM_Y = 9;
+  const isLit = (c) => {
+    const f = c.f;
+    if (c.y <= S.podium.y1 - 1) return true;                                   // lobby, arcade
+    if (f === S.lower && c.z === S.lower.z0 && c.y <= ATRIUM_Y) return true;   // atrium face
+    if (f === S.podium) return false;
+    if (c.y < 13) return false;                                                // dark band above the atrium
+    return (c.x - f.x0 + (c.z - f.z0) + c.y) % 8 === 0;                        // a few offices on
+  };
+
+  const cells = [];
+  for (const f of bands)
+    for (const c of ring(f)) {
+      if (isFrame(c)) continue;
+      const lit = isLit(c);
+      const id = lit ? ids.lit : ids.dark;
+      // Thin run: one cell deep, so the glass sits on the facade plane the
+      // mullions define instead of burying itself in the floor plate.
+      vox.addRun(c.x, c.y, c.z, 1, id);
+      cells.push({ x: c.x, y: c.y, z: c.z, id, lit });
+    }
+
+  // Facade ring cells, band by band: both face planes full width, minus the
+  // corners the second plane would otherwise count twice.
+  const facadeCells = bands.reduce((n, f) => {
+    const y1 = f === S.podium ? f.y1 - 1 : f.y1;
+    const rows = y1 - f.y0 + 1;
+    const ringPerRow = 2 * (f.x1 - f.x0 + 1) + 2 * (f.z1 - f.z0 + 1) - 4;
+    return n + rows * ringPerRow;
+  }, 0);
+
+  const litCount = cells.reduce((n, c) => n + (c.lit ? 1 : 0), 0);
+
+  return {
+    glass: {
+      cells,
+      ids,
+      glassIds,
+      facadeCells,
+      litFraction: cells.length / facadeCells,   // glazing coverage of the facade
+      litShare: litCount / cells.length,         // the dusk rule, as a share of glaze
+      litCount,
+      lit: (id) => id === ids.lit || id === ids.shatter,
     },
   };
 })());

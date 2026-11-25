@@ -49,6 +49,12 @@ before that cut. Timings are derived with `seekTo(id)`, never from a start colum
 - **R15 - storm/blast timing.** The blast beat starts at 360; `storm` follows with dur 95;
   the glass-break shatter lives inside that window and restores on the wrap.
 - **R16 - fade to black before the loop cut.** Not a hard cut to the next loop.
+- **R17 - two glazing numbers, not one.** The plan's sentence "litFraction between
+  0.55 and 0.75 at dusk - most dark, lobby bright" pins one count two ways, which a
+  single number can not satisfy. `glass.litFraction` is the glazing coverage of the
+  facade ring, pinned in 0.55..0.75 exactly as the plan asks; the look it names is
+  `glass.litShare`, the share of glazed cells that glow from inside, pinned well
+  under a half - arcade and atrium bright, upper bands dark at dusk.
 - **Glass palette block.** Curtain-wall and shatter ids live in the reassigned `0xd001`
   block (v1 fix F3, `0xe001` -> `0xd001`). `0xe001` and above is reserved and the palette
   gate rejects any geometry that uses it.
@@ -62,12 +68,17 @@ way the real plaza does. Street level (`streetY`) is y = 0.
 | Feature | x | z | y bands |
 | --- | --- | --- | --- |
 | Sunken garage lot floor | - | - | y = -6 (lot floor), driveway/ditch floor y = -3, bridge deck y = 0 |
-| Podium (4 storeys, arcades + lobby) | -20..20 | -17..17 | 0..3, deck at y = 4 |
+| Podium (arcade + lobby) | -20..20 | -17..17 | 0..3 (arcade rows 0..2, deck slab row 3) |
 | Shaft, lower (storeys 1-24) | -12..12 | -12..12 | 4..27 |
 | Shaft, setback band (storeys 25-35) | -10..10 | -10..10 | 28..38 |
 | Shaft, upper (storeys 36-42) | -11..11 | -11..11 | 39..45 |
 | Roof deck | - | - | y = 46 |
 | Roof mechanical penthouse | -9..9 | -9..9 | 47..49 |
+
+Curtain wall: one grid over every band face - a mullion column every third cell of
+each face, corner posts on every row so the two face rules agree at the corner -
+and glass in the bays between. The facade ring stays fully claimed and no cell is
+claimed by two palette ids.
 
 Envelope (R12/13): the outer box is the podium footprint plus a 2 m skirt,
 `min = (-22, 0, -19)` to `max = (22, 46, 19)`, and its top is the roof deck, which
@@ -82,7 +93,9 @@ bounding-sphere radius about the envelope centre.
 - `NAKATOMIC.vox` - `addRun`/`addStack`/`count`/`bounds`, runs merge in +X only.
 - `NAKATOMIC.palette` - `define`/`id`/`gate()`; `gate()` throws listing every offender.
 - `NAKATOMIC.envelope` - `min`/`max`/`profile`/`isOutside(point)`/`radius`.
-- `NAKATOMIC.glass` - `cells`/`litFraction`/`lit(id)`.
+- `NAKATOMIC.glass` - `cells` (each `{ x, y, z, id, lit }`)/`ids` (`dark`, `lit`,
+  `shatter`, pinned in the `0xd001` block)/`facadeCells`/`litFraction` (glazing
+  coverage of the facade ring)/`litShare` (the dusk rule)/`litCount`/`lit(id)`.
 - `NAKATOMIC.ground()` - exactly `{ voxels, batchVox, countVox, bounds, garageVolume,
   ditchVolume, plazaVolume, waterVolume, palmCount, skylineCount, streetY }`, with
   `countVox === 9406` and `skylineCount === 2860` (30.4 % of the ground batch), plus

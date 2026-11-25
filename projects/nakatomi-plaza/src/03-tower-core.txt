@@ -32,26 +32,27 @@ Object.assign(NAKATOMIC, (() => {
     for (let z = f.z0; z <= f.z1; z++) vox.addRun(f.x0, y, z, f.x1 - f.x0 + 1, id);
   };
 
-  // The outer wall of a band: corner posts on every edge, plus a mullion column
-  // every second cell. The bays between stay open for the glass cells.
+  // The outer wall of a band: a mullion column every third cell on each face.
+  // The two-cell bays between them are glazing - Task 4 fills them, so no cell
+  // is claimed twice.
   const wallBand = (y, f, id) => {
+    // Corner posts stand on every row, so both face grids agree on the corner
+    // cell and the glazing rule always sees a closed frame at the corners.
+    for (const [cx, cz] of [[f.x0, f.z0], [f.x0, f.z1], [f.x1, f.z0], [f.x1, f.z1]])
+      vox.addRun(cx, y, cz, 1, id);
     for (let x = f.x0; x <= f.x1; x++)
-      if ((x - f.x0) % 2 === 0) { vox.addRun(x, y, f.z0, 1, id); vox.addRun(x, y, f.z1, 1, id); }
+      if ((x - f.x0) % 3 === 0) { vox.addRun(x, y, f.z0, 1, id); vox.addRun(x, y, f.z1, 1, id); }
     for (let z = f.z0; z <= f.z1; z++)
-      if ((z - f.z0) % 2 === 0) { vox.addRun(f.x0, y, z, 1, id); vox.addRun(f.x1, y, z, 1, id); }
+      if ((z - f.z0) % 3 === 0) { vox.addRun(f.x0, y, z, 1, id); vox.addRun(f.x1, y, z, 1, id); }
   };
 
   const section = (f, id) => { for (let y = f.y0; y <= f.y1; y++) wallBand(y, f, id); };
 
   // ---- the build ----
-  section(P, idC);                                 // podium walls, arcade level
+  section(P, idC);                                 // podium mullion grid, arcade level
   slabBand(P.y1, P, idC);                          // podium deck (plaza terrace)
-  // Arcade piers on the podium face, offset from the concrete posts so the two
-  // palette ids never land on one cell.
-  for (let y = P.y0; y <= P.y1; y++)
-    for (let x = P.x0 + 1; x <= P.x1 - 1; x++)
-      if ((x - P.x0) % 6 === 3)
-        for (const z of [P.z0, P.z1]) vox.addRun(x, y, z, 1, idM);
+  // The arcade glazing between the podium mullions is Task 4's job, along with
+  // the shaft bays - one curtain wall, one grid, so no cell is claimed twice.
 
   section(S, idM);                                 // shaft, storeys 1-24
   section(K, idM);                                 // shaft, storeys 25-35 (setback)

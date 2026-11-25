@@ -175,7 +175,7 @@ the task that owns the code:
 - Produces: `NAKATOMIC.glass = { cells, litFraction, lit(id) }` where `lit()` marks lobby glow
   (lower floors warm-lit, upper floors dark at dusk except the few lit for the finale).
 
-- [ ] Steps 1-5: failing tests for both names (glass palette ids pass `gate()`;
+- [x] Steps 1-5: failing tests for both names (glass palette ids pass `gate()`;
   `litFraction` between 0.55 and 0.75 at dusk - spec Ruling: "most dark, lobby bright");
   implement glazing as thin runs on the shaft faces, glow handled as a separate additive
   layer that Task 14's render gate samples; PASS; commit.
