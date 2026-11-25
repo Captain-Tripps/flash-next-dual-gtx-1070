@@ -220,7 +220,7 @@ the task that owns the code:
   `wrapAt = SHOW_LEN + dtClamp` and after `wrapAt` the clock resets to 0 exactly once.
 
 - [ ] Step 1: failing test "BEATS literal equals the Beat Table": `clock.BEATS` is the 24
-  rows of Appendix A in order, with exact durations and cumulative `storm` start == 360
+  rows of Appendix A in order, with exact durations and cumulative `storm` start == 390
   (the arithmetic of the appendix is then pinned by a test, not by prose).
 - [ ] Step 2: failing test "clock constants": sums 715, 735/20/6/729, storm dur 95,
   `seekTo("blast")` 360.
@@ -346,34 +346,35 @@ v1's beat list is unrecoverable; this v2 table keeps scene order and the exact v
 constants (`BEAT_END = 715`, `HOLD = 20`, `SHOW_LEN = 735`, `FADE_START = 729`, storm dur
 95, storm/blast cumulative 360). Deltas are Jon-reviewable.
 
-Verified against the v1 hand-off numbers: 24 beats, durations sum to 715, `blast` beat
-starts at 330 and `storm` at 360.
+Verified in code against the v1 hand-off numbers: 24 beats, durations sum to 715, the
+`blast` beat starts at 360 (`seekTo("blast") == 360`, the locked v1 invariant), `storm`
+runs 390 to 485 (dur 95, it absorbs the slack), `BEAT_END = 715`, `SHOW_LEN = 735`.
 
 | # | id | label (HUD) | dur | start |
 | - | -- | ----------- | --- | ----- |
-| 1 | `open` | Dusk over the boulevard - establishing | 32 | 0 |
-| 2 | `taxiConvoy` | Taxi convoy onto the lot | 35 | 32 |
-| 3 | `horseCar` | Horse car and motorcycle escort | 30 | 67 |
-| 4 | `limoNakatomi` | Nakatomi Plaza signage, glass lobby | 35 | 97 |
-| 5 | `treeTruck` | Christmas tree truck, light trucks | 33 | 132 |
-| 6 | `archWalk` | Walkway, palms, marquee | 32 | 165 |
-| 7 | `treeSet` | Tree set down beneath the glass | 32 | 197 |
-| 8 | `skateHolly` | Holly on skates to the doors | 30 | 229 |
-| 9 | `gunRun` | Gun run staged on the roof | 35 | 259 |
-| 10 | `tileHelo` | Tile helo - the whomp | 36 | 294 |
-| 11 | `blast` | Blast - first facade break (event at 360) | 30 | 330 |
-| 12 | `storm` | Storm over the skyline (dur 95) | 95 | 360 |
-| 13 | `fedConvoy` | Fed convoys up the boulevard | 45 | 455 |
-| 14 | `wallOfCars` | Wall of police cars on the lot | 40 | 500 |
-| 15 | `lobbyLights` | Lobby lights hold under dusk | 38 | 540 |
-| 16 | `carDepart` | Cars off the lot at dusk pull-back | 25 | 578 |
-| 17 | `treeGlow` | Tree glow, canopy shimmer | 20 | 603 |
-| 18 | `fountainSettle` | Fountain settles, water still | 17 | 623 |
-| 19 | `plazaWide` | Plaza wide, empty walkway | 14 | 640 |
-| 20 | `skyPush1` | Skyline push-in 1 | 12 | 654 |
-| 21 | `skyPush2` | Skyline push-in 2 | 12 | 666 |
-| 22 | `towerPull` | Tower pull-back to boulevard | 10 | 678 |
-| 23 | `rooftopGlow` | Rooftop glow, penthouse lights | 8 | 688 |
-| 24 | `drestle` | Final settling frame before the hold | 19 | 696 |
+| 1 | `open` | Dusk over the boulevard - establishing | 34 | 0 |
+| 2 | `taxiConvoy` | Taxi convoy onto the lot | 38 | 34 |
+| 3 | `horseCar` | Horse car and motorcycle escort | 33 | 72 |
+| 4 | `limoNakatomi` | Nakatomi Plaza signage, glass lobby | 38 | 105 |
+| 5 | `treeTruck` | Christmas tree truck, light trucks | 36 | 143 |
+| 6 | `archWalk` | Walkway, palms, marquee | 35 | 179 |
+| 7 | `treeSet` | Tree set down beneath the glass | 34 | 214 |
+| 8 | `skateHolly` | Holly on skates to the doors | 32 | 248 |
+| 9 | `gunRun` | Gun run staged on the roof | 38 | 280 |
+| 10 | `tileHelo` | Tile helo - the whomp | 42 | 318 |
+| 11 | `blast` | Blast - first facade break (starts at 360) | 30 | 360 |
+| 12 | `storm` | Storm over the skyline (dur 95) | 95 | 390 |
+| 13 | `fedConvoy` | Fed convoys up the boulevard | 42 | 485 |
+| 14 | `wallOfCars` | Wall of police cars on the lot | 36 | 527 |
+| 15 | `lobbyLights` | Lobby lights hold under dusk | 34 | 563 |
+| 16 | `carDepart` | Cars off the lot at dusk pull-back | 22 | 597 |
+| 17 | `treeGlow` | Tree glow, canopy shimmer | 18 | 619 |
+| 18 | `fountainSettle` | Fountain settles, water still | 15 | 637 |
+| 19 | `plazaWide` | Plaza wide, empty walkway | 13 | 652 |
+| 20 | `skyPush1` | Skyline push-in 1 | 11 | 665 |
+| 21 | `skyPush2` | Skyline push-in 2 | 10 | 676 |
+| 22 | `towerPull` | Tower pull-back to boulevard | 9 | 686 |
+| 23 | `rooftopGlow` | Rooftop glow, penthouse lights | 8 | 695 |
+| 24 | `drestle` | Final settling frame before the hold | 12 | 703 |
 
-Cumulative before `storm` = 360 (so `seekTo("blast")` == 360 by construction).
+Sum of the 24 durations = 715; `HOLD` 20; `SHOW_LEN` 735; `FADE_START` 729.

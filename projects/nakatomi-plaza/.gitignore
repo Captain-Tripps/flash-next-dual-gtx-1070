@@ -1,0 +1,6 @@
+# Machine-built scratch: the build-check probe, screenshots and gate artifacts.
+.superpowers/
+shots/
+*.log
+# index.html is a build artifact, but it is the deliverable, so it is committed
+# (same convention as projects/dragon-rider-aerie).
