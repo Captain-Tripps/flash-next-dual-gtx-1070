@@ -379,6 +379,186 @@ Object.assign(NAKATOMIC, (() => {
   };
 })());
 
+// Fragment 05: the ground contract - the sunken garage lot, the sunken driveway
+// with its bridge, the entry plaza with a reflecting pool, a palm grove, and the
+// distant skyline as full-width splices.
+//
+// The numbers are the contract, not an outcome: countVox is locked at 9406 and
+// skylineCount at 2860 (30.4 % of the batch), the two numbers v1 verified. The
+// skyline band is 110 columns wide, so its volume is width x the sum of the three
+// wall heights (6 + 12 + 8 = 26 bands = 2860) and the rest of the ground carries
+// the remaining 6546, which resolves as:
+//
+//   paving (deck band, holes cut)  4885
+//   lot floor 341 + 5 retaining rings 400
+//   driveway floor 135 + 2 rings 184 + bridge deck 135
+//   pool (basin band + water band)   66
+//   boulevard kerbs, with a crossing 244
+//   12 palms (4 trunk + 3x3 canopy) 156
+//
+// A rectangle's retaining ring is 2(w + d) - 4 cells, so the lot's 31 x 11 ring is
+// 80 cells and five bands of it is 400 - that is how the lot width was chosen.
+//
+// Vertical: the paving deck is the band at y = -1, its top face is street level,
+// so anything that stands on the ground starts at y = 0 (streetY) - the same band
+// the tower's first podium row occupies. The garage lot floor is y = -6 and the
+// sunken driveway floor is y = -3.
+//
+// Volumes are counted in voxels, the unit the rest of the contract uses: 1 unit
+// horizontally = 1 m, 1 band vertically = one storey.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const palette = NAKATOMIC.palette;
+
+  const idStone = palette.id("#7d7f86");     // plaza paving, wet stone at dusk
+  const idCurb = palette.id("#5a5d64");      // boulevard kerb stones
+  const idGarage = palette.id("#4e5259");    // garage lot shell
+  const idDitch = palette.id("#454a52");     // sunken driveway shell
+  const idBridge = palette.id("#6b6f78");    // bridge deck; the tower's concrete id,
+                                             // and it only ever claims its own cells
+  const idWater = palette.id("#243a4d");     // reflecting pool: basin and water
+  const idTrunk = palette.id("#4a3b2e");     // palm trunks
+  const idFrond = palette.id("#20361f");     // palm canopies
+  const idSky = palette.id("#1c2230");       // skyline mass
+  const idSkyWin = palette.id("#8a6a4a");    // skyline window bands, the lit far city
+
+  const DECK = -1;                           // paving band; top face = street level
+  const STREET = 0;                          // streetY: what stands on the ground
+  const LOT = -6;                            // garage lot floor band
+  const DITCH = -3;                          // sunken driveway floor band
+
+  // --- the plan ---
+  const BLOCK = { x0: -43, x1: 43, z0: -31, z1: 30 };            // the block: plaza + boulevard
+  const LOT_RECT = { x0: -15, x1: 15, z0: -31, z1: -21 };        // sunken lot, 31 x 11
+  const DITCH_RECT = { x0: -22, x1: 22, z0: -20, z1: -18 };      // sunken driveway, 45 x 3
+  const POOL = { x0: -5, x1: 5, z0: 25, z1: 27 };                // reflecting pool, 11 x 3
+  const KERB_X = [-35, 34];                                      // boulevard kerb strips, 2 wide
+  const KERB_GAP = -1;                                           // pedestrian crossing
+  const PALMS = [[-36, -25], [-30, -25], [-24, -25], [24, -25], [30, -25], [36, -25],
+                 [-36, 25], [-30, 25], [-24, 25], [24, 25], [30, 25], [36, 25]];
+  const SKY = { x0: -55, x1: 54 };                               // 110 columns
+  const SKY_WALLS = [{ z: 44, h: 6 }, { z: 56, h: 12 }, { z: 70, h: 8 }];
+  const SKY_IDS = [idSkyWin, idSkyWin, ...Array(4).fill(idSky)]; // window bands, then mass
+  const SKY_ID_SET = new Set(SKY_IDS);
+
+  // --- the batch, with its own occupancy map so a cell can not be claimed twice ---
+  const runs = [];
+  const cells = new Map();
+  const claim = (x, y, z, id) => {
+    const key = `${x}|${y}|${z}`;
+    const seen = cells.get(key);
+    if (seen !== undefined) {
+      if (seen !== id) throw new Error(`ground cell ${key} claimed by two palette ids`);
+      return;
+    }
+    cells.set(key, id);
+  };
+  const put = (x, y, z, len, id) => {
+    if (len <= 0) return;
+    vox.addRun(x, y, z, len, id);
+    runs.push({ x, y, z, len, id });
+    for (let i = 0; i < len; i++) claim(x + i, y, z, id);
+  };
+  const fill = (x0, x1, y, z0, z1, id) => {
+    for (let z = z0; z <= z1; z++) put(x0, y, z, x1 - x0 + 1, id);
+  };
+  const stack = (x, y0, z, height, id) => {
+    for (let i = 0; i < height; i++) put(x, y0 + i, z, 1, id);
+  };
+  const ring = (r, y, id) => {
+    for (let x = r.x0; x <= r.x1; x++) { put(x, y, r.z0, 1, id); put(x, y, r.z1, 1, id); }
+    for (let z = r.z0 + 1; z <= r.z1 - 1; z++) { put(r.x0, y, z, 1, id); put(r.x1, y, z, 1, id); }
+  };
+
+  const ground = () => {
+    // ---- the plaza deck, cut open where the lot, the driveway and the pool go down
+    const holes = [LOT_RECT, DITCH_RECT, POOL];
+    for (let z = BLOCK.z0; z <= BLOCK.z1; z++) {
+      let x = BLOCK.x0;
+      for (const h of holes.filter((q) => z >= q.z0 && z <= q.z1).sort((a, b) => a.x0 - b.x0)) {
+        if (h.x0 > x) put(x, DECK, z, h.x0 - x, idStone);
+        x = Math.max(x, h.x1 + 1);
+      }
+      if (x <= BLOCK.x1) put(x, DECK, z, BLOCK.x1 - x + 1, idStone);
+    }
+
+    // ---- the sunken garage lot: floor, shell walls, open to the sky above
+    fill(LOT_RECT.x0, LOT_RECT.x1, LOT, LOT_RECT.z0, LOT_RECT.z1, idGarage);
+    for (let y = LOT + 1; y <= DECK; y++) ring(LOT_RECT, y, idGarage);
+
+    // ---- the sunken driveway and the bridge that carries the boulevard across it
+    fill(DITCH_RECT.x0, DITCH_RECT.x1, DITCH, DITCH_RECT.z0, DITCH_RECT.z1, idDitch);
+    for (let y = DITCH + 1; y <= DECK; y++) ring(DITCH_RECT, y, idDitch);
+    fill(DITCH_RECT.x0, DITCH_RECT.x1, STREET, DITCH_RECT.z0, DITCH_RECT.z1, idBridge);
+
+    // ---- the reflecting pool: basin floor, then water flush with the paving
+    fill(POOL.x0, POOL.x1, DECK, POOL.z0, POOL.z1, idWater);
+    fill(POOL.x0, POOL.x1, STREET, POOL.z0, POOL.z1, idWater);
+
+    // ---- boulevard kerbs, with a crossing at the block's centre line
+    for (const cx of KERB_X)
+      for (let z = BLOCK.z0; z <= BLOCK.z1; z++) {
+        if (z === KERB_GAP) continue;
+        put(cx, STREET, z, 2, idCurb);
+      }
+
+    // ---- palm grove along the boulevard: 4-band trunks, 3 x 3 canopy
+    for (const [px, pz] of PALMS) {
+      stack(px, STREET, pz, 4, idTrunk);
+      fill(px - 1, px + 1, STREET + 4, pz - 1, pz + 1, idFrond);
+    }
+
+    // ---- the distant skyline: stacked full-width splices, no gap column
+    for (const w of SKY_WALLS)
+      for (let i = 0; i < w.h; i++) {
+        const band = SKY_IDS[Math.min(i, SKY_IDS.length - 1)];
+        put(SKY.x0, STREET - 1 + i, w.z, SKY.x1 - SKY.x0 + 1, band);
+      }
+
+    // ---- the numbers. The occupancy map is the truth: it holds every cell the
+    // batch claims, counted once, which is what a merged run buffer can lose.
+    const skyIdSet = SKY_ID_SET;
+    let skylineCount = 0;
+    for (const [, id] of cells) if (skyIdSet.has(id)) skylineCount++;
+    const area = (r) => (r.x1 - r.x0 + 1) * (r.z1 - r.z0 + 1);
+    const b = {
+      min: { x: Infinity, y: Infinity, z: Infinity },
+      max: { x: -Infinity, y: -Infinity, z: -Infinity },
+    };
+    for (const r of runs) {
+      b.min.x = Math.min(b.min.x, r.x);
+      b.max.x = Math.max(b.max.x, r.x + r.len - 1);
+      b.min.y = Math.min(b.min.y, r.y);
+      b.max.y = Math.max(b.max.y, r.y);
+      b.min.z = Math.min(b.min.z, r.z);
+      b.max.z = Math.max(b.max.z, r.z);
+    }
+
+    return {
+      voxels: runs.slice(),
+      batchVox: runs.length,
+      countVox: cells.size,
+      bounds: b,
+      // the sunken space each feature holds, in voxel bands, not the masonry
+      garageVolume: area(LOT_RECT) * (DECK - LOT + 1),
+      ditchVolume: area(DITCH_RECT) * (DECK - DITCH + 1),
+      plazaVolume: area(BLOCK) - area(LOT_RECT) - area(DITCH_RECT) - area(POOL),
+      waterVolume: area(POOL),
+      palmCount: PALMS.length,
+      skylineCount,
+      streetY: STREET,
+    };
+  };
+
+  return {
+    ground,
+    isOnGround: (x, z) => x >= BLOCK.x0 && x <= BLOCK.x1 && z >= BLOCK.z0 && z <= BLOCK.z1,
+    skyline: { x0: SKY.x0, x1: SKY.x1, walls: SKY_WALLS, ids: [...SKY_ID_SET] },
+    _plan: { BLOCK, LOT_RECT, DITCH_RECT, POOL, PALMS, KERB_X, DECK, STREET, LOT, DITCH },
+  };
+})());
+
 </script>
 </body>
 </html>

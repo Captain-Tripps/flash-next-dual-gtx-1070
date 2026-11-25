@@ -67,7 +67,12 @@ way the real plaza does. Street level (`streetY`) is y = 0.
 
 | Feature | x | z | y bands |
 | --- | --- | --- | --- |
-| Sunken garage lot floor | - | - | y = -6 (lot floor), driveway/ditch floor y = -3, bridge deck y = 0 |
+| Block (plaza + boulevard) | -43..43 | -31..30 | paving deck y = -1, street level y = 0 |
+| Sunken garage lot | -15..15 | -31..-21 | floor y = -6, retaining walls y = -5..-1 |
+| Sunken driveway (ditch) + bridge | -22..22 | -20..-18 | floor y = -3, walls y = -2..-1, bridge deck y = 0 |
+| Reflecting pool | -5..5 | 25..27 | basin band y = -1, water flush y = 0 |
+| Palm grove (12) | 24/30/36 and mirrored | -25 and 25 | trunk y = 0..3, canopy y = 4 |
+| Distant skyline (3 walls) | -55..54 | z = 44, 56, 70 | full-width splices, 6 + 12 + 8 bands |
 | Podium (arcade + lobby) | -20..20 | -17..17 | 0..3 (arcade rows 0..2, deck slab row 3) |
 | Shaft, lower (storeys 1-24) | -12..12 | -12..12 | 4..27 |
 | Shaft, setback band (storeys 25-35) | -10..10 | -10..10 | 28..38 |
@@ -99,7 +104,10 @@ bounding-sphere radius about the envelope centre.
 - `NAKATOMIC.ground()` - exactly `{ voxels, batchVox, countVox, bounds, garageVolume,
   ditchVolume, plazaVolume, waterVolume, palmCount, skylineCount, streetY }`, with
   `countVox === 9406` and `skylineCount === 2860` (30.4 % of the ground batch), plus
-  `NAKATOMIC.isOnGround(x, z)`.
+  `NAKATOMIC.isOnGround(x, z)`. Volumes are voxel bands, not masonry; `countVox`
+  counts a cell once, so a feature claimed by two ids throws.
+- `NAKATOMIC.skyline` - `x0`/`x1`/`walls`/`ids`; every skyline splice spans
+  `x0..x1` (110 columns), because the run buffer only merges in +X.
 - `NAKATOMIC.clock` - `BEATS`/`order`/`start(id)`/`dur(id)`/`seekTo(id)`/`beatAt(t)`/`len`/
   `BEAT_END`/`HOLD`/`SHOW_LEN`/`FADE_START`/`FADE_LEN`/`fade`/`wrapAt`/`tick(dt)`.
 - `NAKATOMIC.rig` - `keys(id)`, `sample(id, t)`; one continuous take, fov clamped 35..60.

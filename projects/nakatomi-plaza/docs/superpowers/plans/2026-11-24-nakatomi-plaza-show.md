@@ -192,18 +192,18 @@ the task that owns the code:
   waterVolume, palmCount, skylineCount, streetY }`, plus `NAKATOMIC.isOnGround(x, z)`;
   locked: `countVox === 9406`, `skylineCount === 2860` (~30.4% of `countVox`).
 
-- [ ] Step 1: failing test "ground() shape and locked numbers": asserts the exact return
+- [x] Step 1: failing test "ground() shape and locked numbers": asserts the exact return
   keys, `countVox` 9406, `skylineCount` 2860, `isOnGround` true inside the lot, false beyond
   the boulevard. These are the v1 verified numbers; tune the geometry (splice widths, palm
   placement) until the counts match, and keep the numbers as the invariant - the test drives
   them, they are not a starting point to drift away from.
-- [ ] Step 2: failing test "skyline splices are full width": every horizontal splice spans
+- [x] Step 2: failing test "skyline splices are full width": every horizontal splice spans
   the whole skyline width (no gap column; runs merge +X only).
-- [ ] Step 3: run; expect FAIL.
-- [ ] Step 4: implement: sunken garage lot (its volume), the sunken driveway/ditch and bridge
+- [x] Step 3: run; expect FAIL.
+- [x] Step 4: implement: sunken garage lot (its volume), the sunken driveway/ditch and bridge
   over it, the entry plaza with fountain (`waterVolume` > 0), palm grove along the
   boulevard (`palmCount` 12), distant skyline as full-width horizontal splices.
-- [ ] Step 5: run; PASS. Commit: "ground contract, 9406 vox, full-width skyline splices".
+- [x] Step 5: run; PASS. Commit: "ground contract, 9406 vox, full-width skyline splices".
 
 ### Task 6: Show clock - beats, HOLD, fade, wrap
 

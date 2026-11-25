@@ -325,6 +325,58 @@ describe("tower core", () => {
   });
 });
 
+// --- Task 5: the ground contract ----------------------------------------
+describe("ground contract", () => {
+  test("ground() shape and locked numbers", () => {
+    build();
+    const { N } = boot();
+    const g = N.ground();
+    const keys = "voxels batchVox countVox bounds garageVolume ditchVolume plazaVolume waterVolume palmCount skylineCount streetY".split(" ");
+    assert.deepStrictEqual(Object.keys(g).sort(), keys.slice().sort(), "ground() returns exactly the v1 keys");
+    // The two numbers v1 verified, locked as the invariant.
+    assert.strictEqual(g.countVox, 9406, "countVox is the locked ground batch size");
+    assert.strictEqual(g.skylineCount, 2860, "skylineCount is locked");
+    assert.ok(g.skylineCount / g.countVox > 0.3 && g.skylineCount / g.countVox < 0.31,
+      "skyline is 30.4 % of the ground batch");
+    assert.ok(g.batchVox > 0 && g.batchVox < g.countVox, "batchVox counts runs, fewer than voxels");
+    assert.ok(g.garageVolume > 0 && g.ditchVolume > 0 && g.plazaVolume > 0, "sunken volumes are positive");
+    assert.ok(g.waterVolume > 0, "the fountain has water in it");
+    assert.strictEqual(g.palmCount, 12, "palm grove");
+    assert.strictEqual(g.streetY, 0, "street level");
+    const b = g.bounds;
+    assert.ok(b.min.y <= -6, "the garage lot sits below street level");
+    assert.ok(b.max.y >= 0, "the bridge deck reaches street level");
+    // isOnGround: inside the lot, false beyond the boulevard.
+    assert.strictEqual(N.isOnGround(0, 0), true, "the plaza is ground");
+    assert.strictEqual(N.isOnGround(0, -25), true, "the front boulevard is ground");
+    assert.strictEqual(N.isOnGround(-43, -31), true, "the plaza corner is ground");
+    assert.strictEqual(N.isOnGround(44, 0), false, "past the boulevard edge is not");
+    assert.strictEqual(N.isOnGround(0, -32), false, "past the block edge is not");
+  });
+
+  test("skyline splices are full width", () => {
+    build();
+    const { N } = boot();
+    N.ground();
+    const skyIds = new Set(Object.values(N.skyline.ids));
+    const runs = N.vox.runs().filter((r) => skyIds.has(r.id));
+    assert.ok(runs.length > 0, "the skyline is in the buffer");
+    const width = runs[0].len;
+    for (const r of runs) {
+      assert.strictEqual(r.len, width, `splice at ${r.x},${r.y},${r.z} is not full width (${r.len} vs ${width})`);
+      assert.strictEqual(r.x, N.skyline.x0, "every splice starts at the skyline west edge");
+    }
+    assert.strictEqual(width, 110, "the skyline band is 110 columns wide");
+    // Full width means no gap column: the union of a row covers every column.
+    const rows = new Map();
+    for (const r of runs) {
+      const k = `${r.z}|${r.y}`;
+      rows.set(k, (rows.get(k) || 0) + r.len);
+    }
+    for (const [k, n] of rows) assert.strictEqual(n, 110, `skyline row ${k} has gaps`);
+  });
+});
+
 // --- Task 4: curtain wall + the dusk lit rule ---------------------------
 describe("curtain wall", () => {
   // The perimeter ring of a band, cell by cell, corners once.
