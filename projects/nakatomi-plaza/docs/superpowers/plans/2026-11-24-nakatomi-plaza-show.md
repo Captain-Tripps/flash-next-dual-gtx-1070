@@ -155,15 +155,15 @@ the task that owns the code:
 - Produces: `NAKATOMIC.envelope = { min, max, isOutside(point), radius }` - the outer
   curtain-wall volume including the setback skirt; `NAKATOMIC.tower = { built, height }`.
 
-- [ ] Step 1: failing test "tower is solid and bounded": after boot, `tower.built` true,
+- [x] Step 1: failing test "tower is solid and bounded": after boot, `tower.built` true,
   `height > 0`, every voxel inside `bounds()`.
-- [ ] Step 2: failing test "envelope encloses the glass line": a known glass-line corner is
+- [x] Step 2: failing test "envelope encloses the glass line": a known glass-line corner is
   NOT outside; a point 4 m beyond is outside.
-- [ ] Step 3: run; expect FAIL.
-- [ ] Step 4: implement the tower core as stacked `addStack`/`addRun` volumes: plaza podium,
+- [x] Step 3: run; expect FAIL.
+- [x] Step 4: implement the tower core as stacked `addStack`/`addRun` volumes: plaza podium,
   42-story shaft, the 25-35 setback, roof mechanical penthouse. Envelope = shaft footprint +
   full-height skirt around the podium, 2 m clear of the glass line.
-- [ ] Step 5: run; PASS. Commit: "tower core + outside-envelope contract".
+- [x] Step 5: run; PASS. Commit: "tower core + outside-envelope contract".
 
 ### Task 4: Curtain wall + glow layer
 

@@ -210,6 +210,7 @@ describe("voxel contract", () => {
   test("addRun merges +X into one run", () => {
     build();
     const { N } = boot();
+    N.vox.reset();
     N.vox.addRun(0, 5, 0, 5, N.palette.id("#ff0000"));
     N.vox.addRun(3, 5, 0, 4, N.palette.id("#ff0000"));
     // union 0..7 = 7 voxels, counted once; two runs merged into one span.
@@ -240,6 +241,7 @@ describe("voxel contract", () => {
   test("gate rejects reserved-range ids", () => {
     build();
     const { N } = boot();
+    N.vox.reset();
     N.vox.addRun(1, 1, 1, 3, 0xe001);
     assert.throws(() => N.palette.gate(), /e001/, "gate must list the offender");
   });
@@ -248,12 +250,73 @@ describe("voxel contract", () => {
     build();
     const { toSplats } = await import(pathToFileURL(resolve(ROOT, "tools", "jsp.mjs")).href);
     const { N } = boot();
+    N.vox.reset();
     N.vox.addRun(2, 0, 0, 3, N.palette.id("#0000ff"));
     const s = toSplats(N.vox.buffer());
     assert.strictEqual(s.points.length, 3, "splat points");
     assert.strictEqual(s.colors.length, 3, "splat colors");
     assert.deepStrictEqual(s.points[2], [4, 0, 0], "splat point order");
     assert.match(s.colors[0], /^#0000ff$/i, "splat color");
+  });
+});
+
+// --- Task 3: tower core + the outside-envelope contract ------------------
+describe("tower core", () => {
+  test("tower is solid and bounded", () => {
+    build();
+    const { N } = boot();
+    assert.strictEqual(N.tower.built, true, "tower.built");
+    assert.strictEqual(N.tower.height, 46, "roof deck sits at y=46");
+    const b = N.vox.bounds();
+    assert.ok(Number.isFinite(b.min.x) && b.min.x <= b.max.x, "bounds are finite");
+    // Every voxel the buffer holds sits inside bounds() - the definition of a
+    // bounded build, and the reason the render can size one InstancedMesh.
+    for (const r of N.vox.runs()) {
+      assert.ok(r.x >= b.min.x && r.x + r.len - 1 <= b.max.x, `run x ${r.x}+${r.len} out of bounds`);
+      assert.ok(r.y >= b.min.y && r.y <= b.max.y, `run y ${r.y} out of bounds`);
+      assert.ok(r.z >= b.min.z && r.z <= b.max.z, `run z ${r.z} out of bounds`);
+    }
+    // The shaft reads solid: a storey band on each face at mid-height, and the
+    // shaft resting on the podium deck.
+    const runs = N.vox.runs();
+    const has = (x, y, z) => runs.some((r) => r.x <= x && x < r.x + r.len && r.y === y && r.z === z);
+    assert.ok(has(12, 10, 0), "glass line voxel on the +x face, lower shaft");
+    assert.ok(has(-12, 10, 0), "glass line voxel on the -x face, lower shaft");
+    assert.ok(has(0, 10, 12), "glass line voxel on the +z face, lower shaft");
+    assert.ok(has(0, 4, -12), "shaft rests on the podium deck at y=4");
+    assert.ok(has(0, 46, 0), "roof deck is built");
+  });
+
+  test("envelope encloses the glass line", () => {
+    build();
+    const { N } = boot();
+    const e = N.envelope;
+    // Field-by-field: objects created inside the vm sandbox carry that context's
+    // prototype, so deepStrictEqual across realms would fail on identity, not data.
+    for (const [k, v] of Object.entries({ x: -22, y: 0, z: -19 }))
+      assert.strictEqual(e.min[k], v, `envelope.min.${k}`);
+    for (const [k, v] of Object.entries({ x: 22, y: 46, z: 19 }))
+      assert.strictEqual(e.max[k], v, `envelope.max.${k}`);
+    // A glass-line corner is NOT outside.
+    assert.strictEqual(e.isOutside({ x: 12, y: 5, z: 12 }), false, "glass corner is inside");
+    // 4 m beyond that corner is outside: the envelope clears the glass line by 2 m
+    // at every band, so the shell hugs the building instead of the podium box.
+    assert.strictEqual(e.isOutside({ x: 16, y: 5, z: 16 }), true, "4 m beyond is outside");
+    assert.strictEqual(e.isOutside({ x: 15, y: 10, z: 0 }), true, "just past the shaft skirt");
+    assert.strictEqual(e.isOutside({ x: 13, y: 10, z: 0 }), false, "just inside the shaft skirt");
+    // The podium skirt, at plaza level: 2 m clear of the podium wall.
+    assert.strictEqual(e.isOutside({ x: 21, y: 1, z: 0 }), false, "skirt hugs the podium");
+    assert.strictEqual(e.isOutside({ x: 23, y: 1, z: 0 }), true, "just past the podium skirt");
+    // R12/13: over the roof deck is outside by definition, even above the
+    // penthouse footprint.
+    assert.strictEqual(e.isOutside({ x: 0, y: 47, z: 0 }), true, "above the deck is outside");
+    assert.strictEqual(e.isOutside({ x: 0, y: -1, z: 0 }), true, "below street level is outside");
+    // radius frames the whole envelope: it reaches every corner.
+    const cx = (e.min.x + e.max.x) / 2, cy = (e.min.y + e.max.y) / 2, cz = (e.min.z + e.max.z) / 2;
+    for (const y of [e.min.y, e.max.y])
+      for (const x of [e.min.x, e.max.x])
+        for (const z of [e.min.z, e.max.z])
+          assert.ok(e.radius >= Math.hypot(x - cx, y - cy, z - cz) - 1e-9, "radius covers corner");
   });
 });
 

@@ -105,6 +105,9 @@ Object.assign(NAKATOMIC, {
     return {
       addRun,
       addStack,
+      // Clears every span. The unit tests take a fresh buffer this way; the
+      // render gate rebuilds the world from the same fragments.
+      reset: () => spans.clear(),
       get count() { let n = 0; forEachRun((r) => { n += r.len; }); return n; },
       ids: () => { const s = new Set(); for (const k of spans.keys()) s.add(Number(k.split("|")[0])); return s; },
       bounds: () => {

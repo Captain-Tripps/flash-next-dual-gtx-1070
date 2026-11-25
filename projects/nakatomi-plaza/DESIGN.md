@@ -53,11 +53,35 @@ before that cut. Timings are derived with `seekTo(id)`, never from a start colum
   block (v1 fix F3, `0xe001` -> `0xd001`). `0xe001` and above is reserved and the palette
   gate rejects any geometry that uses it.
 
-## 4. The contract that tests pin
+## 4. Canonical dimensions (set here, consumed by every later task)
+
+Voxel scale: 1 unit horizontally = 1 m; 1 unit vertically = one storey band
+(~3.7 m floor-to-floor), so the curtain wall reads as stacked storey bands, the
+way the real plaza does. Street level (`streetY`) is y = 0.
+
+| Feature | x | z | y bands |
+| --- | --- | --- | --- |
+| Sunken garage lot floor | - | - | y = -6 (lot floor), driveway/ditch floor y = -3, bridge deck y = 0 |
+| Podium (4 storeys, arcades + lobby) | -20..20 | -17..17 | 0..3, deck at y = 4 |
+| Shaft, lower (storeys 1-24) | -12..12 | -12..12 | 4..27 |
+| Shaft, setback band (storeys 25-35) | -10..10 | -10..10 | 28..38 |
+| Shaft, upper (storeys 36-42) | -11..11 | -11..11 | 39..45 |
+| Roof deck | - | - | y = 46 |
+| Roof mechanical penthouse | -9..9 | -9..9 | 47..49 |
+
+Envelope (R12/13): the outer box is the podium footprint plus a 2 m skirt,
+`min = (-22, 0, -19)` to `max = (22, 46, 19)`, and its top is the roof deck, which
+makes a camera over the roof outside by definition. But `isOutside` is not that
+box: it follows the building band by band (`envelope.profile`), each band offset
+2 m clear of the facade at that height - the podium is wider than the shaft it
+carries, so a single box would let a camera sit on the glass. `radius` is the
+bounding-sphere radius about the envelope centre.
+
+## 5. The contract that tests pin
 
 - `NAKATOMIC.vox` - `addRun`/`addStack`/`count`/`bounds`, runs merge in +X only.
 - `NAKATOMIC.palette` - `define`/`id`/`gate()`; `gate()` throws listing every offender.
-- `NAKATOMIC.envelope` - `min`/`max`/`isOutside(point)`/`radius`.
+- `NAKATOMIC.envelope` - `min`/`max`/`profile`/`isOutside(point)`/`radius`.
 - `NAKATOMIC.glass` - `cells`/`litFraction`/`lit(id)`.
 - `NAKATOMIC.ground()` - exactly `{ voxels, batchVox, countVox, bounds, garageVolume,
   ditchVolume, plazaVolume, waterVolume, palmCount, skylineCount, streetY }`, with

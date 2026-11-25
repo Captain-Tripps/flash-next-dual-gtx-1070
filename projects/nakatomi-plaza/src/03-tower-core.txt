@@ -1,0 +1,109 @@
+// Fragment 03: the tower core and the outside-envelope contract.
+//
+// Structure only, in storey bands: podium, the 42-story shaft, the 25-35 setback
+// band, the upper shaft, the roof deck and the mechanical penthouse. The
+// curtain-wall glass cells come in Task 4; this fragment draws the concrete and
+// the mullions and leaves the glazed bays open, so no cell is drawn twice.
+//
+// Same-palette-id runs on the same cell self-merge, so spandrels and decks can
+// overlap each other freely; different ids must never claim the same cell, which
+// is why the mullion columns below sit on offsets the concrete posts avoid.
+//
+// The envelope is the contract the camera is held to (Rulings 12/13): the podium
+// footprint plus a 2 m skirt, full height, top at the roof deck. A point inside
+// the envelope is a point the camera is not allowed to occupy.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const idC = NAKATOMIC.palette.id("#6b6f78");   // spandrel / deck concrete
+  const idM = NAKATOMIC.palette.id("#2c3038");   // curtain-wall mullion
+
+  // Dimensions from DESIGN.md 4 - inclusive cell coordinates.
+  const P = { x0: -20, x1: 20, z0: -17, z1: 17, y0: 0, y1: 3 };      // podium
+  const S = { x0: -12, x1: 12, z0: -12, z1: 12, y0: 4, y1: 27 };     // lower shaft
+  const K = { x0: -10, x1: 10, z0: -10, z1: 10, y0: 28, y1: 38 };    // setback band
+  const U = { x0: -11, x1: 11, z0: -11, z1: 11, y0: 39, y1: 45 };    // upper shaft
+  const DECK_Y = 46;
+  const PH = { x0: -9, x1: 9, z0: -9, z1: 9, y0: 47, y1: 49 };       // penthouse
+  const SKIRT = 2;                                  // R12/13: clear of the glass line
+
+  // A band filled solid along +X: one run per z row, so the merge rule holds.
+  const slabBand = (y, f, id) => {
+    for (let z = f.z0; z <= f.z1; z++) vox.addRun(f.x0, y, z, f.x1 - f.x0 + 1, id);
+  };
+
+  // The outer wall of a band: corner posts on every edge, plus a mullion column
+  // every second cell. The bays between stay open for the glass cells.
+  const wallBand = (y, f, id) => {
+    for (let x = f.x0; x <= f.x1; x++)
+      if ((x - f.x0) % 2 === 0) { vox.addRun(x, y, f.z0, 1, id); vox.addRun(x, y, f.z1, 1, id); }
+    for (let z = f.z0; z <= f.z1; z++)
+      if ((z - f.z0) % 2 === 0) { vox.addRun(f.x0, y, z, 1, id); vox.addRun(f.x1, y, z, 1, id); }
+  };
+
+  const section = (f, id) => { for (let y = f.y0; y <= f.y1; y++) wallBand(y, f, id); };
+
+  // ---- the build ----
+  section(P, idC);                                 // podium walls, arcade level
+  slabBand(P.y1, P, idC);                          // podium deck (plaza terrace)
+  // Arcade piers on the podium face, offset from the concrete posts so the two
+  // palette ids never land on one cell.
+  for (let y = P.y0; y <= P.y1; y++)
+    for (let x = P.x0 + 1; x <= P.x1 - 1; x++)
+      if ((x - P.x0) % 6 === 3)
+        for (const z of [P.z0, P.z1]) vox.addRun(x, y, z, 1, idM);
+
+  section(S, idM);                                 // shaft, storeys 1-24
+  section(K, idM);                                 // shaft, storeys 25-35 (setback)
+  section(U, idM);                                 // shaft, storeys 36-42
+
+  slabBand(DECK_Y, U, idC);                        // roof deck
+  for (let y = PH.y0; y <= PH.y1; y++) {           // mechanical penthouse
+    for (let x = PH.x0; x <= PH.x1; x++)
+      for (const z of [PH.z0, PH.z1]) vox.addRun(x, y, z, 1, idC);
+    for (let z = PH.z0 + 1; z <= PH.z1 - 1; z++)
+      for (const x of [PH.x0, PH.x1]) vox.addRun(x, y, z, 1, idC);
+  }
+  slabBand(PH.y1, PH, idC);                        // penthouse cap
+
+  const envelope = {
+    min: { x: P.x0 - SKIRT, y: P.y0, z: P.z0 - SKIRT },
+    max: { x: P.x1 + SKIRT, y: DECK_Y, z: P.z1 + SKIRT },
+  };
+
+  // The envelope follows the building, band by band: the horizontal limit is 2 m
+  // clear of the facade at that height. A single podium box would let a camera
+  // sit on the shaft, because the podium is wider than the tower it carries.
+  envelope.profile = [
+    { y0: P.y0, y1: P.y1, x0: P.x0 - SKIRT, x1: P.x1 + SKIRT, z0: P.z0 - SKIRT, z1: P.z1 + SKIRT },
+    { y0: S.y0, y1: S.y1, x0: S.x0 - SKIRT, x1: S.x1 + SKIRT, z0: S.z0 - SKIRT, z1: S.z1 + SKIRT },
+    { y0: K.y0, y1: K.y1, x0: K.x0 - SKIRT, x1: K.x1 + SKIRT, z0: K.z0 - SKIRT, z1: K.z1 + SKIRT },
+    { y0: U.y0, y1: U.y1, x0: U.x0 - SKIRT, x1: U.x1 + SKIRT, z0: U.z0 - SKIRT, z1: U.z1 + SKIRT },
+    { y0: DECK_Y, y1: DECK_Y, x0: U.x0 - SKIRT, x1: U.x1 + SKIRT, z0: U.z0 - SKIRT, z1: U.z1 + SKIRT },
+  ];
+
+  envelope.isOutside = (pt) => {
+    if (pt.y < envelope.min.y || pt.y > envelope.max.y) return true;   // R12/13: over the deck
+    const band = envelope.profile.find((b) => pt.y >= b.y0 && pt.y <= b.y1);
+    if (!band) return true;                                            // a gap is clear space
+    return pt.x < band.x0 || pt.x > band.x1 || pt.z < band.z0 || pt.z > band.z1;
+  };
+  const cx = (envelope.min.x + envelope.max.x) / 2;
+  const cy = (envelope.min.y + envelope.max.y) / 2;
+  const cz = (envelope.min.z + envelope.max.z) / 2;
+  envelope.radius = Math.hypot(envelope.max.x - cx, envelope.max.y - cy, envelope.max.z - cz);
+  envelope.centre = { x: cx, y: cy, z: cz };
+
+  return {
+    envelope,
+    tower: {
+      built: true,
+      height: DECK_Y,
+      roofDeck: DECK_Y,
+      penthouseTop: PH.y1,
+      storeys: 42,
+      footprint: { shaft: [S.x1 - S.x0 + 1, S.z1 - S.z0 + 1], podium: [P.x1 - P.x0 + 1, P.z1 - P.z0 + 1] },
+      sections: { podium: P, lower: S, setback: K, upper: U, penthouse: PH },
+    },
+  };
+})());
