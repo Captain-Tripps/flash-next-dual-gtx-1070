@@ -219,19 +219,19 @@ the task that owns the code:
   `fade.black` ramps 0 -> 1 over [FADE_START, SHOW_LEN]; wrap = one-clamp grace:
   `wrapAt = SHOW_LEN + dtClamp` and after `wrapAt` the clock resets to 0 exactly once.
 
-- [ ] Step 1: failing test "BEATS literal equals the Beat Table": `clock.BEATS` is the 24
+- [x] Step 1: failing test "BEATS literal equals the Beat Table": `clock.BEATS` is the 24
   rows of Appendix A in order, with exact durations and cumulative `storm` start == 390
   (the arithmetic of the appendix is then pinned by a test, not by prose).
-- [ ] Step 2: failing test "clock constants": sums 715, 735/20/6/729, storm dur 95,
+- [x] Step 2: failing test "clock constants": sums 715, 735/20/6/729, storm dur 95,
   `seekTo("blast")` 360.
-- [ ] Step 3: failing test "hold and fade and wrap": `beatAt(730)` null; `fade.black === 1`
+- [x] Step 3: failing test "hold and fade and wrap": `beatAt(730)` null; `fade.black === 1`
   before the cut; exactly one reset when ticking past `SHOW_LEN + dtClamp`; no second clamp.
-- [ ] Step 4: failing test "fade observable at FADE_START" (Review Focus 4).
-- [ ] Step 5: run; expect FAIL.
-- [ ] Step 6: implement the clock fragment per Interfaces; `tools/ui-verify.mjs` = the
+- [x] Step 4: failing test "fade observable at FADE_START" (Review Focus 4).
+- [x] Step 5: run; expect FAIL.
+- [x] Step 6: implement the clock fragment per Interfaces; `tools/ui-verify.mjs` = the
   AGENTS.md `ui-verify` core adapted: open page, `NAKATOMIC.clock.seekTo("blast")`, assert
   rendered end state later. (End-state assertion, not symptom probes.)
-- [ ] Step 7: run unit; PASS. Commit: "show clock: 715/735, hold, fade, one-clamp wrap".
+- [x] Step 7: run unit; PASS. Commit: "show clock: 715/735, hold, fade, one-clamp wrap".
 
 ### Task 7: Lobby, fountain, Christmas tree - seen through glass
 

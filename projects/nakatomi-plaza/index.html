@@ -559,6 +559,102 @@ Object.assign(NAKATOMIC, (() => {
   };
 })());
 
+// Fragment 06: the show clock. One beat table, one continuous take.
+//
+// The constants are the v1 hand-off numbers, pinned by tests: the 24 durations sum
+// to BEAT_END = 715, blast starts at 360, storm runs 390..485 at dur 95 (it absorbs
+// the slack), HOLD 20, SHOW_LEN 735, FADE_LEN 6, FADE_START 729.
+//
+// The wrap is a one-clamp grace: the frame clock may not advance by more than
+// dtClamp per tick, and the loop cut only happens once t passes
+// wrapAt = SHOW_LEN + dtClamp. That gives the fade an observable full-black frame
+// before the cut instead of the cut swallowing it, and it means a page that sat in a
+// background tab can not skip through the show on the first frame back.
+
+Object.assign(NAKATOMIC, (() => {
+  // Appendix A, in scene order. Deltas are Jon-reviewable; the durations are the
+  // contract, not a starting point to drift from.
+  const BEATS = [
+    { id: "open", label: "Dusk over the boulevard - establishing", dur: 34 },
+    { id: "taxiConvoy", label: "Taxi convoy onto the lot", dur: 38 },
+    { id: "horseCar", label: "Horse car and motorcycle escort", dur: 33 },
+    { id: "limoNakatomi", label: "Nakatomi Plaza signage, glass lobby", dur: 38 },
+    { id: "treeTruck", label: "Christmas tree truck, light trucks", dur: 36 },
+    { id: "archWalk", label: "Walkway, palms, marquee", dur: 35 },
+    { id: "treeSet", label: "Tree set down beneath the glass", dur: 34 },
+    { id: "skateHolly", label: "Holly on skates to the doors", dur: 32 },
+    { id: "gunRun", label: "Gun run staged on the roof", dur: 38 },
+    { id: "tileHelo", label: "Tile helo - the whomp", dur: 42 },
+    { id: "blast", label: "Blast - first facade break (starts at 360)", dur: 30 },
+    { id: "storm", label: "Storm over the skyline (dur 95)", dur: 95 },
+    { id: "fedConvoy", label: "Fed convoys up the boulevard", dur: 42 },
+    { id: "wallOfCars", label: "Wall of police cars on the lot", dur: 36 },
+    { id: "lobbyLights", label: "Lobby lights hold under dusk", dur: 34 },
+    { id: "carDepart", label: "Cars off the lot at dusk pull-back", dur: 22 },
+    { id: "treeGlow", label: "Tree glow, canopy shimmer", dur: 18 },
+    { id: "fountainSettle", label: "Fountain settles, water still", dur: 15 },
+    { id: "plazaWide", label: "Plaza wide, empty walkway", dur: 13 },
+    { id: "skyPush1", label: "Skyline push-in 1", dur: 11 },
+    { id: "skyPush2", label: "Skyline push-in 2", dur: 10 },
+    { id: "towerPull", label: "Tower pull-back to boulevard", dur: 9 },
+    { id: "rooftopGlow", label: "Rooftop glow, penthouse lights", dur: 8 },
+    { id: "drestle", label: "Final settling frame before the hold", dur: 12 },
+  ];
+
+  const BEAT_END = 715;      // the beat timeline's length
+  const HOLD = 20;           // R14: still frame at the end
+  const SHOW_LEN = BEAT_END + HOLD;   // 735
+  const FADE_LEN = 6;
+  const FADE_START = SHOW_LEN - FADE_LEN;   // 729
+  const dtClamp = 0.25;      // one frame of grace: the most a tick may advance
+  const wrapAt = SHOW_LEN + dtClamp;        // the loop cut
+  const HOLD_LABEL = "Hold - still frame";  // what the HUD shows in the hold
+
+  const order = BEATS.map((b) => b.id);
+  const byId = new Map();
+  let acc = 0;
+  for (const b of BEATS) {
+    if (byId.has(b.id)) throw new Error(`duplicate beat id ${b.id}`);
+    byId.set(b.id, { id: b.id, label: b.label, dur: b.dur, start: acc, end: acc + b.dur });
+    acc += b.dur;
+  }
+  if (acc !== BEAT_END) throw new Error(`beat durations sum to ${acc}, not ${BEAT_END}`);
+
+  const fade = { black: 0, begun: false };
+  let t = 0;
+
+  const beatAt = (time) => {
+    if (!(time >= 0) || time >= BEAT_END) return null;   // null through the hold
+    for (const b of byId.values()) if (time >= b.start && time < b.end) return b;
+    return null;                                          // unreachable, but honest
+  };
+
+  const clock = {
+    BEATS, order,
+    len: BEAT_END, BEAT_END, HOLD, SHOW_LEN, FADE_LEN, FADE_START, dtClamp, wrapAt,
+    HOLD_LABEL, fade,
+    get t() { return t; },
+    start: (id) => { const b = byId.get(id); if (!b) throw new Error(`unknown beat ${id}`); return b.start; },
+    dur: (id) => { const b = byId.get(id); if (!b) throw new Error(`unknown beat ${id}`); return b.dur; },
+    beatAt,
+    seekTo(id) { t = clock.start(id); fade.black = 0; fade.begun = false; return t; },
+    restart() { t = 0; fade.black = 0; fade.begun = false; },
+    // The render loop calls this with its own dt; everything it needs for the frame
+    // comes back in one object, so the loop never has to guess about state.
+    tick(dt) {
+      const step = Math.min(Math.max(Number(dt) || 0, 0), dtClamp);
+      let wrapped = false;
+      t += step;
+      if (t > wrapAt) { t = 0; wrapped = true; }          // grace: one clamped frame, once
+      fade.begun = t >= FADE_START;
+      fade.black = Math.min(1, Math.max(0, (t - FADE_START + dtClamp) / FADE_LEN));
+      return { t, beat: beatAt(t), black: fade.black, wrapped };
+    },
+  };
+
+  return { clock };
+})());
+
 </script>
 </body>
 </html>

@@ -58,6 +58,16 @@ before that cut. Timings are derived with `seekTo(id)`, never from a start colum
 - **Glass palette block.** Curtain-wall and shatter ids live in the reassigned `0xd001`
   block (v1 fix F3, `0xe001` -> `0xd001`). `0xe001` and above is reserved and the palette
   gate rejects any geometry that uses it.
+- **R18 - the plan has no scene-assembly task, so the loop has one home.** No task in the
+  plan creates the page's render loop (renderer, `THREE.Points` from `toSplats`, the rAF
+  loop that calls `clock.tick`, the camera driven by the rig, and the HUD/fade elements),
+  yet Task 14's render gate needs pixels. Ruling: that wiring lands in Task 13, the task
+  whose HUD text is driven by `beatAt()` - the first live-loop consumer - with the rig
+  output from Task 12 feeding it. Nothing in Tasks 7-12 may add a renderer of its own.
+- **Fade completes one grace-frame early.** `fade.black` reaches exactly 1 at
+  `FADE_START + FADE_LEN - dtClamp`, inside the fade window, so the full-black frame is
+  rendered before `SHOW_LEN` rather at its boundary; the loop cut then waits for the grace
+  frame at `SHOW_LEN + dtClamp` (R16 needs a visible black frame, not a swallowed one).
 
 ## 4. Canonical dimensions (set here, consumed by every later task)
 
@@ -109,7 +119,11 @@ bounding-sphere radius about the envelope centre.
 - `NAKATOMIC.skyline` - `x0`/`x1`/`walls`/`ids`; every skyline splice spans
   `x0..x1` (110 columns), because the run buffer only merges in +X.
 - `NAKATOMIC.clock` - `BEATS`/`order`/`start(id)`/`dur(id)`/`seekTo(id)`/`beatAt(t)`/`len`/
-  `BEAT_END`/`HOLD`/`SHOW_LEN`/`FADE_START`/`FADE_LEN`/`fade`/`wrapAt`/`tick(dt)`.
+  `BEAT_END`/`HOLD`/`SHOW_LEN`/`FADE_START`/`FADE_LEN`/`fade`/`wrapAt`/`tick(dt)`; also
+  `dtClamp` (the one-frame grace, 0.25 s), `HOLD_LABEL` (what the HUD shows through the
+  hold), `restart()`, and the getter `t`. `tick(dt)` returns
+  `{ t, beat, black, wrapped }` so the render loop reads the frame from one object.
+  The 24 rows are Appendix B verbatim and one test compares them whole.
 - `NAKATOMIC.rig` - `keys(id)`, `sample(id, t)`; one continuous take, fov clamped 35..60.
 
 Appendix B is the beat table the clock fragment carries verbatim.

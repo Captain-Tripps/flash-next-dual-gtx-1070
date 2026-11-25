@@ -377,6 +377,116 @@ describe("ground contract", () => {
   });
 });
 
+// --- Task 6: the show clock ---------------------------------------------
+describe("show clock", () => {
+  // Appendix A, verbatim. One joined string, so the whole table is one compare:
+  // the sandbox's arrays carry the sandbox prototype, so per-element deep compares
+  // are not usable here.
+  const TABLE = [
+    ["open", "Dusk over the boulevard - establishing", 34, 0],
+    ["taxiConvoy", "Taxi convoy onto the lot", 38, 34],
+    ["horseCar", "Horse car and motorcycle escort", 33, 72],
+    ["limoNakatomi", "Nakatomi Plaza signage, glass lobby", 38, 105],
+    ["treeTruck", "Christmas tree truck, light trucks", 36, 143],
+    ["archWalk", "Walkway, palms, marquee", 35, 179],
+    ["treeSet", "Tree set down beneath the glass", 34, 214],
+    ["skateHolly", "Holly on skates to the doors", 32, 248],
+    ["gunRun", "Gun run staged on the roof", 38, 280],
+    ["tileHelo", "Tile helo - the whomp", 42, 318],
+    ["blast", "Blast - first facade break (starts at 360)", 30, 360],
+    ["storm", "Storm over the skyline (dur 95)", 95, 390],
+    ["fedConvoy", "Fed convoys up the boulevard", 42, 485],
+    ["wallOfCars", "Wall of police cars on the lot", 36, 527],
+    ["lobbyLights", "Lobby lights hold under dusk", 34, 563],
+    ["carDepart", "Cars off the lot at dusk pull-back", 22, 597],
+    ["treeGlow", "Tree glow, canopy shimmer", 18, 619],
+    ["fountainSettle", "Fountain settles, water still", 15, 637],
+    ["plazaWide", "Plaza wide, empty walkway", 13, 652],
+    ["skyPush1", "Skyline push-in 1", 11, 665],
+    ["skyPush2", "Skyline push-in 2", 10, 676],
+    ["towerPull", "Tower pull-back to boulevard", 9, 686],
+    ["rooftopGlow", "Rooftop glow, penthouse lights", 8, 695],
+    ["drestle", "Final settling frame before the hold", 12, 703],
+  ].map(([id, label, dur, start]) => `${id}|${label}|${dur}|${start}`).join(";");
+
+  test("BEATS literal equals the Beat Table", () => {
+    build();
+    const { N } = boot();
+    const got = N.clock.BEATS.map((b) => `${b.id}|${b.label}|${b.dur}|${N.clock.start(b.id)}`).join(";");
+    assert.strictEqual(got, TABLE, "BEATS is the 24 rows of Appendix A, in order");
+    assert.strictEqual(N.clock.order.length, 24, "order holds 24 ids");
+    assert.strictEqual(N.clock.order.map((s) => s).join(","),
+      N.clock.BEATS.map((b) => b.id).join(","), "order matches BEATS");
+    // cumulative starts are pinned by the table, and storm/blast are the v1 anchors
+    assert.strictEqual(N.clock.start("storm"), 390, "storm starts at 390");
+    assert.strictEqual(N.clock.start("blast"), 360, "blast starts at 360");
+  });
+
+  test("clock constants", () => {
+    build();
+    const { N } = boot();
+    const c = N.clock;
+    const sum = c.BEATS.reduce((a, b) => a + b.dur, 0);
+    assert.strictEqual(sum, 715, "durations sum to 715");
+    assert.strictEqual(c.len, 715, "len");
+    assert.strictEqual(c.BEAT_END, 715, "BEAT_END");
+    assert.strictEqual(c.HOLD, 20, "HOLD");
+    assert.strictEqual(c.SHOW_LEN, 735, "SHOW_LEN = BEAT_END + HOLD");
+    assert.strictEqual(c.FADE_LEN, 6, "FADE_LEN");
+    assert.strictEqual(c.FADE_START, 729, "FADE_START = SHOW_LEN - FADE_LEN");
+    assert.strictEqual(c.dur("storm"), 95, "storm absorbs the slack at 95");
+    assert.strictEqual(c.seekTo("blast"), 360, "seekTo(blast) is the locked v1 invariant");
+  });
+
+  test("hold and fade and wrap", () => {
+    build();
+    const { N } = boot();
+    const c = N.clock;
+    // the hold window is still on screen but no longer has a beat label
+    assert.strictEqual(c.beatAt(715), null, "beatAt is null at BEAT_END");
+    assert.strictEqual(c.beatAt(730), null, "beatAt is null in the hold");
+    assert.strictEqual(c.beatAt(734.99), null, "still null just before the cut");
+    assert.strictEqual(c.beatAt(703).id, "drestle", "the last beat runs up to BEAT_END");
+    assert.strictEqual(c.beatAt(360).id, "blast", "beatAt at a beat's start");
+    assert.strictEqual(c.beatAt(359.99).id, "tileHelo", "beatAt at a beat's end");
+    // the fade must reach full black while the frame is still showing
+    c.seekTo("drestle");
+    let blacked = null, wrapped = false;
+    for (let i = 0; i < 400 && blacked === null; i++) {
+      const r = c.tick(c.dtClamp);
+      if (r.wrapped) wrapped = true;
+      if (c.fade.black === 1) blacked = c.t;
+    }
+    assert.notStrictEqual(blacked, null, "fade.black hits 1");
+    assert.ok(!wrapped, "full black comes before the wrap");
+    assert.ok(blacked < c.SHOW_LEN, `full black (${blacked}) must happen before the cut at ${c.SHOW_LEN}`);
+    // one-clamp grace: the wrap waits a frame past SHOW_LEN, then resets exactly once
+    assert.strictEqual(c.wrapAt, c.SHOW_LEN + c.dtClamp, "wrapAt is SHOW_LEN plus one clamped frame");
+    for (let i = 0; i < 40 && !wrapped; i++) wrapped = !!c.tick(c.dtClamp).wrapped;
+    assert.strictEqual(c.t, 0, "the clock resets to 0 exactly once");
+    c.tick(c.dtClamp);
+    assert.strictEqual(c.t, c.dtClamp, "the frame after the wrap continues from 0, no leftover");
+    // and dt is clamped once: a long gap (a returned tab) can not skip the show
+    const before = c.t;
+    c.tick(9e4);
+    assert.strictEqual(c.t, before + c.dtClamp, "dt is clamped once, not twice");
+  });
+
+  test("fade observable at FADE_START", () => {
+    build();
+    const { N } = boot();
+    const c = N.clock;
+    c.seekTo("skyPush2");
+    assert.strictEqual(c.fade.black, 0, "no fade before FADE_START");
+    let r;
+    for (let guard = 0; c.t < c.FADE_START && guard < 1000; guard++) r = c.tick(c.dtClamp);
+    assert.strictEqual(c.t, c.FADE_START, "frames land exactly on FADE_START");
+    assert.ok(c.fade.black > 0, "the fade is visible on the very frame FADE_START renders");
+    assert.ok(c.fade.black < 1, "and still short of black at its start");
+    assert.ok(r && typeof r.black === "number", "tick reports the black value to the render loop");
+  });
+});
+
 // --- Task 4: curtain wall + the dusk lit rule ---------------------------
 describe("curtain wall", () => {
   // The perimeter ring of a band, cell by cell, corners once.
