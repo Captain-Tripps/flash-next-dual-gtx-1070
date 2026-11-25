@@ -1,0 +1,353 @@
+// Fragment 99: the render rig - world to screen. First pixels.
+//
+// R18 said the wiring belonged in Task 13; Jon pulled it forward as Task 7.5 on
+// 2026-11-25 so Tasks 7-12 land visibly instead of blind. The `99-` prefix is not
+// cosmetics: fragments 01..98 must have published their APIs before this one reads
+// the shared buffer, because the world is assembled here, once.
+//
+// Nothing at eval time touches the DOM, GL or the ground batch: the boot gate in
+// verify/unit.mjs runs the page with no browser, and it stays green only because
+// the renderer, the camera and the event bindings appear inside start(). The one
+// exception is the scene object itself, whose shape is pinned by that gate.
+//
+// The show's own camera: Task 12 publishes NAKATOMIC.rig = { keys, sample }, and
+// the loop below consumes it when it is there (scene.follow). Until then the loop
+// drives the hand-rolled orbit rig - no addons, per the plan's one-rule imports.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const clock = NAKATOMIC.clock;
+  const envelope = NAKATOMIC.envelope;
+
+  // --- the buffer view, in point form. Page-side twin of tools/jsp.mjs, kept
+  // THREE-free so the gate can run it with no GL and compare both sides. --------
+  const splats = (buffer) => {
+    if (!buffer || !Array.isArray(buffer.runs))
+      throw new Error("splats wants the buffer view: { runs: [...], hexOf(id) }");
+    const points = [];
+    const colors = [];
+    for (const r of buffer.runs) {
+      const hex = buffer.hexOf(r.id);
+      if (!hex) throw new Error(`no palette colour for id 0x${Number(r.id).toString(16)}`);
+      for (let i = 0; i < r.len; i++) {
+        points.push([r.x + i, r.y, r.z]);
+        colors.push(hex);
+      }
+    }
+    return { points, colors };
+  };
+
+  // --- one world, built once. Fragments 03/04 emitted at boot; the ground batch
+  // is on demand, so this is the place that pulls it in. A second call returns the
+  // cached world: the render loop must never rebuild the plaza per frame. --------
+  let world = null;
+  const ensureWorld = () => {
+    if (world === null) {
+      const ground = NAKATOMIC.ground();
+      world = {
+        ground,
+        bounds: vox.bounds(),
+        voxels: vox.count,
+        buffer: vox.buffer(),
+      };
+    }
+    return world;
+  };
+
+  // --- framing 1..4: the four camera setups the show reads as its own wide shots.
+  // yaw is the orbit angle in degrees (0 = the +z side of the block, so ~180 faces
+  // the plaza front, where the glass atrium and the lobby arcade are), pitch is the
+  // elevation, and `dist` is a multiple of the envelope radius - every setup here
+  // starts further out than the tower's own corner, before the clamp ever runs.
+  const FRAMINGS = [
+    // Framing 1 is the wide establishing shot: the whole massing (roofline to lot
+    // edge) has to sit in frame with sky above it, so the target sits mid-tower and
+    // the lens stays well out. Framing 2 is the tower close, 3 the lobby-level pass,
+    // 4 looks back over the deck.
+    { name: "boulevard wide", yaw: 208, pitch: 10, dist: 2.4, fov: 46, target: [0, 18, -6] },
+    { name: "tower close", yaw: 168, pitch: 12, dist: 1.15, fov: 42, target: [0, 24, 0] },
+    { name: "lobby level", yaw: 186, pitch: 4, dist: 2.25, fov: 50, target: [0, 4, -8] },
+    { name: "over the deck", yaw: 196, pitch: 48, dist: 2.3, fov: 44, target: [0, 16, 10] },
+  ];
+
+  // sRGB hex -> the linear values the renderer's working space wants, so the
+  // palette hexes the gates assert on are the hexes the eye sees. Inline because
+  // THREE.Color is not available to the gate stub, and math is cheaper anyway.
+  // The /255 is the whole business: srgbToLinear wants a 0..1 channel, and handing
+  // it the raw byte makes pow((107 + 0.055) / 1.055, 2.4) = 65,350, which clamps to
+  // white in the shader and washes the whole plaza out. Exposed as NAKATOMIC.colorLinear
+  // so the gate can pin the range for every palette entry, and so the fx tasks read
+  // colours through the same one function.
+  const srgbToLinear = (c) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+  const colorLinear = (hex) => {
+    const n = parseInt(hex.slice(1), 16);
+    return [
+      srgbToLinear(((n >> 16) & 0xff) / 255),
+      srgbToLinear(((n >> 8) & 0xff) / 255),
+      srgbToLinear((n & 0xff) / 255),
+    ];
+  };
+
+  // R12/R13: the lens stays outside the tower envelope, always. The orbit target
+  // can sit inside the building, so a distance clamp alone does not guarantee it -
+  // this walks the point out along its own ray from the target until the envelope
+  // agrees. That makes `envelope.isOutside(camera.position)` an invariant, not a
+  // configuration, and Task 14 asserts it as one.
+  const clearOfEnvelope = (target, p) => {
+    let pos = { x: p.x, y: p.y, z: p.z };
+    if (envelope.isOutside(pos)) return pos;
+    let dx = pos.x - target.x, dy = pos.y - target.y, dz = pos.z - target.z;
+    let len = Math.hypot(dx, dy, dz);
+    if (len < 1e-6) { dy = 1; len = 1; }               // a lens on its own target: lift it up
+    const ux = dx / len, uy = dy / len, uz = dz / len;
+    let d = Math.max(len, 1);
+    for (let i = 0; i < 240 && !envelope.isOutside(pos); i++) {
+      d *= 1.08;
+      pos = { x: target.x + ux * d, y: target.y + uy * d, z: target.z + uz * d };
+    }
+    return pos;
+  };
+
+  // rig state: spherical orbit around a target. `pose` is the show's own camera
+  // (Task 12's rig feeds it through setPose); while it is set, orbit state idles.
+  const rig = {
+    yaw: 0, pitch: 0, dist: 0, target: { x: 0, y: 0, z: 0 },
+  };
+  let pose = null;
+  let rigReady = false;
+
+  const applyPose = (camera, pos, target, fov) => {
+    camera.position.set(pos.x, pos.y, pos.z);
+    if (fov) { camera.fov = fov; camera.updateProjectionMatrix(); }
+    camera.lookAt(target.x, target.y, target.z);
+  };
+
+  const orbitPos = () => {
+    const cp = Math.cos(rig.pitch * Math.PI / 180);
+    const cy = Math.cos(rig.yaw * Math.PI / 180);
+    const sz = Math.sin(rig.yaw * Math.PI / 180);
+    const pos = {
+      x: rig.target.x + rig.dist * cp * sz,
+      y: rig.target.y + rig.dist * Math.sin(rig.pitch * Math.PI / 180),
+      z: rig.target.z + rig.dist * cp * cy,
+    };
+    return clearOfEnvelope(rig.target, pos);
+  };
+
+  // The scene's public object is assembled before start(): the gate asserts its
+  // shape with no GL in the room, so every key exists at eval time.
+  const scene = {
+    running: false,
+    paused: false,
+    follow: true,
+    gl: null,
+    camera: null,
+    domElement: null,
+    fov: FRAMINGS[0].fov,
+    framing: 1,
+    stats: { points: 0, voxels: 0, fps: 0 },
+
+    // The HUD's label rule, as a pure function: beatAt is null through the hold,
+    // so a null beat is not a missing label - it is the hold, and it needs a label.
+    label(f) {
+      if (f && f.beat) return f.beat.label;
+      if (f && f.t >= clock.BEAT_END) return clock.HOLD_LABEL;
+      return "";
+    },
+
+    setFraming(n) {
+      const i = Math.min(Math.max(Number(n) || 1, 1), FRAMINGS.length);
+      const f = FRAMINGS[i - 1];
+      scene.framing = i;
+      rig.yaw = f.yaw;
+      rig.pitch = f.pitch;
+      rig.dist = envelope.radius * f.dist;
+      rig.target = { x: f.target[0], y: f.target[1], z: f.target[2] };
+      scene.fov = f.fov;
+      pose = null;
+      if (rigReady) applyPose(scene.camera, orbitPos(), rig.target, scene.fov);
+      return i;
+    },
+
+    // The show's own camera pose: { pos, target, fov } in buffer units. Task 12's
+    // per-beat keys land here; the envelope clamp still runs, so a key that tries
+    // to put the lens inside the tower ends up outside it anyway.
+    setPose(p) {
+      if (!p || !p.pos) return null;
+      const target = p.target || { x: 0, y: 0, z: 0 };
+      const pos = clearOfEnvelope(target, { x: p.pos.x, y: p.pos.y, z: p.pos.z });
+      pose = { pos, target, fov: p.fov };
+      if (pose.fov) scene.fov = pose.fov;
+      if (rigReady) applyPose(scene.camera, pose.pos, pose.target, pose.fov);
+      return pose;
+    },
+
+    togglePause() { scene.paused = !scene.paused; return scene.paused; },
+    restart() { clock.restart(); pose = null; return clock.t; },
+
+    // Rebuilds the splat cloud from the current buffer: the content tasks (7..12)
+    // add geometry and the shatter fx change ids, so the cloud has to be re-read.
+    rebuild() {
+      if (!rigReady) return scene.stats;
+      world = null;
+      const w = ensureWorld();
+      const s = splats(w.buffer);
+      const n = s.points.length;
+      const positions = new Float32Array(n * 3);
+      const colors = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        const p = s.points[i];
+        positions[i * 3] = p[0]; positions[i * 3 + 1] = p[1]; positions[i * 3 + 2] = p[2];
+        const c = colorLinear(s.colors[i]);
+        colors[i * 3] = c[0]; colors[i * 3 + 1] = c[1]; colors[i * 3 + 2] = c[2];
+      }
+      if (cloud) {
+        sceneObj.remove(cloud);
+        cloud.geometry.dispose();
+        cloud.material.dispose();
+      }
+      cloud = null;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+      geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+      const mat = new THREE.PointsMaterial({
+        size: 0.95, sizeAttenuation: true, vertexColors: true, fog: true,
+      });
+      cloud = new THREE.Points(geo, mat);
+      sceneObj.add(cloud);
+      scene.stats.points = n;
+      scene.stats.voxels = w.voxels;
+      return scene.stats;
+    },
+
+    // One frame of the show. The rAF wrapper calls it, and the pixel gates drive it
+    // by hand, so both paths exercise the same code: one clock tick, one pose, one
+    // render, one HUD update, one fade value.
+    step(dt) {
+      // While paused the tool owns the clock (it seeks, then paints), so the frame
+      // comes from the clock's current state instead of a stale tick.
+      frame = scene.paused ? frameFromClock() : clock.tick(dt);
+      const w = ensureWorld();
+      if (!scene.paused && scene.follow && NAKATOMIC.rig && frame.beat) {
+        const key = NAKATOMIC.rig.sample(frame.beat.id, frame.t);
+        if (key) scene.setPose(key);
+      }
+      if (rigReady) {
+        if (pose) applyPose(scene.camera, pose.pos, pose.target, pose.fov);
+        else applyPose(scene.camera, orbitPos(), rig.target, scene.fov);
+        if (hud) paintHud(frame);
+        gl.render(sceneObj, scene.camera);
+      }
+      return frame;
+    },
+
+    start() {
+      if (scene.running) return scene;
+      const stage = document.getElementById("stage");
+      gl = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+      gl.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      gl.setSize(window.innerWidth, window.innerHeight);
+      gl.outputColorSpace = THREE.SRGBColorSpace;
+      const dusk = new THREE.Color(0x0a0c12);
+      gl.setClearColor(dusk, 1);
+      stage.appendChild(gl.domElement);
+      scene.gl = gl;
+      scene.domElement = gl.domElement;
+
+      sceneObj = new THREE.Scene();
+      sceneObj.background = dusk;
+      sceneObj.fog = new THREE.FogExp2(0x0a0c12, 0.0022);
+
+      const w = ensureWorld();
+      scene.camera = new THREE.PerspectiveCamera(
+        FRAMINGS[0].fov, window.innerWidth / window.innerHeight, 0.5,
+        // far reaches past the skyline walls at z = 70 from any orbit the rig allows
+        Math.max(600, envelope.radius * 8),
+      );
+      scene.setFraming(1);
+      rigReady = true;
+      scene.rebuild();
+      hud = {
+        beat: document.getElementById("beat"),
+        meta: document.getElementById("meta"),
+        stat: document.getElementById("stat"),
+        fade: document.getElementById("fade"),
+      };
+      bindInput(gl.domElement);
+      rigReady = true;
+      scene.running = true;
+      loop = (now) => {
+        rafId = requestAnimationFrame(loop);
+        const dt = lastNow === null ? clock.dtClamp : (now - lastNow) / 1000;
+        lastNow = now;
+        scene.step(dt);
+        // A plain EMA of the frame rate: the HUD reads it, nothing in the show does.
+        const rate = 1 / Math.max(dt, 1e-4);
+        scene.stats.fps = scene.stats.fps ? scene.stats.fps * 0.9 + rate * 0.1 : rate;
+      };
+      rafId = requestAnimationFrame(loop);
+      return scene;
+    },
+  };
+
+  // --- internals the closure owns; the public object above is the only handle ----
+  let gl = null;
+  let sceneObj = null;
+  let cloud = null;
+  let hud = null;
+  // A frame from the clock without advancing it: what `step` reads while paused.
+  const frameFromClock = () => ({
+    t: clock.t, beat: clock.beatAt(clock.t), black: clock.fade.black, wrapped: false,
+  });
+  let frame = frameFromClock();
+  let rafId = 0;
+  let lastNow = null;
+  let loop = null;
+
+  const paintHud = (f) => {
+    hud.beat.textContent = scene.label(f);
+    hud.meta.textContent = `${f.t.toFixed(2)} s of ${clock.SHOW_LEN}`
+      + `  ${(f.beat && f.beat.id) || "hold"}`
+      + `  framing ${scene.framing}/${FRAMINGS.length}`
+      + (scene.paused ? "  paused" : "");
+    hud.stat.textContent = `${scene.stats.points} splats  ${scene.stats.voxels} vox  `
+      + `fps ${scene.stats.fps.toFixed(0)}`;
+    hud.fade.style.opacity = String(f.black);
+  };
+
+  const bindInput = (canvas) => {
+    let drag = null;
+    canvas.addEventListener("pointerdown", (e) => {
+      drag = { x: e.clientX, y: e.clientY, yaw: rig.yaw, pitch: rig.pitch };
+      canvas.setPointerCapture && canvas.setPointerCapture(e.pointerId);
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      rig.yaw = drag.yaw + (e.clientX - drag.x) * 0.28;
+      rig.pitch = Math.min(88, Math.max(-20, drag.pitch - (e.clientY - drag.y) * 0.22));
+      pose = null;
+    });
+    const up = () => { drag = null; };
+    canvas.addEventListener("pointerup", up);
+    canvas.addEventListener("pointerleave", up);
+    canvas.addEventListener("wheel", (e) => {
+      const min = envelope.radius * 1.05;      // the lens never gets inside the tower
+      rig.dist = Math.min(envelope.radius * 6, Math.max(min, rig.dist * (1 + e.deltaY * 0.0012)));
+      pose = null;
+    }, { passive: true });
+    window.addEventListener("keydown", (e) => {
+      const k = e.key;
+      if (k >= "1" && k <= String(FRAMINGS.length)) scene.setFraming(Number(k));
+      else if (k === " ") { scene.togglePause(); e.preventDefault(); }
+      else if (k === "r" || k === "R") scene.restart();
+    });
+    window.addEventListener("resize", () => {
+      if (!gl) return;
+      gl.setSize(window.innerWidth, window.innerHeight);
+      scene.camera.aspect = window.innerWidth / window.innerHeight;
+      scene.camera.updateProjectionMatrix();
+    });
+  };
+
+  return { splats, ensureWorld, colorLinear, scene };
+})());

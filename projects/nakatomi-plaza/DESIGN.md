@@ -59,11 +59,13 @@ before that cut. Timings are derived with `seekTo(id)`, never from a start colum
   block (v1 fix F3, `0xe001` -> `0xd001`). `0xe001` and above is reserved and the palette
   gate rejects any geometry that uses it.
 - **R18 - the plan has no scene-assembly task, so the loop has one home.** No task in the
-  plan creates the page's render loop (renderer, `THREE.Points` from `toSplats`, the rAF
-  loop that calls `clock.tick`, the camera driven by the rig, and the HUD/fade elements),
-  yet Task 14's render gate needs pixels. Ruling: that wiring lands in Task 13, the task
-  whose HUD text is driven by `beatAt()` - the first live-loop consumer - with the rig
-  output from Task 12 feeding it. Nothing in Tasks 7-12 may add a renderer of its own.
+  plan creates the page's render loop (renderer, `THREE.Points` from the buffer, the rAF
+  loop that calls `clock.tick`, the camera, and the HUD/fade elements), yet Task 14's
+  render gate needs pixels. Jon pulled that wiring forward as **Task 7.5** on 2026-11-25,
+  so Tasks 7-12 land visibly instead of blind: `src/99-scene-render.txt` owns the renderer,
+  the orbit stand-in for the camera, `NAKATOMIC.ensureWorld`/`NAKATOMIC.splats`, and the
+  HUD/fade wiring. Task 12's rig then drives it through `scene.setPose`, and nothing in
+  Tasks 7-12 may add a renderer of its own.
 - **Fade completes one grace-frame early.** `fade.black` reaches exactly 1 at
   `FADE_START + FADE_LEN - dtClamp`, inside the fade window, so the full-black frame is
   rendered before `SHOW_LEN` rather at its boundary; the loop cut then waits for the grace
@@ -125,6 +127,20 @@ bounding-sphere radius about the envelope centre.
   `{ t, beat, black, wrapped }` so the render loop reads the frame from one object.
   The 24 rows are Appendix B verbatim and one test compares them whole.
 - `NAKATOMIC.rig` - `keys(id)`, `sample(id, t)`; one continuous take, fov clamped 35..60.
+- `NAKATOMIC.splats(buffer)` - the page-side twin of `tools/jsp.mjs`: `{ points, colors }`,
+  one splat per voxel, in run order. Asserted against the Node tool, so both sides match.
+- `NAKATOMIC.ensureWorld()` - builds the ground batch into the shared buffer once and
+  returns `{ ground, bounds, voxels, buffer }`; a second call returns the same object.
+- `NAKATOMIC.colorLinear(hex)` - the palette's sRGB hex in the renderer's working space:
+  three 0..1 linear channels. `#ffcc77` goes out as `1, 0.6039, 0.1845`, `#ffffff` as
+  `1,1,1`. One test runs every palette entry through it, because feeding the raw 0-255
+  byte to the curve instead of the channel clamps every channel to 1 and the plaza
+  renders as white sheets. The fx tasks read colours through this, not a private copy.
+- `NAKATOMIC.scene` - exactly `start rebuild running paused follow stats camera gl fov
+  framing setFraming setPose step label togglePause restart domElement`. `stats` is
+  `{ points, voxels, fps }`; `step(dt)` is the one-frame function the rAF loop wraps, so
+  the pixel gates drive the same code path as the page. `label(f)` answers `HOLD_LABEL`
+  when `beatAt()` is null, and the camera never comes to rest inside the tower envelope.
 
 Appendix B is the beat table the clock fragment carries verbatim.
 
@@ -136,12 +152,18 @@ Appendix B is the beat table the clock fragment carries verbatim.
 | skyLit | `0x3a2b4a` | horizon glow |
 | concrete | `0x6b6f78` | tower spandrel |
 | mullion | `0x2c3038` | curtain-wall frame |
-| glass | `0xd001` | lit curtain-wall cells (the glass block) |
-| glassDark | `0xd002` | unlit cells |
-| glassShatter | `0xd003` | post-blast shards |
-| lobby | `0xffcc77` | lobby glow |
+| glassDark | `0xd001` | unlit curtain-wall cells, `#2b3243`, the dusk sky in the pane |
+| glass | `0xd002` | lit curtain-wall cells, `#ffcc77`, the warm interior glow |
+| glassShatter | `0xd003` | post-blast shards, `#e8f4ff` (Task 10) |
 | wet | `0x15181f` | wet plaza / asphalt |
 | brake | `0xc050` | police flash bar (scene id, below the glass block) |
+
+The rows above are the dusk set the plan asked for; what the fragments actually claim is
+one call to `palette.id(hex)` or `palette.define(id, hex)` per material, and the non-glass
+ids are auto-allocated from `0x0100` up. Two of the sky rows are not palette entries at
+all: dusk sits in the renderer's clear colour and `FogExp2`, both `#0a0c12`, and the far
+city's window bands carry the warm (`#8a6a4a`). Treat this appendix as the intent, and
+read `src/0[3-5]*.txt` for what is in the buffer.
 
 The gate test in Task 2 fails if any scene id lands at `0xe001` or above. The glass block
 runs `0xd001` to `0xdfff`; anything at `0xe001` and up is reserved and never used by

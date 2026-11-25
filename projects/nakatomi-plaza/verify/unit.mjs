@@ -81,17 +81,19 @@ export function makeTHREEStub() {
     this.updateMatrixWorld = () => {};
     this.traverse = (fn) => fn(this);
   };
-  const geo = function (w = 1, h = 1, d = 1) { this.parameters = { width: w, height: h, depth: d }; this.dispose = () => {}; };
+  const geo = function (w = 1, h = 1, d = 1) { this.parameters = { width: w, height: h, depth: d }; this.dispose = () => {}; this.attributes = {}; this.setAttribute = (n, a) => { this.attributes[n] = a; }; this.setDrawRange = () => {}; };
   const mat = function (p = {}) { Object.assign(this, p); this.color = new V(); this.dispose = () => {}; };
+  const attr = function (array, itemSize) { this.array = array; this.itemSize = itemSize; this.count = array.length / itemSize; };
   const T = {
-    Vector3: V,
+    Vector3: V, Vector2: function (x = 0, y = 0) { this.x = x; this.y = y; this.set = (a, b) => { this.x = a; this.y = b; return this; }; },
+    BufferGeometry: geo, BufferAttribute: attr, Float32BufferAttribute: attr, Points: meshStub, PointsMaterial: mat,
     BoxGeometry: geo, PlaneGeometry: geo, CircleGeometry: geo, CylinderGeometry: geo, ConeGeometry: geo,
     InstancedMesh: meshStub, Mesh: meshStub, Group: meshStub, Object3D: meshStub,
     PerspectiveCamera: function (fov = 50, near = 0.1, far = 1000) {
       this.position = new V(); this.up = new V(0, 1, 0); this.fov = fov; this.near = near; this.far = far;
       this.lookAt = () => {}; this.updateProjectionMatrix = () => {}; this.add = (c) => c;
     },
-    Scene: function () { this.children = []; this.add = (c) => { this.children.push(c); return c; }; this.fog = null; this.background = null; },
+    Scene: function () { this.children = []; this.add = (c) => { this.children.push(c); return c; }; this.remove = (c) => { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); }; this.fog = null; this.background = null; },
     Color: function (c) { this.value = c ?? 0; this.set = (v) => { this.value = v; return this; }; this.setHex = (v) => { this.value = v; return this; }; },
     AmbientLight: meshStub, DirectionalLight: meshStub, HemisphereLight: meshStub, PointLight: meshStub, SpotLight: meshStub,
     Fog: function (c, n, f) { this.color = c; this.near = n; this.far = f; },
@@ -578,6 +580,111 @@ describe("curtain wall", () => {
       assert.ok(row.length > 0, `band ${y} has glazing`);
       assert.ok(row.filter((c) => c.lit).length / row.length < 0.3, `band ${y} should read dark`);
     }
+  });
+});
+
+// --- Task 7.5: scene assembly - first pixels (R18 pulled forward) --------
+describe("scene assembly", () => {
+  test("ground() caches its batch, so a second call re-emits nothing", () => {
+    build();
+    const { N } = boot();
+    // The shared buffer coalesces by palette id, so a second emit would not double
+    // vox.count - it would just redo 9406 cells of work on every frame the render
+    // loop takes. The gate pins the caching instead: no emissions, same object.
+    const orig = N.vox.addRun;
+    let emissions = 0;
+    N.vox.addRun = (...a) => { emissions++; return orig(...a); };
+    const first = N.ground();
+    assert.ok(emissions > 0, "the first call emits the batch");
+    const runs = N.vox.runs().length, voxCount = N.vox.count;
+    emissions = 0;
+    const second = N.ground();
+    N.vox.addRun = orig;
+    assert.strictEqual(emissions, 0, "the second call must not re-emit into the shared buffer");
+    assert.strictEqual(second, first, "the cached batch is the same object");
+    assert.strictEqual(N.vox.runs().length, runs, "run count unchanged");
+    assert.strictEqual(N.vox.count, voxCount, "voxel count unchanged");
+    assert.strictEqual(first.countVox, 9406, "the locked ground number still holds");
+  });
+
+  test("ensureWorld puts the whole plaza, not just the tower, in the buffer", () => {
+    build();
+    const { N } = boot();
+    const world = N.ensureWorld();
+    assert.strictEqual(world, N.ensureWorld(), "the world is built exactly once");
+    assert.ok(world.ground && world.buffer && world.bounds, "the world carries ground + buffer + bounds");
+    // The shared buffer is what render builds from, so it must span the ground
+    // contract's own extents: garage floor band, block edge, skyline edge, roof deck.
+    const b = N.vox.bounds();
+    const p = N._plan, sky = N.skyline;
+    assert.ok(b.min.y <= p.LOT, `buffer floor ${b.min.y} is not as low as the lot band ${p.LOT}`);
+    assert.ok(b.min.x <= sky.x0 && b.max.x >= sky.x1, "the skyline span is not in the buffer");
+    assert.ok(b.min.z <= p.BLOCK.z0, "the block's near edge is not in the buffer");
+    assert.ok(b.max.z >= Math.max(...sky.walls.map((w) => w.z)), "the far skyline wall is not in the buffer");
+    assert.ok(b.max.y >= N.tower.roofDeck, "the roof deck is not in the buffer");
+    assert.strictEqual(world.voxels, N.vox.count, "the world's voxel total is the buffer's");
+    assert.ok(world.voxels > 9406 + N.glass.cells.length, "the world holds ground + tower + glass");
+  });
+
+  test("splats() mirrors tools/jsp.mjs, one point per voxel", async () => {
+    build();
+    const { toSplats } = await import(pathToFileURL(resolve(ROOT, "tools", "jsp.mjs")).href);
+    const { N } = boot();
+    N.ensureWorld();
+    const view = N.vox.buffer();
+    const a = N.splats(view), b = toSplats(view);
+    assert.strictEqual(a.points.length, b.points.length, "point count matches the Node tool");
+    assert.strictEqual(a.colors.length, b.colors.length, "colour count matches the Node tool");
+    assert.strictEqual(a.points.length, N.vox.count, "one splat per voxel");
+    // Element-wise on primitives: the page-side arrays come from the vm sandbox,
+    // and deepStrictEqual compares prototypes, which differ across realms.
+    const keyOf = (s) => s.points.map((p) => p.join(",")).join(";");
+    assert.strictEqual(keyOf(a), keyOf(b), "splat positions match the Node tool, in order");
+    assert.strictEqual(a.colors.join(","), b.colors.join(","), "splat colours match the Node tool, in order");
+    for (const hex of a.colors) assert.match(hex, /^#[0-9a-f]{6}$/i, "splat colour is a hex");
+    assert.ok(a.colors.includes(N.palette.hexOf(N.glass.ids.lit)), "lit glass reaches the splats");
+  });
+
+  test("palette hexes reach the renderer as 0..1 channels, not raw 0-255 bytes", () => {
+    build();
+    const { N } = boot();
+    // The first live frames came back white: srgbToLinear was handed the raw byte
+    // instead of the channel, so pow((107 + 0.055)/1.055, 2.4) = 65,350 for the
+    // mid-greys and every channel clamped to 1 in the shader. The gate pins the
+    // range for the whole palette, so the bug can never come back silently.
+    for (const [id, hex] of N.palette.entries) {
+      const c = N.colorLinear(hex);
+      assert.strictEqual(c.length, 3, `${hex} has three channels`);
+      for (const v of c) {
+        assert.ok(Number.isFinite(v), `channel for ${hex} (id 0x${id.toString(16)}) is finite`);
+        assert.ok(v >= 0 && v <= 1, `channel ${v} for ${hex} is outside the 0..1 render range`);
+      }
+    }
+    // The ends of the ramp: white stays white, black stays black.
+    assert.strictEqual(N.colorLinear("#ffffff").join(","), "1,1,1", "white");
+    assert.strictEqual(N.colorLinear("#000000").join(","), "0,0,0", "black");
+    // And the lit glass, in working-space linear: #ffcc77 is a full red, an amber
+    // green and a dim blue. The exact numbers are what the framebuffer must read.
+    const lit = N.colorLinear(N.palette.hexOf(N.glass.ids.lit));
+    const near = (got, want) => Math.abs(got - want) < 5e-4;
+    assert.ok(near(lit[0], 1), `lit red channel ${lit[0]}`);
+    assert.ok(near(lit[1], 0.60388), `lit green channel ${lit[1]}`);
+    assert.ok(near(lit[2], 0.18452), `lit blue channel ${lit[2]}`);
+  });
+
+  test("the scene exposes its contract and boots without GL", () => {
+    build();
+    const { N } = boot();
+    const keys = "camera domElement follow fov framing gl label paused rebuild restart running setFraming setPose start stats step togglePause".split(" ").sort();
+    assert.deepStrictEqual(Object.keys(N.scene).sort(), keys, "scene keys are pinned");
+    for (const k of ["start", "rebuild", "setFraming", "setPose", "step", "label", "togglePause", "restart"])
+      assert.strictEqual(typeof N.scene[k], "function", `scene.${k} is a function`);
+    assert.strictEqual(N.scene.running, false, "the loop is not running until start()");
+    assert.strictEqual(N.scene.gl, null, "no renderer before start()");
+    assert.deepStrictEqual(Object.keys(N.scene.stats).sort(), "fps points voxels".split(" ").sort(), "stats keys");
+    // The hold fallback needs no beat label to exist: label() answers for the hold.
+    assert.strictEqual(N.scene.label({ t: N.clock.BEAT_END + 1, beat: null }), N.clock.HOLD_LABEL, "hold fallback label");
+    assert.strictEqual(N.scene.label({ t: 360, beat: N.clock.beatAt(360) }), N.clock.beatAt(360).label, "beat label");
   });
 });
 

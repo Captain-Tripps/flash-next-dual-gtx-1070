@@ -90,7 +90,7 @@ Object.assign(NAKATOMIC, (() => {
     for (let z = r.z0 + 1; z <= r.z1 - 1; z++) { put(r.x0, y, z, 1, id); put(r.x1, y, z, 1, id); }
   };
 
-  const ground = () => {
+  const emit = () => {
     // ---- the plaza deck, cut open where the lot, the driveway and the pool go down
     const holes = [LOT_RECT, DITCH_RECT, POOL];
     for (let z = BLOCK.z0; z <= BLOCK.z1; z++) {
@@ -169,6 +169,12 @@ Object.assign(NAKATOMIC, (() => {
       streetY: STREET,
     };
   };
+
+  // The batch is emitted once: the render loop reads the shared buffer, so a
+  // rebuild would push the same cells through addRun again and grow the batch's
+  // own `runs` list while the coalesced buffer stayed put - a split second world.
+  let cached = null;
+  const ground = () => { if (cached === null) cached = emit(); return cached; };
 
   return {
     ground,

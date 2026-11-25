@@ -233,6 +233,40 @@ the task that owns the code:
   rendered end state later. (End-state assertion, not symptom probes.)
 - [x] Step 7: run unit; PASS. Commit: "show clock: 715/735, hold, fade, one-clamp wrap".
 
+### Task 7.5: Scene assembly - first pixels (R18 pulled forward)
+
+**Files:** Create: `src/99-scene-render.txt`; modify `src/05-ground-plaza.txt` (idempotent
+`ground()`); modify `tools/ui-verify.mjs` (scene assertions). Jon chose this order on
+2026-11-25: the plan had no scene-assembly task (R18) and the page drew nothing, so the
+wiring moves ahead of the content tasks so Tasks 7-12 land visibly.
+
+**Interfaces:**
+- Consumes: `vox.buffer()` (`{ runs, hexOf }`), `palette`, `clock`, `NAKATOMIC.ground()`.
+- Produces: `NAKATOMIC.splats(bufferView) -> { points, colors }` (the page-side twin of
+  `tools/jsp.mjs`, no THREE, so it tests in the sandbox); `NAKATOMIC.scene = { start,
+  rebuild, running, stats: { points, voxels, fps }, camera, fov, framing, setFraming,
+  togglePause, restart, gl }`; `NAKATOMIC.ensureWorld()` - every fragment's geometry
+  emitted into the shared buffer exactly once.
+- The fragment joins last on purpose (`99-` prefix): the world must be complete before the
+  scene reads the buffer.
+
+- [x] Step 1: failing test "ground() is idempotent": two calls emit the world once, so
+  `vox.count` does not double and `countVox` is unchanged (today `put` calls `addRun`
+  unconditionally, which is the latent bug a render loop would hit).
+- [x] Step 2: failing test "page-side splats mirror the buffer": `splats(vox.buffer())`
+  emits one point per voxel and every colour resolves through the palette; totals equal
+  ground + tower, not a half-buffer.
+- [x] Step 3: failing test "the scene exposes its contract": `NAKATOMIC.scene` keys pinned,
+  and boot stays clean in the sandbox - the fragment touches no DOM or GL at eval time.
+- [x] Step 4: implement `src/99-scene-render.txt`: renderer with `preserveDrawingBuffer`,
+  THREE.Points from the splat arrays, hand-rolled orbit (drag/wheel, no addons), framings
+  1..4, space pause, R restart, HUD from `beatAt()` with the hold fallback, `#fade` opacity
+  from `clock.fade.black`, and the rAF loop that calls `clock.tick` exactly once per frame.
+- [x] Step 5: extend `tools/ui-verify.mjs` with the pixel end state: canvas exists,
+  `scene.stats.points === vox.count`, and the centre of the frame is not the background
+  colour (the tower is on screen), then screenshot it for review.
+- [x] Step 6: run unit + ui-verify; PASS. Commit: "scene assembly: first pixels, orbit rig, HUD/fade wiring".
+
 ### Task 7: Lobby, fountain, Christmas tree - seen through glass
 
 **Files:** Create: `src/07-lobby-fountain-tree.txt`.
