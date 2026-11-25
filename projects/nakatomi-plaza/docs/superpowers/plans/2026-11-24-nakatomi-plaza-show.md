@@ -104,22 +104,22 @@ the task that owns the code:
   `verify/unit.mjs` exports `extractInlineModule(html)`, `createSandbox()`,
   `runModuleIn(sandbox)`; `scripts/build.mjs` with `--check` mode.
 
-- [ ] Step 1: write `DESIGN.md` (spec v2) - copy the rulings and the exact clock values from
+- [x] Step 1: write `DESIGN.md` (spec v2) - copy the rulings and the exact clock values from
   this plan's Global Constraints plus the Beat Table appendix below, and mark it
   "re-authored after the v1 tree was deleted; beat list is a v2 reconstruction, deltas noted".
-- [ ] Step 2: write the failing test "boot is clean" in `verify/unit.mjs`: extract inline
+- [x] Step 2: write the failing test "boot is clean" in `verify/unit.mjs`: extract inline
   module from a built `index.html`, run it in the sandbox, assert `NAKATOMIC.version` is set
   and no exception thrown.
-- [ ] Step 3: run `node verify/unit.mjs`; expect FAIL (no index.html / no module).
-- [ ] Step 4: author `src/01-shell.txt`: `<!DOCTYPE html>` head, HUD divs, `<script type="module">`
+- [x] Step 3: run `node verify/unit.mjs`; expect FAIL (no index.html / no module).
+- [x] Step 4: author `src/01-shell.txt`: `<!DOCTYPE html>` head, HUD divs, `<script type="module">`
   open, import three from cdnjs (exact URL used by dragon-rider-aerie), a `NAKATOMIC`
   bootstrap object with `version: "0.1.0"`, and nothing else.
-- [ ] Step 5: write `scripts/build.mjs`: read `src/*.txt` in numeric order, join bodies, emit
+- [x] Step 5: write `scripts/build.mjs`: read `src/*.txt` in numeric order, join bodies, emit
   `index.html` (head fragment verbatim; closing `</script></body></html>` appended);
   `--check` extracts the module body to a temp file and runs `node --check`.
-- [ ] Step 6: `node scripts/build.mjs && node scripts/build.mjs --check && node verify/unit.mjs`;
+- [x] Step 6: `node scripts/build.mjs && node scripts/build.mjs --check && node verify/unit.mjs`;
   expect PASS.
-- [ ] Step 7: commit "nakatomi-plaza: scaffold, build join, vm test harness"; push branch.
+- [x] Step 7: commit "nakatomi-plaza: scaffold, build join, vm test harness"; push branch.
 
 ### Task 2: Voxel engine + palette contract (`tools/jsp.mjs`)
 
@@ -135,15 +135,15 @@ the task that owns the code:
   `0xe001`+ reserved, and `gate()` throws listing every offender. Nakatomi glass entries
   occupy the reassigned `0xd001` block (v1 F3 fix).
 
-- [ ] Step 1: failing test "addRun merges +X into one run": add two overlapping +X runs,
+- [x] Step 1: failing test "addRun merges +X into one run": add two overlapping +X runs,
   assert `count` is the merged total and `bounds()` covers both ends.
-- [ ] Step 2: failing test "gate rejects reserved-range ids": a palette entry at `0xe001`
+- [x] Step 2: failing test "gate rejects reserved-range ids": a palette entry at `0xe001`
   used by geometry makes `gate()` throw.
-- [ ] Step 3: run; expect FAIL.
-- [ ] Step 4: implement `src/02-voxels-palette.txt` per Interfaces; `tools/jsp.mjs` exports
+- [x] Step 3: run; expect FAIL.
+- [x] Step 4: implement `src/02-voxels-palette.txt` per Interfaces; `tools/jsp.mjs` exports
   `toSplats(voxBuffer)` returning `{ points, colors }` from the same buffer (used by Task 14
   pixel gates).
-- [ ] Step 5: run; expect PASS. Commit: "voxel run merge + palette gate (0xd001 glass block)".
+- [x] Step 5: run; expect PASS. Commit: "voxel run merge + palette gate (0xd001 glass block)".
 
 ### Task 3: Tower core + envelope contract
 

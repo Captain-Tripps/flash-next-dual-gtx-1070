@@ -1,0 +1,125 @@
+// Fragment 02: the voxel run buffer and the palette gate.
+//
+// The buffer stores horizontal runs along +X only: addStack turns a vertical
+// stack into one length-1 run per level, so the merge rule stays a single axis.
+// Spans are keyed by (palette id, z, y) and coalesced on insert, so overlapping
+// or repeated runs are never double-counted or double-drawn. Everything
+// downstream - render, AO, the splat view, the pixel gates - reads this list.
+
+Object.assign(NAKATOMIC, {
+  palette: (() => {
+    const RESERVED = 0xe000;           // 0xe001 and above: never scene-owned
+    const ALLOC_FROM = 0x0100;        // auto-allocated scene ids start here
+    const ALLOC_THROUGH = 0xd000;     // 0xd001..0xdfff is the glass block, not for auto-ids
+    const hexById = new Map();
+    const idByHex = new Map();
+
+    const norm = (hex) => {
+      if (typeof hex === "string") {
+        const h = hex.trim().toLowerCase();
+        if (!/^#[0-9a-f]{6}$/.test(h)) throw new Error(`bad palette hex: ${hex}`);
+        return h;
+      }
+      if (Number.isInteger(hex) && hex >= 0) return "#" + hex.toString(16).padStart(6, "0");
+      throw new Error(`bad palette hex: ${hex}`);
+    };
+
+    const define = (id, hex) => {
+      if (!Number.isInteger(id) || id < 0) throw new Error(`bad palette id: ${id}`);
+      if (id > RESERVED) throw new Error(`palette id 0x${id.toString(16)} is reserved`);
+      const h = norm(hex);
+      hexById.set(id, h);
+      idByHex.set(h, id);
+      return id;
+    };
+
+    // A hex's id, allocated from the scene range when it is not yet claimed.
+    const idFor = (hex) => {
+      const h = norm(hex);
+      if (idByHex.has(h)) return idByHex.get(h);
+      let id = ALLOC_FROM;
+      while (hexById.has(id)) {
+        id++;
+        if (id > ALLOC_THROUGH) throw new Error("scene palette ids exhausted");
+      }
+      return define(id, h);
+    };
+
+    // True when every id the scene geometry used stays out of the reserved
+    // range. Throws listing every offender, so a failing gate names the fix.
+    const gate = () => {
+      const offenders = new Set();
+      for (const id of NAKATOMIC.vox.ids()) if (id > RESERVED) offenders.add(`0x${id.toString(16)}`);
+      for (const id of hexById.keys()) if (id > RESERVED) offenders.add(`palette 0x${id.toString(16)}`);
+      if (offenders.size) throw new Error(`reserved palette ids: ${[...offenders].join(", ")}`);
+      return true;
+    };
+
+    return { define, id: idFor, hexOf: (id) => hexById.get(id) ?? null, gate, entries: hexById };
+  })(),
+
+  vox: (() => {
+    const spans = new Map();                       // `${id}|${z}|${y}` -> [{x,len}]
+    const key = (id, y, z) => `${id}|${z}|${y}`;
+    const spansFor = (id, y, z) => {
+      const k = key(id, y, z);
+      let list = spans.get(k);
+      if (!list) { list = []; spans.set(k, list); }
+      return list;
+    };
+
+    const addRun = (x, y, z, len, id) => {
+      if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z))
+        throw new Error(`vox coords must be integers: ${x},${y},${z}`);
+      if (!Number.isInteger(len) || len < 1) throw new Error(`bad run length: ${len}`);
+      if (!Number.isInteger(id)) throw new Error(`bad palette id: ${id}`);
+
+      // Insert one span, then coalesce every span it touches - overlapping or
+      // merely adjacent - so one logical run stays one logical run.
+      const list = spansFor(id, y, z);
+      let start = x, end = x + len;
+      const keep = [];
+      for (const s of list) {
+        if (s.x + s.len < start || s.x > end) { keep.push(s); continue; }
+        start = Math.min(start, s.x);
+        end = Math.max(end, s.x + s.len);
+      }
+      keep.push({ x: start, len: end - start });
+      keep.sort((a, b) => a.x - b.x);
+      spans.set(key(id, y, z), keep);
+    };
+
+    const addStack = (x, y0, z, height, id) => {
+      if (!Number.isInteger(height) || height < 1) throw new Error(`bad stack height: ${height}`);
+      for (let i = 0; i < height; i++) addRun(x, y0 + i, z, 1, id);
+    };
+
+    const forEachRun = (fn) => {
+      for (const [k, list] of spans) {
+        const [id, z, y] = k.split("|").map(Number);
+        for (const s of list) fn({ x: s.x, y, z, len: s.len, id });
+      }
+    };
+    const collect = () => { const runs = []; forEachRun((r) => runs.push(r)); return runs; };
+
+    return {
+      addRun,
+      addStack,
+      get count() { let n = 0; forEachRun((r) => { n += r.len; }); return n; },
+      ids: () => { const s = new Set(); for (const k of spans.keys()) s.add(Number(k.split("|")[0])); return s; },
+      bounds: () => {
+        const b = { min: { x: Infinity, y: Infinity, z: Infinity }, max: { x: -Infinity, y: -Infinity, z: -Infinity } };
+        forEachRun((r) => {
+          b.min.x = Math.min(b.min.x, r.x); b.max.x = Math.max(b.max.x, r.x + r.len - 1);
+          b.min.y = Math.min(b.min.y, r.y); b.max.y = Math.max(b.max.y, r.y);
+          b.min.z = Math.min(b.min.z, r.z); b.max.z = Math.max(b.max.z, r.z);
+        });
+        return b;
+      },
+      runs: collect,
+      // The one buffer view: what render builds from, and what tools/jsp.mjs
+      // turns into splats for the pixel gates.
+      buffer: () => ({ runs: collect(), hexOf: (id) => NAKATOMIC.palette.hexOf(id) }),
+    };
+  })(),
+});

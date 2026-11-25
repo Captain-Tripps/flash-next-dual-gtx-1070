@@ -10,7 +10,7 @@
 import { readFileSync } from "node:fs";
 import assert from "node:assert";
 import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve, dirname } from "node:path";
 import vm from "node:vm";
 
@@ -202,6 +202,58 @@ describe("shell boots", () => {
     build();
     const { N } = boot();
     assert.strictEqual(N.version, "0.1.0", "NAKATOMIC.version");
+  });
+});
+
+// --- Task 2: the voxel run buffer and the palette gate -------------------
+describe("voxel contract", () => {
+  test("addRun merges +X into one run", () => {
+    build();
+    const { N } = boot();
+    N.vox.addRun(0, 5, 0, 5, N.palette.id("#ff0000"));
+    N.vox.addRun(3, 5, 0, 4, N.palette.id("#ff0000"));
+    // union 0..7 = 7 voxels, counted once; two runs merged into one span.
+    assert.strictEqual(N.vox.count, 7, "count after merge");
+    const b = N.vox.bounds();
+    assert.strictEqual(b.min.x, 0, "bounds min x");
+    assert.strictEqual(b.max.x, 6, "bounds max x");
+    assert.strictEqual(b.max.y, 5, "bounds max y");
+    // the same run again must not double-count
+    N.vox.addRun(0, 5, 0, 5, N.palette.id("#ff0000"));
+    assert.strictEqual(N.vox.count, 7, "count after repeat add");
+    // a different id on the same span is still separate
+    N.vox.addRun(0, 5, 0, 5, N.palette.id("#00ff00"));
+    assert.strictEqual(N.vox.count, 12, "count with second palette id on same span");
+  });
+
+  test("auto-allocated ids never enter the glass block", () => {
+    build();
+    const { N } = boot();
+    // Fill the whole scene-owned range, then ask for one more colour: the
+    // allocator must stop at the 0xd001 block boundary, not squat on glass ids.
+    for (let id = 0x0100; id <= 0xd000; id++)
+      N.palette.define(id, "#" + id.toString(16).padStart(6, "0"));
+    assert.throws(() => N.palette.id("#ad1044"), /exhausted/, "allocator must stop below 0xd001");
+    assert.strictEqual(N.palette.hexOf(0xd001), null, "glass block must stay unclaimed");
+  });
+
+  test("gate rejects reserved-range ids", () => {
+    build();
+    const { N } = boot();
+    N.vox.addRun(1, 1, 1, 3, 0xe001);
+    assert.throws(() => N.palette.gate(), /e001/, "gate must list the offender");
+  });
+
+  test("toSplats expands runs into points", async () => {
+    build();
+    const { toSplats } = await import(pathToFileURL(resolve(ROOT, "tools", "jsp.mjs")).href);
+    const { N } = boot();
+    N.vox.addRun(2, 0, 0, 3, N.palette.id("#0000ff"));
+    const s = toSplats(N.vox.buffer());
+    assert.strictEqual(s.points.length, 3, "splat points");
+    assert.strictEqual(s.colors.length, 3, "splat colors");
+    assert.deepStrictEqual(s.points[2], [4, 0, 0], "splat point order");
+    assert.match(s.colors[0], /^#0000ff$/i, "splat color");
   });
 });
 
