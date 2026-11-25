@@ -920,6 +920,101 @@ describe("plaza dressing", () => {
   });
 });
 
+// --- Task 9: roof gun-run, tile helo -------------------------------------
+// Everything in this batch lives above the roof deck - the one region of the
+// scene where the camera rules say a lens may always go (over the deck is
+// outside by definition). The roof stack is what the tile helo has pulled out
+// of the facade and parked on the deck, so it uses the shatter glass id that
+// Appendix A already pins. The penthouse is the only thing on the deck that
+// reaches above it, so nothing in this batch may sit inside the penthouse box.
+describe("roof, run, helo", () => {
+  test("the run stacks sit on the roof line, inside the tower bounds, none inside the envelope", () => {
+    build();
+    const { N } = boot();
+    const roof = N.roofWorld();
+    const U = N.tower.sections.upper;
+    const PH = N.tower.sections.penthouse;
+    assert.ok(roof.stackCells.length > 0, "there is no stacked run on the roof");
+    assert.strictEqual(roof.stackMinY, N.tower.roofDeck + 1,
+      `stacks start at ${roof.stackMinY}, not on the roof line ${N.tower.roofDeck + 1}`);
+    const inBounds = (c) => c.x >= U.x0 && c.x <= U.x1 && c.z >= U.z0 && c.z <= U.z1;
+    const inPenthouse = (c) => c.x >= PH.x0 && c.x <= PH.x1 && c.z >= PH.z0 && c.z <= PH.z1 &&
+      c.y >= PH.y0 && c.y <= PH.y1;
+    for (const c of roof.stackCells) {
+      assert.strictEqual(N.envelope.isOutside({ x: c.x, y: c.y, z: c.z }), true,
+        `stack cell ${c.x},${c.y},${c.z} is inside the envelope`);
+      assert.strictEqual(inBounds(c), true, `stack cell ${c.x},${c.y},${c.z} is off the deck`);
+      assert.strictEqual(inPenthouse(c), false, `stack cell ${c.x},${c.y},${c.z} is inside the penthouse`);
+    }
+  });
+
+  test("the tile helo stays above the envelope and never below roof height", () => {
+    build();
+    const { N } = boot();
+    const roof = N.roofWorld();
+    assert.ok(roof.heloCells.length > 0, "there is no tile helo");
+    assert.ok(roof.heloMinY > N.tower.roofDeck,
+      `helo dips to ${roof.heloMinY}, at or below the roof deck ${N.tower.roofDeck}`);
+    for (const c of roof.heloCells)
+      assert.strictEqual(N.envelope.isOutside({ x: c.x, y: c.y, z: c.z }), true,
+        `helo cell ${c.x},${c.y},${c.z} is inside the envelope`);
+    // The rotor is the top band, and it is a wide flat run: a helicopter reads
+    // as a disc over a body even at voxel scale.
+    const disc = [...new Set(roof.heloCells.filter((c) => c.y === roof.heloTopY).map((c) => c.x))];
+    assert.ok(disc.length > 8, `the rotor spans only ${disc.length} cells - too narrow for a helo`);
+  });
+
+  test("the gun run lies along the penthouse edge, on the deck", () => {
+    build();
+    const { N } = boot();
+    const roof = N.roofWorld();
+    const PH = N.tower.sections.penthouse;
+    assert.ok(roof.runCells.length > 0, "the brass gun run is missing");
+    const deckEdge = PH.z0 - 1;
+    for (const c of roof.runCells) {
+      assert.strictEqual(c.y, N.tower.roofDeck + 1, `run cell ${c.x},${c.y},${c.z} floats off the deck`);
+      assert.ok(c.z === deckEdge || c.z === PH.z1 + 1,
+        `run cell ${c.x},${c.y},${c.z} does not hug the penthouse edge`);
+    }
+    // the stacks are pulled facade glass - the shatter id Appendix A pins
+    const shatter = N.glass.ids.shatter;
+    assert.ok(roof.stackCells.every((c) => c.id === shatter),
+      "the roof stack is not the pulled glass it was supposed to be");
+  });
+
+  test("the helo winch holds a tile at deck height, and its lights glow", () => {
+    build();
+    const { N } = boot();
+    const roof = N.roofWorld();
+    assert.ok(roof.heloCells.some((c) => c.y === N.tower.roofDeck + 1),
+      "the winch line does not reach a tile at deck height");
+    assert.ok(roof.lightCells.length > 0, "the helo flies without lights");
+    for (const c of roof.lightCells) {
+      assert.strictEqual(N.glass.lit(c.id), true, `light cell ${c.x},${c.y},${c.z} is not warm`);
+      assert.ok(c.y > N.tower.roofDeck, `light cell ${c.x},${c.y},${c.z} is below the deck`);
+    }
+  });
+
+  test("the roof batch claims each cell exactly once, and caches its batch", () => {
+    build();
+    const { N } = boot();
+    const roof = N.roofWorld();
+    const parts = roof.stackCount + roof.runCount + roof.heloCount + roof.lightCount;
+    assert.strictEqual(roof.countVox, parts,
+      `occupancy holds ${roof.countVox} cells but the parts add up to ${parts} - a cell is claimed twice`);
+    let emissions = 0;
+    const orig = N.vox.addRun;
+    N.vox.addRun = (...a) => { emissions++; return orig(...a); };
+    const runs = N.vox.runs().length, voxCount = N.vox.count;
+    const second = N.roofWorld();
+    N.vox.addRun = orig;
+    assert.strictEqual(emissions, 0, "the second call must not re-emit into the shared buffer");
+    assert.strictEqual(second, roof, "the cached batch is the same object");
+    assert.strictEqual(N.vox.runs().length, runs, "run count unchanged");
+    assert.strictEqual(N.vox.count, voxCount, "voxel count unchanged");
+  });
+});
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   await run(process.argv[2] || null);
 }

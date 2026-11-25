@@ -963,6 +963,136 @@ Object.assign(NAKATOMIC, (() => {
   };
 })());
 
+// Fragment 09: the roof - the gun run, the pulled-glass stacks, and the tile
+// helicopter that pulled them.
+//
+// Above the roof deck is the one region the camera rules always allow: R12/13
+// call anything over the deck outside by definition, so this batch builds with
+// the envelope as its floor, not its wall. Every cell here lives at band
+// roofDeck + 1 or higher; the claim guard rejects anything lower, which makes
+// collisions with the tower, the glass line and the penthouse physically
+// impossible rather than something a test has to remember.
+//
+// The stacks ARE the glass the helo pulled from the facade - the tile-helo of
+// the film hoisting panels off the curtain wall - so they wear the shatter id
+// Appendix A pins (0xd003), the same id Task 10's blast burst uses. The gun run
+// is the brass the roof fight left behind, stacked along the penthouse edge.
+//
+// The helo hovers on the courtyard side (z 20..21) with its winch line down to
+// a panel at deck height: that is the beat where the roof gets stripped, read
+// as one object - body, rotor disc, tail, line, cargo - not as a screenshot.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const palette = NAKATOMIC.palette;
+  const tower = NAKATOMIC.tower;
+  const U = tower.sections.upper;
+  const PH = tower.sections.penthouse;
+  const DECK = tower.roofDeck;                  // 46: the envelope's top
+  const GLASS = NAKATOMIC.glass.ids;
+  const idGlow = GLASS.lit;
+
+  // --- materials ---
+  const ids = {
+    brass: palette.id("#6e5c2e"),   // the gun run
+    hull: palette.id("#46503e"),    // the helo, muted green
+    metal: palette.id("#59606a"),   // rotor disc, winch line
+  };
+  const shatter = GLASS.shatter;    // pinned, not allocated - it is Appendix A's shard id
+
+  // --- where things stand ---
+  const STACKS = [[-11, -11], [-11, 10], [10, -11], [10, 10]];   // 2 x 2 corners of the deck, clear of the penthouse
+  const RUN_Y = DECK + 1;
+  const HELO = { x0: -4, x1: 3, z0: 20, z1: 21, y0: DECK + 4, y1: DECK + 5 };
+  const DISC = { y: DECK + 6, x0: -10, x1: 7 };
+  const WINCH = { x: 2, z: 20 };
+
+  // --- the batch, one material per cell, and nothing below the roof line ---
+  const cells = new Map();
+  const runs = [];
+  const parts = { stack: [], run: [], helo: [], light: [] };
+  const inPH = (x, z, y) => x >= PH.x0 && x <= PH.x1 && z >= PH.z0 && z <= PH.z1 && y >= PH.y0 && y <= PH.y1;
+  const claim = (x, y, z, id, part) => {
+    const key = `${x}|${y}|${z}`;
+    if (y <= DECK) throw new Error(`roof cell ${key} is at or below the deck band`);
+    if (inPH(x, z, y)) throw new Error(`roof cell ${key} is inside the penthouse`);
+    const seen = cells.get(key);
+    if (seen !== undefined) {
+      if (seen !== id) throw new Error(`roof cell ${key} claimed by two palette ids`);
+      return;
+    }
+    cells.set(key, id);
+    parts[part].push({ x, y, z, id });
+  };
+  const put = (x, y, z, len, id, part) => {
+    if (len <= 0) return;
+    for (let i = 0; i < len; i++) claim(x + i, y, z, id, part);
+    vox.addRun(x, y, z, len, id);
+    runs.push({ x, y, z, len, id, part });
+  };
+  const one = (x, y, z, id, part) => put(x, y, z, 1, id, part);
+
+  const emit = () => {
+    // ---- the pulled-glass stacks: two tiers each, at the deck's four corners ----
+    for (const [sx, sz] of STACKS) {
+      for (const dx of [0, 1]) for (const dz of [0, 1]) one(sx + dx, RUN_Y, sz + dz, shatter, "stack");
+      for (const dx of [0, 1]) one(sx + dx, RUN_Y + 1, sz, shatter, "stack");
+    }
+
+    // ---- the gun run: brass stacked along both penthouse edges, on the deck band ----
+    put(-8, RUN_Y, PH.z0 - 1, 17, ids.brass, "run");
+    put(-8, RUN_Y, PH.z1 + 1, 17, ids.brass, "run");
+
+    // ---- the tile helo, hovering over the courtyard it worked from ----
+    for (let y = HELO.y0; y <= HELO.y1; y++)
+      for (let z = HELO.z0; z <= HELO.z1; z++)
+        put(HELO.x0, y, z, HELO.x1 - HELO.x0 + 1, ids.hull, "helo");
+    for (let z = HELO.z0; z <= HELO.z1; z++)                           // tail boom
+      put(-8, HELO.y0, z, 4, ids.hull, "helo");
+    for (let z = HELO.z0; z <= HELO.z1; z++)                           // rotor disc, one flat run each
+      put(DISC.x0, DISC.y, z, DISC.x1 - DISC.x0 + 1, ids.metal, "helo");
+    for (let y = RUN_Y + 1; y <= HELO.y0 - 1; y++)                     // winch line to the panel
+      one(WINCH.x, y, WINCH.z, ids.metal, "helo");
+    one(WINCH.x, RUN_Y, WINCH.z, shatter, "helo");                     // the panel it is hauling
+    one(HELO.x0 + 3, HELO.y0 - 1, HELO.z0, idGlow, "light");           // lights under the hull
+    one(HELO.x0 + 4, HELO.y0 - 1, HELO.z1, idGlow, "light");
+
+    // ---- the numbers ---
+    let stackMinY = Infinity, heloMinY = Infinity, heloTopY = -Infinity;
+    for (const c of parts.stack) stackMinY = Math.min(stackMinY, c.y);
+    for (const c of parts.helo) { heloMinY = Math.min(heloMinY, c.y); heloTopY = Math.max(heloTopY, c.y); }
+
+    return {
+      voxels: runs.slice(),
+      batchVox: runs.length,
+      countVox: cells.size,
+      ids,
+      stackCells: parts.stack.slice(),
+      runCells: parts.run.slice(),
+      heloCells: parts.helo.slice(),
+      lightCells: parts.light.slice(),
+      stackCount: parts.stack.length,
+      runCount: parts.run.length,
+      heloCount: parts.helo.length,
+      lightCount: parts.light.length,
+      stackMinY,
+      heloMinY,
+      heloTopY,
+      hover: { ...HELO },
+    };
+  };
+
+  // One batch, once: like the ground and the other scene batches, a rebuild
+  // would push the same cells through addRun again while the buffer stayed put.
+  let cached = null;
+  const roofWorld = () => { if (cached === null) cached = emit(); return cached; };
+
+  return {
+    roofWorld,
+    roofline: { stacks: STACKS.map((s) => [...s]), helo: { ...HELO }, disc: { ...DISC }, winch: { ...WINCH } },
+  };
+})());
+
 // Fragment 99: the render rig - world to screen. First pixels.
 //
 // R18 said the wiring belonged in Task 13; Jon pulled it forward as Task 7.5 on
@@ -1012,10 +1142,12 @@ Object.assign(NAKATOMIC, (() => {
       const ground = NAKATOMIC.ground();
       const lobby = NAKATOMIC.lobbyWorld();
       const dressing = NAKATOMIC.plazaDressing();
+      const roof = NAKATOMIC.roofWorld();
       world = {
         ground,
         lobby,
         dressing,
+        roof,
         bounds: vox.bounds(),
         voxels: vox.count,
         buffer: vox.buffer(),

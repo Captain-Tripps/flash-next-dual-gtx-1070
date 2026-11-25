@@ -158,9 +158,18 @@ bounding-sphere radius about the envelope centre.
   is `{ x -20..20, z 20..24 }`: the court outside the 2 m skirt, clear of the pool,
   the kerbs and the palm grove. The lamps and marquee banner glow with the glass's
   own lit id.
-- `NAKATOMIC.ensureWorld()` - builds the ground, lobby and dressing batches into the
-  shared buffer once and returns `{ ground, lobby, dressing, bounds, voxels, buffer }`;
-  a second call returns the same object.
+- `NAKATOMIC.roofWorld()` - the roof batch, cached once: exactly `{ voxels, batchVox,
+  countVox, ids, stackCells, runCells, heloCells, lightCells, stackCount, runCount,
+  heloCount, lightCount, stackMinY, heloMinY, heloTopY, hover }`. Above the deck the
+  envelope is a floor, not a wall - the claim guard refuses anything at or below
+  `roofDeck`, and the tests pin every cell against `envelope.isOutside`, the upper
+  shaft bounds, and the penthouse box. The stacks are the glass the tile helo pulled
+  off the curtain wall, so they wear the pinned `shatter` id (`0xd003`) rather than a
+  new allocation; the helo's winch line drops to a panel at deck height and its
+  lights glow warm.
+- `NAKATOMIC.ensureWorld()` - builds the ground, lobby, dressing and roof batches into
+  the shared buffer once and returns `{ ground, lobby, dressing, roof, bounds, voxels,
+  buffer }`; a second call returns the same object.
 - `NAKATOMIC.colorLinear(hex)` - the palette's sRGB hex in the renderer's working space:
   three 0..1 linear channels. `#ffcc77` goes out as `1, 0.6039, 0.1845`, `#ffffff` as
   `1,1,1`. One test runs every palette entry through it, because feeding the raw 0-255

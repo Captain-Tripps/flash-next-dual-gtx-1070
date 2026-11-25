@@ -47,10 +47,12 @@ Object.assign(NAKATOMIC, (() => {
       const ground = NAKATOMIC.ground();
       const lobby = NAKATOMIC.lobbyWorld();
       const dressing = NAKATOMIC.plazaDressing();
+      const roof = NAKATOMIC.roofWorld();
       world = {
         ground,
         lobby,
         dressing,
+        roof,
         bounds: vox.bounds(),
         voxels: vox.count,
         buffer: vox.buffer(),

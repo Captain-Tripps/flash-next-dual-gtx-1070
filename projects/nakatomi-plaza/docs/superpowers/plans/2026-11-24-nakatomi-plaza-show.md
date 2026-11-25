@@ -295,7 +295,7 @@ wiring moves ahead of the content tasks so Tasks 7-12 land visibly.
 **Files:** Create: `src/09-roof-gunrun.txt`.
 - Test: "run stacks on roof, none inside envelope", "tile helo stays above envelope".
 
-- [ ] Steps 1-5: failing tests (stacked run voxels sit on the roof line, inside the tower
+- [x] Steps 1-5: failing tests (stacked run voxels sit on the roof line, inside the tower
   bounds; the tile-helo volume never below roof height); implement; PASS; commit.
 
 ### Task 10: Blast + storm - glass facade break, shatter burst
