@@ -345,16 +345,16 @@ wiring moves ahead of the content tasks so Tasks 7-12 land visibly.
 - Produces: `NAKATOMIC.rig = { keys(id) -> [ {t, pos, target, fov} ], sample(id, t) }`;
   continuous single take: keys interpolate; never teleports; `fov` clamped 35..60.
 
-- [ ] Step 1: failing test "every witness point passes isOutside": for each beat, sample 12
+- [x] Step 1: failing test "every witness point passes isOutside": for each beat, sample 12
   t-values across its key path and assert every position is outside the envelope, including
   the glass-line-proximity key (a key deliberately at 3.5 m from the curtain wall at plaza
   level must still satisfy the test - Review Focus 1).
-- [ ] Step 2: failing test "rig follows the beat order and never teleports": consecutive
+- [x] Step 2: failing test "rig follows the beat order and never teleports": consecutive
   samples are within epsilon of the interpolated path.
-- [ ] Step 3: run; expect FAIL.
-- [ ] Step 4: implement the rig: a per-beat key table over the Beat Table, orbiting the
+- [x] Step 3: run; expect FAIL.
+- [x] Step 4: implement the rig: a per-beat key table over the Beat Table, orbiting the
   tower, with zooms on the blast beat and a boulevard pull-back for the convoy.
-- [ ] Step 5: run; PASS. Commit: "single outside take: per-beat camera keys + invariant".
+- [x] Step 5: run; PASS. Commit: "single outside take: per-beat camera keys + invariant".
 
 ### Task 13: Audio events + HUD beat labels
 

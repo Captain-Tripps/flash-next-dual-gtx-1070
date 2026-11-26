@@ -82,6 +82,26 @@ before that cut. Timings are derived with `seekTo(id)`, never from a start colum
   Task 12's boulevard pull-back walks along. Because the batch never moves, its screen
   proof in `tools/ui-verify.mjs` can not be a frame delta: it is the two lightbar palette
   ids landing on the sensor, the only saturated red and saturated blue in the dusk palette.
+- **R20 - the take is one master key track, and the gates check different things.**
+  `rig.allKeys` is one array of `{ t, id }` interpolated pairs over absolute show times: one
+  continuous take (R12/R13), so a beat's own leg ends exactly where the next one starts, and
+  the take's last key is its first key (30, 40, 60) so the wrap cuts to black back at the
+  boulevard pose (R18). Keys are strictly increasing in time, fov is clamped to 35..60 at
+  build time, and there are no zoom lenses in the take.
+  The two witness gates check different things on purpose. The fragment's own build-time gate
+  walks the **key endpoints** and `envelope.isOutside`; the unit tests sample **interpolated
+  segments**, and the live driver walks the frames the page actually renders. Endpoint checks
+  alone pass a straight diagonal that clips the shaft's corner between two legal keys - the
+  lower shaft's shell stands at x/z +-14 (shaft +-12 plus the 2 m skirt), boundary-exclusive,
+  so a diagonal across a corner is legal at its ends and inside the middle of its leg. Three
+  legs in the take are therefore L-shaped around the shaft: the glass-line approach via
+  (16.5, 5.5, 20), the blast descent down the NE corner via (16, 47, -15), and the plazaWide
+  exit west via (-15, 6, -24). The sampled-segment test is the one that catches a shell
+  crossing; the endpoint gate is only the cheap first pass.
+  `scene.cameraSource` tells the HUD and the screenshots which of the three cameras painted a
+  frame - `take` (the rig, claimed only by `step()` with a live beat to key), `lens` (a pose a
+  tool pinned) or `framing` (one of the four orbit wide shots). A review screenshot that says
+  `framing 3/4` while the take drives the lens is a screenshot that lies about itself.
 - **Fade completes one grace-frame early.** `fade.black` reaches exactly 1 at
   `FADE_START + FADE_LEN - dtClamp`, inside the fade window, so the full-black frame is
   rendered before `SHOW_LEN` rather at its boundary; the loop cut then waits for the grace
@@ -157,7 +177,19 @@ bounding-sphere radius about the envelope centre.
   hold), `restart()`, and the getter `t`. `tick(dt)` returns
   `{ t, beat, black, wrapped }` so the render loop reads the frame from one object.
   The 24 rows are Appendix B verbatim and one test compares them whole.
-- `NAKATOMIC.rig` - `keys(id)`, `sample(id, t)`; one continuous take, fov clamped 35..60.
+- `NAKATOMIC.rig` - the single outside take (R20): `all()` (the master list of
+  `[ frac, pos, target, fov ]` per beat, in beat order), `allKeys` (one flat
+  `[{ t, id }]` array over absolute show times, strictly increasing, with the first key
+  repeated at `BEAT_END` as the loop home), `keys(id)` (that beat's slice, times absolute),
+  `sample(id, t)` (linear interpolation along the master, clamped at the slice ends), and
+  `routeKeys` (the three `convoy.routeAt` waypoints the boulevard pull-back walks, so the
+  response reads as something the lens travels past). Every leg is the pair that starts at
+  that key's `t`, so a segment's start is exactly the previous key's pose and the take
+  never cuts. Build-time gates: the keys are strictly increasing, fov stays in 35..60, the
+  last key is the first key, and every key endpoint passes `envelope.isOutside` - the unit
+  tests and the live driver check the sampled segments, which is the stronger pair (R20).
+  Consumes `clock.start`/`clock.dur` for every absolute time and `ground().streetY`/`street`
+  for the plaza-level legs, so no key carries a hand-kept time.
 - `NAKATOMIC.splats(buffer)` - the page-side twin of `tools/jsp.mjs`: `{ points, colors }`,
   one splat per voxel, in run order. Asserted against the Node tool, so both sides match.
 - `NAKATOMIC.lobbyWorld()` - the arcade band, cached once, with its own occupancy map:
@@ -219,12 +251,15 @@ bounding-sphere radius about the envelope centre.
   byte to the curve instead of the channel clamps every channel to 1 and the plaza
   renders as white sheets. The fx tasks read colours through this, not a private copy.
 - `NAKATOMIC.scene` - exactly `start rebuild running paused follow stats camera gl fov
-  framing setFraming setPose step label togglePause restart domElement`. `stats` is
-  `{ points, voxels, fps, fx }`; `step(dt)` is the one-frame function the rAF loop wraps,
-  so the pixel gates drive the same code path as the page. `stats.fx` is the overlay's
+  framing cameraSource setFraming setPose step label togglePause restart domElement`.
+  `stats` is `{ points, voxels, fps, fx }`; `step(dt)` is the one-frame function the rAF loop
+  wraps, so the pixel gates drive the same code path as the page. `stats.fx` is the overlay's
   per-frame cell count (Task 10) - the number the live driver compares against
-  `fx.at(t).length` to prove the burst painted rather than only counted. `label(f)` answers `HOLD_LABEL`
-  when `beatAt()` is null, and the camera never comes to rest inside the tower envelope.
+  `fx.at(t).length` to prove the burst painted rather than only counted. `label(f)` answers
+  `HOLD_LABEL` when `beatAt()` is null, and the camera never comes to rest inside the tower
+  envelope. `cameraSource` names the camera that painted the current frame: `take` when
+  `step()` is unpaused and carries a beat to key (the rig, through `setPose`), `lens` when a
+  tool pins a pose, `framing` when one of the four orbit wide shots is live.
 
 Appendix B is the beat table the clock fragment carries verbatim.
 

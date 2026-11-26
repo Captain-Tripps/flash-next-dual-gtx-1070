@@ -164,6 +164,11 @@ Object.assign(NAKATOMIC, (() => {
     yaw: 0, pitch: 0, dist: 0, target: { x: 0, y: 0, z: 0 },
   };
   let pose = null;
+  // Which camera made the frame the HUD describes: the show's own take ("take",
+  // set by step() from Task 12's keys), a pose pinned by a tool ("lens"), or one
+  // of the four fixed framings. The screenshots beside the pixel bars are the
+  // review proof, so they have to say what they show.
+  let poseSource = "framing";
   let rigReady = false;
 
   const applyPose = (camera, pos, target, fov) => {
@@ -195,6 +200,9 @@ Object.assign(NAKATOMIC, (() => {
     domElement: null,
     fov: FRAMINGS[0].fov,
     framing: 1,
+    // Read-only view of which camera painted the current frame: "take" (Task 12's
+    // keys through step()), "lens" (a pose pinned by a tool), "framing" (one of four).
+    get cameraSource() { return poseSource; },
     stats: { points: 0, voxels: 0, fps: 0, fx: 0 },
 
     // The HUD's label rule, as a pure function: beatAt is null through the hold,
@@ -215,6 +223,7 @@ Object.assign(NAKATOMIC, (() => {
       rig.target = { x: f.target[0], y: f.target[1], z: f.target[2] };
       scene.fov = f.fov;
       pose = null;
+      poseSource = "framing";
       if (rigReady) applyPose(scene.camera, orbitPos(), rig.target, scene.fov);
       return i;
     },
@@ -227,6 +236,7 @@ Object.assign(NAKATOMIC, (() => {
       const target = p.target || { x: 0, y: 0, z: 0 };
       const pos = clearOfEnvelope(target, { x: p.pos.x, y: p.pos.y, z: p.pos.z });
       pose = { pos, target, fov: p.fov };
+      poseSource = p.from || "lens";
       if (pose.fov) scene.fov = pose.fov;
       if (rigReady) applyPose(scene.camera, pose.pos, pose.target, pose.fov);
       return pose;
@@ -280,7 +290,7 @@ Object.assign(NAKATOMIC, (() => {
       const w = ensureWorld();
       if (!scene.paused && scene.follow && NAKATOMIC.rig && frame.beat) {
         const key = NAKATOMIC.rig.sample(frame.beat.id, frame.t);
-        if (key) scene.setPose(key);
+        if (key) scene.setPose({ pos: key.pos, target: key.target, fov: key.fov, from: "take" });
       }
       if (rigReady) {
         paintFx(frame.t);
@@ -359,7 +369,9 @@ Object.assign(NAKATOMIC, (() => {
     hud.beat.textContent = scene.label(f);
     hud.meta.textContent = `${f.t.toFixed(2)} s of ${clock.SHOW_LEN}`
       + `  ${(f.beat && f.beat.id) || "hold"}`
-      + `  framing ${scene.framing}/${FRAMINGS.length}`
+      + (poseSource === "take"
+        ? "  take"
+        : `  framing ${scene.framing}/${FRAMINGS.length}`)
       + (scene.paused ? "  paused" : "");
     hud.stat.textContent = `${scene.stats.points} splats  ${scene.stats.voxels} vox  `
       + `fps ${scene.stats.fps.toFixed(0)}`;

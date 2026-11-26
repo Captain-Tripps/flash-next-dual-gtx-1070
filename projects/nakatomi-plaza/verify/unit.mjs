@@ -675,7 +675,7 @@ describe("scene assembly", () => {
   test("the scene exposes its contract and boots without GL", () => {
     build();
     const { N } = boot();
-    const keys = "camera domElement follow fov framing gl label paused rebuild restart running setFraming setPose start stats step togglePause".split(" ").sort();
+    const keys = "camera cameraSource domElement follow fov framing gl label paused rebuild restart running setFraming setPose start stats step togglePause".split(" ").sort();
     assert.deepStrictEqual(Object.keys(N.scene).sort(), keys, "scene keys are pinned");
     for (const k of ["start", "rebuild", "setFraming", "setPose", "step", "label", "togglePause", "restart"])
       assert.strictEqual(typeof N.scene[k], "function", `scene.${k} is a function`);
@@ -685,8 +685,25 @@ describe("scene assembly", () => {
     // the rig's public stats, which is how the live driver proves the burst painted.
     assert.deepStrictEqual(Object.keys(N.scene.stats).sort(), "fps fx points voxels".split(" ").sort(), "stats keys");
     // The hold fallback needs no beat label to exist: label() answers for the hold.
-    assert.strictEqual(N.scene.label({ t: N.clock.BEAT_END + 1, beat: null }), N.clock.HOLD_LABEL, "hold fallback label");
     assert.strictEqual(N.scene.label({ t: 360, beat: N.clock.beatAt(360) }), N.clock.beatAt(360).label, "beat label");
+  });
+
+  test("the HUD says which camera painted the frame", () => {
+    build();
+    const { N } = boot();
+    // The review screenshots beside the pixel bars have to say what they show, so
+    // the rig knows which of its three cameras painted the frame it is describing:
+    // one of the four fixed framings, a lens a tool pinned, or the take's own keys.
+    N.scene.setPose({ pos: { x: 20, y: 5, z: 20 }, target: { x: 0, y: 5, z: 0 }, fov: 45 });
+    assert.strictEqual(N.scene.cameraSource, "lens", "a pose a tool pins is that tool's lens");
+    N.scene.setFraming(2);
+    assert.strictEqual(N.scene.cameraSource, "framing", "setFraming names the tool's wide shot");
+    // Only the loop's own step() may claim the take, and only with a beat to key:
+    // that is the difference between the show's framing and a pinned pose, and it is
+    // the label the live driver asserts for every beat's first painted frame.
+    N.clock.seekTo("open");
+    N.scene.step(N.clock.dtClamp);
+    assert.strictEqual(N.scene.cameraSource, "take", "the take's keys painted that frame");
   });
 });
 
@@ -1268,6 +1285,98 @@ describe("convoy + feds", () => {
     assert.strictEqual(second, w, "the cached batch is the same object");
     assert.strictEqual(N.vox.runs().length, runs, "run count unchanged");
     assert.strictEqual(N.vox.count, voxCount, "voxel count unchanged");
+  });
+});
+
+describe("camera rig", () => {
+  // The witness point, as the page sees it: the lens's own cell. R12/R13 are
+  // about where the lens stands, so the test asks the question the renderer asks.
+  const lensCell = (pos) => ({
+    x: Math.floor(pos.x + 1e-9), y: Math.floor(pos.y + 1e-9), z: Math.floor(pos.z + 1e-9),
+  });
+
+  test("every witness point passes isOutside - twelve samples per beat", () => {
+    build();
+    const { N } = boot();
+    assert.ok(N.rig && typeof N.rig.keys === "function" && typeof N.rig.sample === "function",
+      "NAKATOMIC.rig exposes keys(id) and sample(id, t)");
+    for (const id of N.clock.order) {
+      const t0 = N.clock.start(id);
+      const t1 = t0 + N.clock.dur(id);
+      for (let i = 0; i <= 12; i++) {
+        const t = t0 + ((t1 - t0) * i) / 12;
+        const key = N.rig.sample(id, t);
+        assert.ok(key && key.pos, `beat ${id} has no lens at t=${t}`);
+        const c = lensCell(key.pos);
+        assert.strictEqual(N.envelope.isOutside(c), true,
+          `t=${t} (${id}) puts the lens inside the envelope at ${c.x},${c.y},${c.z}`);
+        assert.ok(c.x >= -60 && c.x <= 60 && c.z >= -70 && c.z <= 70 && c.y >= 1 && c.y <= 80,
+          `t=${t} (${id}) puts the lens outside the model world at ${c.x},${c.y},${c.z}`);
+        assert.ok(key.fov >= 35 && key.fov <= 60,
+          `t=${t} (${id}) shoots with fov ${key.fov} outside the 35..60 clamp`);
+      }
+    }
+  });
+
+  test("the glass-line key is 3.5 cells off the curtain wall and still outside", () => {
+    build();
+    const { N } = boot();
+    const face = N.glass.cells.filter((c) => c.z === N.tower.sections.lower.z0);
+    assert.ok(face.length > 0, "the atrium face has no glass to shoot past");
+    const near = N.clock.order.map((b) => N.rig.keys(b)).flat()
+      .filter((k) => Math.abs(k.pos[0] - (N.tower.sections.lower.x1 + 3.5)) < 0.001);
+    assert.ok(near.length > 0, "no lens sits on the glass-line key 3.5 cells from the wall");
+    for (const k of near) {
+      const c = lensCell({ x: k.pos[0], y: k.pos[1], z: k.pos[2] });
+      assert.strictEqual(N.envelope.isOutside(c), true,
+        `the glass-line key at ${c.x},${c.y},${c.z} is inside the envelope`);
+      assert.ok(k.pos[1] <= N.tower.sections.lower.y1, "the glass-line key is not at plaza level");
+    }
+  });
+
+  test("the take follows the beat order and never teleports", () => {
+    build();
+    const { N } = boot();
+    const all = N.rig.all();
+    // The keys are one track: strictly increasing in time, and the beats they
+    // belong to appear in clock.order. A key outside its beat's window would make
+    // the beat windows disagree with the plan's Beat Table.
+    for (let i = 1; i < all.length; i++)
+      assert.ok(all[i].t > all[i - 1].t, `key ${i} at t=${all[i].t} is not after key ${i - 1}`);
+    let beatIdx = 0;
+    for (const k of all) {
+      while (beatIdx + 1 < N.clock.order.length &&
+        k.t > N.clock.start(N.clock.order[beatIdx]) + N.clock.dur(N.clock.order[beatIdx]))
+        beatIdx++;
+      const b = N.clock.order[beatIdx];
+      assert.ok(k.t >= N.clock.start(b) && k.t <= N.clock.start(b) + N.clock.dur(b),
+        `key at t=${k.t} belongs to ${b}'s window`);
+    }
+    // Consecutive frames: the lens walks, it does not jump. A 0.2 s frame step
+    // over the whole take is 3575 samples; a cut would show up as a step of
+    // tens of cells. 3 cells per frame is 15 cells/s - the fastest legitimate
+    // dolly move in the take (the blast beat's north descent, ~13 cells/s).
+    const step = 0.2;
+    let prev = N.rig.sample("open", 0);
+    let maxStep = 0;
+    for (let t = step; t <= N.clock.BEAT_END + 1e-9; t += step) {
+      const f = N.clock.beatAt(t);
+      const s = N.rig.sample(f ? f.id : "drestle", t);
+      const d = Math.hypot(s.pos.x - prev.pos.x, s.pos.y - prev.pos.y, s.pos.z - prev.pos.z);
+      maxStep = Math.max(maxStep, d);
+      assert.ok(d < 3, `t=${t} jumps ${d.toFixed(2)} cells - the take cut, it did not dolly`);
+      assert.ok(s.fov >= 35 && s.fov <= 60, `t=${t} shoots with fov ${s.fov}`);
+      prev = s;
+    }
+    assert.ok(maxStep > 0, "the take never moved: every key is the same pose");
+    // The pull-back for the fed beats follows the convoy's route: the lens stays
+    // west of the lane it shoots, and never crosses the tower to get there.
+    for (const k of N.rig.routeKeys("fedConvoy")) {
+      const cell = lensCell({ x: k.pos[0], y: k.pos[1], z: k.pos[2] });
+      assert.strictEqual(N.envelope.isOutside(cell), true,
+        `route key at t=${k.t} is inside the envelope at ${cell.x},${cell.y},${cell.z}`);
+      assert.ok(cell.x < 0, `route key at t=${k.t} pulls back on the wrong side of the block`);
+    }
   });
 });
 

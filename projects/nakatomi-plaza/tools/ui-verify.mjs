@@ -50,6 +50,18 @@ const MIN_OVERLAY_PIXELS = 8;
 // fed beats. Set below what a real frame measures and above what a plaza with no
 // response measures, so the bar catches a batch that never reached the cloud.
 const MIN_LIGHT_PIXELS = 12;
+// --- the take's own camera, asserted against the camera the page renders with.
+// The lens has to stay outside the envelope on every frame (R12), the fov inside
+// the rig's clamp every frame (no zoom lenses), and consecutive frames have to be
+// dollies rather than cuts. The step bar is cells per clamped frame at dtClamp
+// 0.25: a real cut moves tens of cells, while the fastest dolly the take makes is
+// the blast beat's descent at about 13 cells/s - observed at 3.15 cells a frame,
+// so the bar sits a quarter above that and far below a cut.
+const MAX_RIG_STEP_CELLS = 4;
+// Every beat's first painted frame has to have the tower in it: a beat the take
+// cannot see is a beat the show does not witness. Observed minimum is the sky push
+// at 10% of the frame, so the bar catches a lens aimed at blank sky.
+const MIN_RIG_TOWER_FRAC = 0.05;
 // Bars sit below what a real frame measures, not guesses: framing 1 was 21.7% content
 // (towerFrac), a content box 94% of the frame height starting at row 3, and 41 warm
 // pixels; framings 2..4 measured 0.14-0.26 towerFrac with 38-74 warm. Retune these from
@@ -67,6 +79,21 @@ const FRAMINGS_SHOTS = [
 // carries one. Same pose as the probe, so the screenshot and the numbers match.
 const POSE_SHOTS = [
   ["fedConvoy", "convoy-wall", { x: -14, y: 12, z: 46 }, { x: 0, y: 2, z: 21 }, 45],
+];
+// Review frames from the take's own lens. Task 12's rig carries a leg for every
+// beat, so these shots are driven through the loop (unpaused, step by step) rather
+// than pinned with setFraming: what a viewer of the show actually sees.
+const RIG_SHOTS = [
+  ["open", 0.5, "rig-open"],
+  ["limoNakatomi", 0.6, "rig-limo"],
+  ["archWalk", 0.6, "rig-arch"],
+  ["treeSet", 0.5, "rig-tree"],
+  ["gunRun", 0.5, "rig-gunrun"],
+  ["blast", 0.5, "rig-blast"],
+  ["storm", 0.4, "rig-storm"],
+  ["wallOfCars", 0.5, "rig-wall-of-cars"],
+  ["plazaWide", 0.5, "rig-plaza-wide"],
+  ["skyPush2", 0.5, "rig-sky-push"],
 ];
 
 run(`agent-browser open ${JSON.stringify(url)}`);
@@ -276,6 +303,58 @@ const sceneReport = evalJs(`(() => {
     };
   })();
 
+  const rig = (function probeRig() {
+    // Task 12's end state: the take itself, driven through the real loop path -
+    // unpaused, step(dt) ticks the clock and the rig together. The witness
+    // invariants (R12/R13) are asserted against the camera the page actually
+    // renders with: every frame outside the envelope, fov inside the clamp,
+    // no cut (steps are dollies), every beat seen and on screen.
+    if (!N.rig) return { missing: true };
+    N.scene.togglePause();                    // the loop owns the clock now
+    N.clock.seekTo(N.clock.order[0]);
+    const dt = N.clock.dtClamp;
+    const lensCell = (v) => ({
+      x: Math.floor(v.x + 1e-9), y: Math.floor(v.y + 1e-9), z: Math.floor(v.z + 1e-9),
+    });
+    const seen = {}, firstFrame = {}, fovBad = [], inside = [];
+    let prev = null, maxStep = [0, 0], frames = 0, wraps = 0, guard = 0;
+    while (guard++ < 60000 && wraps === 0) {
+      const fr = N.scene.step(dt);            // tick, rig pose, paint, HUD
+      const cam = N.scene.camera.position;
+      const fov = N.scene.camera.fov;
+      const c = lensCell(cam);
+      if (N.envelope.isOutside(c) !== true) inside.push({ t: fr.t, cell: c });
+      if (!(fov >= 35 && fov <= 60)) fovBad.push({ t: fr.t, fov });
+      if (prev) {
+        const d = Math.hypot(cam.x - prev.x, cam.y - prev.y, cam.z - prev.z);
+        if (d > maxStep[0]) maxStep = [Number(d.toFixed(2)), fr.t];
+      }
+      prev = { x: cam.x, y: cam.y, z: cam.z };
+      frames++;
+      if (fr.beat && !seen[fr.beat.id]) {
+        seen[fr.beat.id] = true;
+        // The beat's first painted frame: the lens pose the take carried into
+        // the beat is what has to put the next action on screen.
+        const px = look(48, 27);
+        firstFrame[fr.beat.id] = {
+          t: fr.t, source: N.scene.cameraSource,
+          towerFrac: px.towerFrac, lights: px.red + px.blue,
+        };
+      }
+      if (fr.wrapped) wraps = 1;
+    }
+    N.scene.togglePause();                    // hand the clock back to the tool
+    return {
+      frames,
+      wraps,
+      inside,
+      fovBad,
+      maxStep,
+      firstFrame,
+      missingBeats: N.clock.order.filter((id) => !seen[id]),
+    };
+  })();
+
   // The fade has to track clock.fade.black, in both directions, on the element that
   // actually does the fading. Both the inline value the page wrote (exact) and the
   // value the browser computes for it (what the compositor uses) are reported.
@@ -305,8 +384,10 @@ const sceneReport = evalJs(`(() => {
     bufferVoxels: N.vox.count,
     splatPoints: N.splats(N.vox.buffer()).points.length,
     holdLabel: N.clock.HOLD_LABEL,
+    clockOrder: N.clock.order.length,
     fx,
     convoy,
+    rig,
     views,
     fadeMid,
     fadeBlack,
@@ -413,6 +494,40 @@ if (!sceneReport.fatal) {
     `the convoy's lightbars reach the screen: ${sceneReport.convoy.lights} responder-light pixels `
     + `across ${sceneReport.convoy.poses.map((p) => `${p.name} ${p.red}/${p.blue}`).join(", ")} `
     + `(${sceneReport.convoy.cells} light cells staged on ${sceneReport.convoy.cars} vehicles)`);
+
+  // --- the take, asserted end-to-end ----------------------------------------
+  // Task 12's contract is a witness, not a framing: the page's own camera, driven
+  // by the rig through the same step() the rAF loop uses, covers every beat of the
+  // score from outside the envelope, with no cuts and no zoom lens. Everything here
+  // is the camera the page actually rendered with - not rig.sample() read directly.
+  check(!sceneReport.rig.missing, "the camera rig is not wired into the render loop");
+  if (!sceneReport.rig.missing) {
+    const t = sceneReport.rig;
+    check(t.wraps === 1, `the take runs to the wrap and hands the loop back, wrapped=${t.wraps}`);
+    check(t.inside.length === 0,
+      `every frame of the take keeps the lens outside the envelope: ${t.inside.length} inside frames `
+      + `${JSON.stringify(t.inside.slice(0, 5))}`);
+    check(t.fovBad.length === 0,
+      `every frame of the take is inside the fov clamp 35..60: ${t.fovBad.length} bad frames `
+      + `${JSON.stringify(t.fovBad.slice(0, 5))}`);
+    check(t.maxStep[0] <= MAX_RIG_STEP_CELLS,
+      `the take never cuts: largest frame-to-frame move is ${t.maxStep[0]} cells at t=${t.maxStep[1]} `
+      + `(needs <= ${MAX_RIG_STEP_CELLS})`);
+    check(t.missingBeats.length === 0,
+      `the take witnesses every beat: no painted frame for ${JSON.stringify(t.missingBeats)}`);
+    check(Object.keys(t.firstFrame).length === sceneReport.clockOrder,
+      `the take paints a first frame for every beat, got ${Object.keys(t.firstFrame).length} `
+      + `of ${sceneReport.clockOrder}`);
+    for (const [id, f] of Object.entries(t.firstFrame))
+      check(f.towerFrac >= MIN_RIG_TOWER_FRAC,
+        `beat ${id} has the tower in its first frame (${(f.towerFrac * 100).toFixed(1)}% of the frame)`);
+    // The framing proof: those first frames came from the take, not from a pinned
+    // lens. The HUD knows which camera painted the frame it describes, and the
+    // review screenshots beside the bars read that label.
+    const notTake = Object.entries(t.firstFrame).filter(([, f]) => f.source !== "take");
+    check(notTake.length === 0,
+      `the take's own lens paints every beat's first frame, not ${JSON.stringify(notTake.slice(0, 4))}`);
+  }
 }
 
 // --- screenshots for review: two framings and the convoy witness, all mid-show,
@@ -424,6 +539,8 @@ const shoot = (label, setup) => {
     ${setup}
     const fr = N.scene.step(0);
     return JSON.stringify({ t: fr.t, beat: fr.beat && fr.beat.id, label: ${JSON.stringify(label)},
+      camera: N.scene.cameraSource,
+      meta: document.getElementById("meta").textContent,
       fade: getComputedStyle(document.getElementById("fade")).opacity });
   })()`);
   const png = join(dir, "ui-verify", `${label}.png`);
@@ -438,7 +555,23 @@ for (const [framing, beat, name] of FRAMINGS_SHOTS)
 for (const [beat, name, pos, target, fov] of POSE_SHOTS)
   shoot(name, `N.clock.seekTo(${JSON.stringify(beat)}); `
     + `N.scene.setPose(${JSON.stringify({ pos, target, fov })});`);
+// The take's own lens at a beat's own time: hand the clock to the loop, run the
+// show to the beat's fraction, hand it back, and paint the pose the rig left on
+// the camera. No setFraming, no setPose - this is the show's framing, not the tool's.
+for (const [beat, frac, name] of RIG_SHOTS)
+  shoot(name, `N.clock.seekTo(${JSON.stringify(beat)}); `
+    + `N.scene.togglePause(); `
+    + `const tgt = N.clock.start(${JSON.stringify(beat)}) + ${frac} * N.clock.dur(${JSON.stringify(beat)}); `
+    + `let g = 0; while (N.clock.t < tgt && g++ < 4000) N.scene.step(N.clock.dtClamp); `
+    + `N.scene.togglePause();`);
 console.log(shots.map((s) => `shot ${s.png} t=${s.t} beat=${s.beat}`).join("\n"));
+if (sceneReport.rig) {
+  const take = Object.entries(sceneReport.rig.firstFrame)
+    .map(([id, f]) => `${id} t=${f.t.toFixed(1)} tower ${(f.towerFrac * 100).toFixed(1)}% lights ${f.lights}`).join("\n");
+  console.log(`\ntake: ${sceneReport.rig.frames} frames to the wrap, biggest step `
+    + `${sceneReport.rig.maxStep[0]} cells at t=${sceneReport.rig.maxStep[1]}; `
+    + `inside frames ${sceneReport.rig.inside.length}, fov bad ${sceneReport.rig.fovBad.length}\n${take}`);
+}
 
 if (fails.length) {
   console.error("FAIL:\n - " + fails.join("\n - "));
@@ -446,4 +579,6 @@ if (fails.length) {
 }
 const px = sceneReport.views.map((v) => `${v.framing}:${v.pixels.tower}/${v.pixels.total}`).join(" ");
 console.log(`ui-verify: show ran ${report.frames} clamped frames to the wrap; `
-  + `${sceneReport.stats.points} splats on screen (centre hits ${px}); end state good`);
+  + `${sceneReport.stats.points} splats on screen (centre hits ${px}); `
+  + `the take witnessed ${Object.keys(sceneReport.rig.firstFrame).length}/${sceneReport.clockOrder} beats `
+  + `with ${sceneReport.rig.frames} frames, biggest dolly step ${sceneReport.rig.maxStep[0]} cells; end state good`);

@@ -1,0 +1,346 @@
+// Fragment 12: the camera rig - one continuous take that stays outside the tower.
+//
+// R12/R13 say the lens never enters the building's shell, and the take never
+// cuts. So the rig is one keyframe track over the 715 s of beats, and each beat
+// is a window onto it. `keys(id)` is the slice a beat owns; `sample(id, t)`
+// interpolates the master track at that instant. One track means a beat boundary
+// cannot teleport: a beat's last key IS the next beat's first key, and the build
+// check below enforces it, so a cut is a build failure rather than a bad frame.
+//
+// Keyframes are written as a fraction of the beat they belong to (0 = the beat's
+// first frame, 1 = its last), so every time comes out of the clock. A beat's
+// lens starts at the pose the previous beat arrived at, holds there through the
+// beat's opening, then dollies to its own pose. That is the shape of a real
+// one-take choreography: the move happens inside the beat, the boundary is a
+// hold.
+//
+// Every key is a witness point: a place the lens can sit and see the beat's
+// action without being inside it. The envelope test is the constraint, and keys
+// are authored in cell coordinates so the test reads as a fact - the lens's own
+// cell, put through `envelope.isOutside`. The glass-line key on the treeSet beat
+// is the interesting case: 3.5 cells out from the curtain wall face, in the free
+// air beside the shaft (cell x 15, against the shaft's wall plane at x 12 and
+// its clear shell at x 14). A lens that close to glass is the whole point of the
+// shot, so it gets its own check rather than a comment.
+//
+// The targets are not checked. A lens looks *at* the tower - a target inside the
+// shell is what a witness shot looks like, and R12 is about where the lens
+// stands, not where it points.
+//
+// fov is clamped to 35..60 at build time, so the shot changes are dollies and
+// head moves, not zooms: a long lens can't clip the depth gate and a wide one
+// can't fisheye the plaza.
+
+Object.assign(NAKATOMIC, (() => {
+  const clock = NAKATOMIC.clock;
+  const envelope = NAKATOMIC.envelope;
+  const convoy = NAKATOMIC.convoy;
+  const plan = NAKATOMIC._plan;
+  const S = NAKATOMIC.tower.sections;
+
+  const FOV_MIN = 35;
+  const FOV_MAX = 60;
+  // The lens may sit outside the block - the boulevard and the skyline are where
+  // the wide shots live - but it stays inside the model's own world.
+  const WORLD = { x0: -60, x1: 60, z0: -70, z1: 70, y0: 1, y1: 80 };
+
+  const keys = [];
+  const push = (t, pos, target, fov) => {
+    const f = Math.min(Math.max(fov, FOV_MIN), FOV_MAX);
+    if (keys.length && t <= keys[keys.length - 1].t)
+      throw new Error(`key at t=${t} is not later than t=${keys[keys.length - 1].t}`);
+    keys.push({ t, pos, target, fov: f });
+  };
+
+  // One beat's keyframes: [frac, pos, target, fov], with frac a share of the
+  // beat. The clock owns the times, so Appendix A can change and the take moves
+  // with it.
+  const beat = (id, list) => {
+    const t0 = clock.start(id);
+    const dur = clock.dur(id);
+    const at = (f) => {
+      const t = t0 + f * dur;
+      if (t > t0 + dur + 1e-9) throw new Error(`key past the end of ${id}`);
+      return t;
+    };
+    for (const [f, pos, target, fov] of list) push(at(f), pos, target, fov);
+  };
+
+  // ---- the take, beat by beat ----------------------------------------------
+  // 1 establishing: far and high over the boulevard, the tower whole in frame.
+  beat("open", [
+    [0, [30, 40, 60], [0, 28, 0], 44],
+    [0.35, [34, 38, 55], [0, 27, -2], 43],
+    [0.85, [40, 33, 46], [0, 26, -4], 42],
+  ]);
+  // 2 the taxi convoy onto the sunken lot, seen from the boulevard end of the cut.
+  beat("taxiConvoy", [
+    [0, [40, 33, 46], [0, 26, -4], 42],
+    [0.5, [24, 24, -10], [-2, 10, -22], 46],
+    [0.85, [8, 16, -48], [0, 2, -26], 50],
+  ]);
+  // 3 the escort drives the avenue's west lane, one block out.
+  beat("horseCar", [
+    [0, [8, 16, -48], [0, 2, -26], 50],
+    [0.6, [-44, 10, -22], [-23, 3, -14], 44],
+    [0.85, [-40, 9, -8], [-23, 4, -4], 44],
+  ]);
+  // 4 the forecourt: signage over the drive, the glass lobby behind it.
+  beat("limoNakatomi", [
+    [0, [-40, 9, -8], [-23, 4, -4], 44],
+    [0.5, [-16, 7, 22], [-4, 9, 17], 50],
+    [0.85, [0, 5, 33], [2, 8, 17], 52],
+  ]);
+  // 5 the tree truck and the light trucks crossing the plaza.
+  beat("treeTruck", [
+    [0, [0, 5, 33], [2, 8, 17], 52],
+    [0.6, [-8, 6, 31], [-4, 7, 19], 54],
+    [0.85, [-14, 7, 28], [-8, 8, 19], 54],
+  ]);
+  // 6 the walkway, the palm line and the marquee, low and moving.
+  beat("archWalk", [
+    [0, [-14, 7, 28], [-8, 8, 19], 54],
+    [0.5, [-22, 6, 26], [-16, 6, 19], 56],
+    [0.85, [-28, 8, 24], [-24, 7, 18], 56],
+  ]);
+  // 7 the tree set down inside the glass. The glass-line key is the exit pose:
+  // 3.5 cells out from the shaft's curtain wall, lens in cell x 15.
+  beat("treeSet", [
+    [0, [-28, 8, 24], [-24, 7, 18], 56],
+    [0.45, [-6, 6, 24], [0, 6, 14], 56],
+    // The approach to the glass line is an L, not a diagonal: the lens runs
+    // east of the shaft first (still cell x 15+, outside the shell), then
+    // south along the face. A straight diagonal from the plaza centre would
+    // cut the shaft's corner cell, and the sampled take would be inside.
+    [0.65, [16.5, 5.5, 20], [4, 5, 12], 56],
+    [0.85, [15.5, 5, 12.5], [2, 5, 4], 58],
+  ]);
+  // 8 holly on skates to the doors, low on the atrium side.
+  beat("skateHolly", [
+    [0, [15.5, 5, 12.5], [2, 5, 4], 58],
+    [0.5, [16, 5, -18], [4, 4, -12], 58],
+    [0.85, [8, 5, -22], [0, 4, -12], 56],
+  ]);
+  // 9 the gun run staged on the deck: the lens climbs the tower's corner.
+  beat("gunRun", [
+    [0, [8, 5, -22], [0, 4, -12], 56],
+    [0.5, [26, 26, -30], [0, 30, -8], 48],
+    [0.85, [24, 52, -20], [0, 46, -4], 46],
+  ]);
+  // 10 the tile helo and its winch, over the deck on the courtyard side.
+  beat("tileHelo", [
+    [0, [24, 52, -20], [0, 46, -4], 46],
+    [0.5, [20, 54, 24], [0, 47, 10], 44],
+    [0.85, [18, 52, 30], [0, 47, 14], 42],
+  ]);
+  // 11 the blast: a dolly in on the atrium face, the break filling the frame.
+  beat("blast", [
+    [0, [18, 52, 30], [0, 47, 14], 42],
+    // The descent from the deck to the north face cannot drop straight down:
+    // a diagonal through the core would put the sampled lens inside the upper
+    // shaft. This leg falls down the tower's north-east corner, clear of the
+    // shell, then runs north onto the north-face dolly.
+    [0.12, [16, 47, -15], [2, 44, -8], 42],
+    [0.45, [2, 12, -34], [0, 7, -13], 40],
+    [0.85, [-4, 8, -24], [0, 6, -12], 36],
+  ]);
+  // 12 the storm: out and up with the skyline behind the tower, 95 s of it.
+  beat("storm", [
+    [0, [-4, 8, -24], [0, 6, -12], 36],
+    [0.3, [-16, 24, -46], [0, 14, -10], 44],
+    [0.6, [-34, 32, -58], [0, 20, -6], 50],
+    [0.85, [-44, 36, -64], [0, 22, -4], 52],
+  ]);
+  // 13 the feds come up the boulevard: the lens pulls back along the lane the
+  // route drives (Task 11's waypoints, one block west of the podium skirt).
+  beat("fedConvoy", [
+    [0, [-44, 36, -64], [0, 22, -4], 52],
+    [0.45, [-32, 14, -26], [-23, 4, -14], 48],
+    [0.85, [-31, 9, 2], [-23, 4, 12], 48],
+  ]);
+  // 14 the wall of cruisers: two rows across the forecourt, counted off.
+  beat("wallOfCars", [
+    [0, [-31, 9, 2], [-23, 4, 12], 48],
+    [0.5, [-28, 8, 34], [-14, 4, 21], 50],
+    [0.85, [-14, 7, 36], [-4, 4, 21], 52],
+  ]);
+  // 15 the lobby lights holding under the dusk, back at the atrium glass.
+  beat("lobbyLights", [
+    [0, [-14, 7, 36], [-4, 4, 21], 52],
+    [0.5, [-18, 6, -30], [-2, 6, -12], 54],
+    [0.85, [-6, 5, -26], [0, 5, -12], 54],
+  ]);
+  // 16 the cars leave the lot, and the lens pulls back with them.
+  beat("carDepart", [
+    [0, [-6, 5, -26], [0, 5, -12], 54],
+    [0.5, [-20, 18, -42], [-6, 6, -22], 50],
+    [0.85, [-30, 26, -52], [-8, 8, -24], 48],
+  ]);
+  // 17 the tree glowing through the canopy, close on the atrium face.
+  beat("treeGlow", [
+    [0, [-30, 26, -52], [-8, 8, -24], 48],
+    [0.6, [2, 7, -26], [0, 6, -12], 44],
+    [0.85, [12, 6, -19], [0, 6, -12], 40],
+  ]);
+  // 18 the fountain, its water level and still.
+  beat("fountainSettle", [
+    [0, [12, 6, -19], [0, 6, -12], 40],
+    [0.5, [-4, 5, -21], [-4, 3, -8], 46],
+    [0.85, [-10, 5, -23], [-6, 3, -6], 46],
+  ]);
+  // 19 the plaza wide, the walkway empty.
+  beat("plazaWide", [
+    [0, [-10, 5, -23], [-6, 3, -6], 46],
+    // Step one cell block west of the shell first, then the long run south
+    // stays west of the shaft the whole way: the direct diagonal from the
+    // north face clips the shaft's west corner at cell -14.
+    [0.15, [-15, 6, -24], [-8, 5, -10], 48],
+    [0.6, [-24, 12, 26], [-6, 8, 16], 50],
+    [0.85, [-28, 16, 38], [-4, 12, 18], 52],
+  ]);
+  // 20 sky push 1: the lens lifts into the skyline.
+  beat("skyPush1", [
+    [0, [-28, 16, 38], [-4, 12, 18], 52],
+    [0.6, [-14, 34, 50], [-2, 34, 24], 42],
+    [0.85, [-8, 40, 56], [0, 40, 26], 40],
+  ]);
+  // 21 sky push 2: higher still, the skyline walls behind the tower.
+  beat("skyPush2", [
+    [0, [-8, 40, 56], [0, 40, 26], 40],
+    [0.6, [-2, 46, 52], [0, 44, 22], 38],
+    [0.85, [2, 50, 48], [0, 46, 18], 38],
+  ]);
+  // 22 the pull-back to the boulevard, the tower's whole height in frame.
+  beat("towerPull", [
+    [0, [2, 50, 48], [0, 46, 18], 38],
+    [0.5, [-12, 46, 52], [0, 40, 8], 42],
+    [0.85, [-20, 42, 56], [0, 34, 0], 44],
+  ]);
+  // 23 the rooftop glow and the penthouse lights, above the deck line.
+  beat("rooftopGlow", [
+    [0, [-20, 42, 56], [0, 34, 0], 44],
+    [0.5, [-16, 56, 34], [0, 48, 4], 46],
+    [0.85, [-12, 58, 28], [0, 48, 2], 46],
+  ]);
+  // 24 the settling frame, back at the opening pose: the take's two ends meet, so
+  // the wrap does not jump. The last key is the first key, pose for pose.
+  beat("drestle", [
+    [0, [-12, 58, 28], [0, 48, 2], 46],
+    [0.5, [8, 46, 46], [0, 36, 4], 45],
+    [0.85, [30, 40, 60], [0, 28, 0], 44],
+  ]);
+
+  // --- the witness invariant, as a build-time gate ---------------------------
+  // The lens cell of every key has to pass the envelope test, and the lens has
+  // to stay inside the model's world. A key that fails is a rig bug, not a
+  // clamp: fragment 99's own clamp would hide it, and a hidden clamp is a shot
+  // nobody meant to shoot.
+  for (const k of keys) {
+    const cell = {
+      x: Math.floor(k.pos[0] + 1e-9), y: Math.floor(k.pos[1] + 1e-9), z: Math.floor(k.pos[2] + 1e-9),
+    };
+    if (envelope.isOutside(cell) !== true)
+      throw new Error(`rig key at t=${k.t} sits inside the envelope at ${cell.x},${cell.y},${cell.z}`);
+    if (cell.x < WORLD.x0 || cell.x > WORLD.x1 || cell.z < WORLD.z0 || cell.z > WORLD.z1 ||
+      cell.y < WORLD.y0 || cell.y > WORLD.y1)
+      throw new Error(`rig key at t=${k.t} is outside the model world at ${cell.x},${cell.y},${cell.z}`);
+  }
+
+  // No cuts: the pose a beat exits on is the pose the next beat enters on, in the
+  // same place, and the two times sit either side of the boundary. That is what
+  // makes this one take and not a stack of shots.
+  const keysOf = (id) => {
+    const t0 = clock.start(id);
+    return keys.filter((k) => k.t >= t0 - 1e-9 && k.t <= t0 + clock.dur(id) + 1e-9);
+  };
+  const same = (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+  for (let i = 0; i + 1 < clock.order.length; i++) {
+    const exit = keysOf(clock.order[i]);
+    const enter = keysOf(clock.order[i + 1]);
+    if (!same(exit[exit.length - 1].pos, enter[0].pos) || !same(exit[exit.length - 1].target, enter[0].target))
+      throw new Error(`${clock.order[i]} cuts to ${clock.order[i + 1]} - a continuous take cannot cut`);
+  }
+  // The loop home: the take ends where it started, so the wrap is a hold, not a jump.
+  if (!same(keys[0].pos, keys[keys.length - 1].pos) || !same(keys[0].target, keys[keys.length - 1].target))
+    throw new Error("the take does not end on its opening pose - the wrap would jump");
+
+  // The glass-line key, checked on its own terms: 3.5 cells out from the shaft's
+  // glass plane (cell x 12), at plaza level, with the curtain wall between it and
+  // the tower.
+  const GLASS_X = S.lower.x1 + 3.5;
+  const proximity = keys.find((k) => Math.abs(k.pos[0] - GLASS_X) < 1e-9);
+  if (!proximity) throw new Error("the take has no glass-line key 3.5 cells off the curtain wall");
+  if (proximity.pos[1] > S.lower.y1)
+    throw new Error("the glass-line key is not at plaza level");
+
+  // --- the interpolation -----------------------------------------------------
+  // Linear along the key track: the only mode that can be checked for
+  // non-teleporting, because an eased curve has no fixed epsilon.
+  const atOrBefore = (t) => {
+    for (let i = keys.length - 1; i >= 0; i--) if (keys[i].t <= t) return i;
+    return 0;
+  };
+  const copy = (k) => ({
+    t: k.t,
+    pos: { x: k.pos[0], y: k.pos[1], z: k.pos[2] },
+    target: { x: k.target[0], y: k.target[1], z: k.target[2] },
+    fov: k.fov,
+  });
+  const sampleAt = (t) => {
+    const i = atOrBefore(t);
+    const a = keys[i];
+    const b = keys[Math.min(i + 1, keys.length - 1)];
+    if (b === a) return { ...copy(a), t };
+    const u = b.t === a.t ? 1 : Math.min(Math.max((t - a.t) / (b.t - a.t), 0), 1);
+    const lerp = (p, q) => p + (q - p) * u;
+    return {
+      t,
+      pos: { x: lerp(a.pos[0], b.pos[0]), y: lerp(a.pos[1], b.pos[1]), z: lerp(a.pos[2], b.pos[2]) },
+      target: { x: lerp(a.target[0], b.target[0]), y: lerp(a.target[1], b.target[1]), z: lerp(a.target[2], b.target[2]) },
+      fov: Math.min(Math.max(lerp(a.fov, b.fov), FOV_MIN), FOV_MAX),
+    };
+  };
+
+  // A beat's own keys, as the slice of the master track it owns.
+  const keysFor = (id) => keysOf(id).map((k) => ({
+    t: k.t, pos: [k.pos[0], k.pos[1], k.pos[2]], target: [k.target[0], k.target[1], k.target[2]], fov: k.fov,
+  }));
+
+  // The pull-back for the fed beats rides Task 11's route: the lens sits west of
+  // the lane and above it, looking down it. The route's own waypoints are the
+  // reference, so the shot matches the geometry the convoy drove.
+  const routeKeys = (id) => {
+    const t0 = clock.start(id);
+    const dur = clock.dur(id);
+    const out = [];
+    for (let i = 0; i <= 6; i++) {
+      const f = i / 6;
+      const p = convoy.routeAt(f);
+      const k = {
+        t: t0 + f * dur,
+        pos: [p.x - 9, p.y + 7, p.z - 10],
+        target: [p.x, p.y + 2, p.z + 4],
+        fov: 48,
+      };
+      const cell = { x: Math.floor(k.pos[0]), y: Math.floor(k.pos[1]), z: Math.floor(k.pos[2]) };
+      if (envelope.isOutside(cell) !== true)
+        throw new Error(`route key at t=${k.t} is inside the envelope at ${cell.x},${cell.y},${cell.z}`);
+      out.push(k);
+    }
+    return out;
+  };
+
+  return {
+    rig: {
+      keys: keysFor,
+      sample: (id, t) => sampleAt(t),
+      all: () => keys.map((k) => ({
+        t: k.t, pos: [k.pos[0], k.pos[1], k.pos[2]], target: [k.target[0], k.target[1], k.target[2]], fov: k.fov,
+      })),
+      routeKeys,
+      fovRange: [FOV_MIN, FOV_MAX],
+      glassLineKey: { t: proximity.t, pos: [proximity.pos[0], proximity.pos[1], proximity.pos[2]], from: S.lower.x1 },
+      window: [clock.start(clock.order[0]), clock.start("drestle") + clock.dur("drestle")],
+    },
+  };
+})());
