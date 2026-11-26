@@ -207,11 +207,9 @@ Object.assign(NAKATOMIC, (() => {
 
     // The HUD's label rule, as a pure function: beatAt is null through the hold,
     // so a null beat is not a missing label - it is the hold, and it needs a label.
-    label(f) {
-      if (f && f.beat) return f.beat.label;
-      if (f && f.t >= clock.BEAT_END) return clock.HOLD_LABEL;
-      return "";
-    },
+    // Task 13's `hud.label` owns that rule; deferring here keeps the page's label
+    // and the HUD fragment's from ever disagreeing.
+    label(f) { return NAKATOMIC.hud.label(f); },
 
     setFraming(n) {
       const i = Math.min(Math.max(Number(n) || 1, 1), FRAMINGS.length);
@@ -288,6 +286,9 @@ Object.assign(NAKATOMIC, (() => {
       // comes from the clock's current state instead of a stale tick.
       frame = scene.paused ? frameFromClock() : clock.tick(dt);
       const w = ensureWorld();
+      // Task 13's audio queue walks the same frame: while paused the tool owns the
+      // clock (it seeks, then paints), so it must never hear a replay of the show.
+      if (!scene.paused && NAKATOMIC.audio) NAKATOMIC.audio.pump(frame);
       if (!scene.paused && scene.follow && NAKATOMIC.rig && frame.beat) {
         const key = NAKATOMIC.rig.sample(frame.beat.id, frame.t);
         if (key) scene.setPose({ pos: key.pos, target: key.target, fov: key.fov, from: "take" });
@@ -365,22 +366,29 @@ Object.assign(NAKATOMIC, (() => {
   let lastNow = null;
   let loop = null;
 
+  // The text itself lives in Task 13's hud fragment, so the queue's invariant and
+  // the HUD's hold fallback are one function, not two that could drift. This one
+  // only pushes the strings into elements - and the fade overlay's opacity stays
+  // here, because that is the renderer's job, not the text's.
   const paintHud = (f) => {
-    hud.beat.textContent = scene.label(f);
-    hud.meta.textContent = `${f.t.toFixed(2)} s of ${clock.SHOW_LEN}`
-      + `  ${(f.beat && f.beat.id) || "hold"}`
-      + (poseSource === "take"
-        ? "  take"
-        : `  framing ${scene.framing}/${FRAMINGS.length}`)
-      + (scene.paused ? "  paused" : "");
-    hud.stat.textContent = `${scene.stats.points} splats  ${scene.stats.voxels} vox  `
-      + `fps ${scene.stats.fps.toFixed(0)}`;
+    const lines = NAKATOMIC.hud.text(f, {
+      source: poseSource, framing: scene.framing, framings: FRAMINGS.length,
+      paused: scene.paused, points: scene.stats.points, voxels: scene.stats.voxels,
+      fps: scene.stats.fps,
+    });
+    hud.beat.textContent = lines.beat;
+    hud.meta.textContent = lines.meta;
+    hud.stat.textContent = lines.stat;
     hud.fade.style.opacity = String(f.black);
   };
 
   const bindInput = (canvas) => {
     let drag = null;
     canvas.addEventListener("pointerdown", (e) => {
+      // The autoplay policy wants a gesture before a page may start a sound: the
+      // first pointer/keyboard press unlocks the queue, and until then the show is
+      // silent and the queue keeps walking (pump counts crossings with no context).
+      NAKATOMIC.audio && NAKATOMIC.audio.unlock();
       drag = { x: e.clientX, y: e.clientY, yaw: rig.yaw, pitch: rig.pitch };
       canvas.setPointerCapture && canvas.setPointerCapture(e.pointerId);
     });
@@ -399,6 +407,7 @@ Object.assign(NAKATOMIC, (() => {
       pose = null;
     }, { passive: true });
     window.addEventListener("keydown", (e) => {
+      NAKATOMIC.audio && NAKATOMIC.audio.unlock();
       const k = e.key;
       if (k >= "1" && k <= String(FRAMINGS.length)) scene.setFraming(Number(k));
       else if (k === " ") { scene.togglePause(); e.preventDefault(); }

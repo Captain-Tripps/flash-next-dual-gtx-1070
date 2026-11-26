@@ -1380,6 +1380,90 @@ describe("camera rig", () => {
   });
 });
 
+// --- Task 13: audio queue + HUD beat labels --------------------------------
+describe("audio + HUD", () => {
+  test("no event fires in the hold window without a hold label", () => {
+    build();
+    const { N } = boot();
+    const q = N.audio.queue;
+    assert.ok(Array.isArray(q) && q.length > 0,
+      "the queue is data, so it can be enumerated before a browser unlocks the audio");
+    // The plan's invariant (Review Focus 5): every entry sits inside the beat
+    // timeline, or carries an explicit hold marker. A sound during the hold is
+    // only legal because it says so - which is why the invariant is an equality,
+    // not just a floor.
+    let prev = -Infinity;
+    for (const e of q) {
+      assert.ok(e.t > prev, `queue entry ${e.name}@${e.t} arrives out of order`);
+      prev = e.t;
+      const inHold = e.t >= N.clock.BEAT_END;
+      assert.strictEqual(!!e.hold, inHold,
+        `${e.name}@${e.t} is ${inHold ? "in the hold window" : "before BEAT_end"} without a hold label`);
+    }
+    assert.ok(q.some((e) => e.hold), "nothing audible plays in the hold window either");
+  });
+
+  test("the audio queue is keyed to the beat table", () => {
+    build();
+    const { N } = boot();
+    for (const e of N.audio.queue) {
+      assert.ok(e.name in N.audio.voices, `${e.name}@${e.t} has no voice to synth it`);
+      if (e.hold) continue;
+      // No hand-kept times: an entry's beat decides where it sits.
+      assert.ok(N.clock.order.includes(e.id), `${e.name}@${e.t} keys to a beat outside clock.order`);
+      const s = N.clock.start(e.id);
+      assert.ok(e.t >= s && e.t < s + N.clock.dur(e.id),
+        `${e.name}@${e.t} sits outside the window of ${e.id}`);
+    }
+    // The three voices the plan names actually reach the show.
+    for (const [name, beat] of [["whomp", "tileHelo"], ["crack", "blast"], ["siren", "storm"]])
+      assert.ok(N.audio.queue.some((e) => e.name === name && e.id === beat),
+        `no ${name} fires during ${beat}`);
+  });
+
+  test("HUD null beat label falls back to hold text", () => {
+    build();
+    const { N } = boot();
+    // beatAt is null through the hold: a null beat is not a missing label, it is
+    // the hold, and it needs a label.
+    assert.strictEqual(N.hud.label({ t: N.clock.BEAT_END, beat: null }), N.clock.HOLD_LABEL);
+    assert.strictEqual(N.hud.label({ t: N.clock.BEAT_END + 3.5, beat: null }), N.clock.HOLD_LABEL);
+    // The scene defers to the same function, so the page's label and the HUD's
+    // cannot drift apart.
+    assert.strictEqual(N.scene.label({ t: N.clock.BEAT_END + 1, beat: null }), N.clock.HOLD_LABEL,
+      "the scene's hold fallback moved away from the HUD's");
+    // A frame without an explicit beat reads the clock live: that is what "driven
+    // by beatAt()" means, not "whatever the caller handed over".
+    const t = N.clock.start("blast") + 1;
+    assert.strictEqual(N.hud.label({ t }), N.clock.beatAt(t).label);
+    // A frame before the show is invalid, not "hold": it gets no label.
+    assert.strictEqual(N.hud.label({ t: -1, beat: null }), "");
+  });
+
+  test("pump fires only the crossings inside a frame", () => {
+    build();
+    const { N } = boot();
+    // The sandbox has no AudioContext: the queue still walks the show, so the
+    // gate counts crossings and the page schedules the same ones it reports.
+    const blastT = N.clock.start("blast");
+    const near = N.audio.eventsBetween(blastT - 2, blastT + 2);
+    assert.ok(near.length > 0, "nothing fires within 2 s of the blast");
+    assert.ok(near.every((e) => e.t > blastT - 2 && e.t <= blastT + 2),
+      "eventsBetween leaked an event outside its window");
+    assert.strictEqual(N.audio.eventsBetween(blastT + 2, blastT - 2).length, 0,
+      "a step backwards through the show still schedules crossings");
+    // The wrap hands pump a frame back at t=0: it must not replay the timeline.
+    const beforeHold = N.audio.queue.filter((e) => e.t < N.clock.BEAT_END).length;
+    N.audio.reset();
+    N.audio.pump({ t: N.clock.BEAT_END, beat: null, wrapped: false });
+    assert.strictEqual(N.audio.fired, beforeHold,
+      "a pass through the whole show fires every entry once, in order");
+    assert.strictEqual(N.audio.pump({ t: 0, beat: null, wrapped: true }), 0,
+      "the wrap frame replayed the show from the top");
+    assert.strictEqual(N.audio.fired, beforeHold, "the wrap frame also kept the counter clean");
+  });
+});
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   await run(process.argv[2] || null);
 }

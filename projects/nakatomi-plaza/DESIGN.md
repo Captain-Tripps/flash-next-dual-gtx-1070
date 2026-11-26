@@ -102,6 +102,17 @@ before that cut. Timings are derived with `seekTo(id)`, never from a start colum
   frame - `take` (the rig, claimed only by `step()` with a live beat to key), `lens` (a pose a
   tool pinned) or `framing` (one of the four orbit wide shots). A review screenshot that says
   `framing 3/4` while the take drives the lens is a screenshot that lies about itself.
+- **R21 - the audio queue is data, and the HOLD is audible.** The queue is built from
+  beat offsets at build time (`clock.start(id) + off`), never hand-kept times, and the
+  plan's invariant (Review Focus 5) is enforced both ways: an entry that sounds from
+  `BEAT_END` on must carry `hold: true`, and an entry carrying it before there is
+  rejected. Because the queue is data, the gate walks the whole show with no browser and
+  no AudioContext; the context exists only after a user gesture (the autoplay policy
+  decides this, not the code), and `pump` counts frame crossings even with no context.
+  The live driver then asserts that one full take fires every queued entry on the page
+  side - a page-side audio that only ever got read from the Node side is the failure this
+  catches. The HUD's label rule (null beat → `HOLD_LABEL`) lives in this fragment and the
+  scene's `label()` defers to it, so the page's label and the HUD's cannot drift apart.
 - **Fade completes one grace-frame early.** `fade.black` reaches exactly 1 at
   `FADE_START + FADE_LEN - dtClamp`, inside the fade window, so the full-black frame is
   rendered before `SHOW_LEN` rather at its boundary; the loop cut then waits for the grace
@@ -250,6 +261,21 @@ bounding-sphere radius about the envelope centre.
   `1,1,1`. One test runs every palette entry through it, because feeding the raw 0-255
   byte to the curve instead of the channel clamps every channel to 1 and the plaza
   renders as white sheets. The fx tasks read colours through this, not a private copy.
+- `NAKATOMIC.audio` - the show's queue (R21): `queue` of `{ name, id, off, t }` entries
+  sorted strictly ascending, `eventsBetween(prev, next)`, `pump(frame)`, `reset()`,
+  `fired` (the crossings the page-side pump has counted), `live`, `unlock()` and `voices`
+  (`whomp`, `crack`, `siren`, `glass`, `engine`, `room`). Entries are keyed to the beat
+  table: `t = clock.start(id) + off`, and the build gate rejects any entry whose beat is
+  not in `clock.order`, whose window it misses, or whose `hold` flag disagrees with
+  `t >= BEAT_END`. `unlock()` is the only path that creates an AudioContext, and only a
+  gesture handler calls it; `pump` counts crossings and stays silent with no context, so
+  the queue is testable with no browser. The live driver's take asserts `fired` equals the
+  queue length in one full run.
+- `NAKATOMIC.hud` - the HUD's text as pure functions: `label(f)` (the beat's label, or
+  `HOLD_LABEL` when `beatAt()` is null - R14's hold is not a missing label - and `""`
+  before show start), `meta(f, opts)`, `stat(opts)` and `text(f, opts)`. `opts` carries
+  `source`/`framing`/`framings`/`paused`; the scene's own `label()` defers to `hud.label`,
+  so one fallback rule governs both.
 - `NAKATOMIC.scene` - exactly `start rebuild running paused follow stats camera gl fov
   framing cameraSource setFraming setPose step label togglePause restart domElement`.
   `stats` is `{ points, voxels, fps, fx }`; `step(dt)` is the one-frame function the rAF loop

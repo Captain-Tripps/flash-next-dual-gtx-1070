@@ -351,6 +351,11 @@ const sceneReport = evalJs(`(() => {
       fovBad,
       maxStep,
       firstFrame,
+      // The queue walked the same take: step()'s pump counted every entry that
+      // crossed a frame boundary (the context is silent here - no gesture in the
+      // tool's page - but crossings are data, and the count is proof the page-side
+      // queue ran through the whole show).
+      audio: { queued: N.audio.queue.length, fired: N.audio.fired },
       missingBeats: N.clock.order.filter((id) => !seen[id]),
     };
   })();
@@ -527,6 +532,11 @@ if (!sceneReport.fatal) {
     const notTake = Object.entries(t.firstFrame).filter(([, f]) => f.source !== "take");
     check(notTake.length === 0,
       `the take's own lens paints every beat's first frame, not ${JSON.stringify(notTake.slice(0, 4))}`);
+    // The queue's part of the take: step()'s pump has to have walked the whole
+    // queue in one full run. Page-side audio that only ever got read from the
+    // Node side is the failure this bar exists to catch.
+    check(t.audio.queued > 0 && t.audio.fired === t.audio.queued,
+      `the page-side queue walked the whole show in one take: fired=${t.audio.fired} of ${t.audio.queued}`);
   }
 }
 
@@ -570,7 +580,8 @@ if (sceneReport.rig) {
     .map(([id, f]) => `${id} t=${f.t.toFixed(1)} tower ${(f.towerFrac * 100).toFixed(1)}% lights ${f.lights}`).join("\n");
   console.log(`\ntake: ${sceneReport.rig.frames} frames to the wrap, biggest step `
     + `${sceneReport.rig.maxStep[0]} cells at t=${sceneReport.rig.maxStep[1]}; `
-    + `inside frames ${sceneReport.rig.inside.length}, fov bad ${sceneReport.rig.fovBad.length}\n${take}`);
+    + `inside frames ${sceneReport.rig.inside.length}, fov bad ${sceneReport.rig.fovBad.length}, `
+    + `queue crossings ${sceneReport.rig.audio.fired}/${sceneReport.rig.audio.queued}\n${take}`);
 }
 
 if (fails.length) {

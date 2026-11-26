@@ -361,13 +361,13 @@ wiring moves ahead of the content tasks so Tasks 7-12 land visibly.
 **Files:** Create: `src/13-audio-hud.txt`.
 - Test: "audio events < 715 or hold-labelled"; "HUD label null fallback" (Review Focus 5).
 
-- [ ] Step 1: failing test "no event fires in the hold window without a hold label":
+- [x] Step 1: failing test "no event fires in the hold window without a hold label":
   enumerate the registered queue; every entry `t < 715` or carries `hold: true`.
-- [ ] Step 2: failing test "HUD null beat label falls back to hold text".
-- [ ] Step 3: run; expect FAIL.
-- [ ] Step 4: implement WebAudio event synth (helo whomp, blast crack, sirens) keyed to
+- [x] Step 2: failing test "HUD null beat label falls back to hold text".
+- [x] Step 3: run; expect FAIL.
+- [x] Step 4: implement WebAudio event synth (helo whomp, blast crack, sirens) keyed to
   `clock.order`, and the HUD text driven by `beatAt()` with the hold fallback.
-- [ ] Step 5: run; PASS. Commit: "show audio queue + hold-fallback beat labels".
+- [x] Step 5: run; PASS. Commit: "show audio queue + hold-fallback beat labels".
 
 ### Task 14: Final pass - README, render gate, full show run
 
