@@ -100,7 +100,8 @@ before that cut. Timings are derived with `seekTo(id)`, never from a start colum
   crossing; the endpoint gate is only the cheap first pass.
   `scene.cameraSource` tells the HUD and the screenshots which of the three cameras painted a
   frame - `take` (the rig, claimed only by `step()` with a live beat to key), `lens` (a pose a
-  tool pinned) or `framing` (one of the four orbit wide shots). A review screenshot that says
+  tool pinned; R25 made the same name the orbit a person drives) or `framing` (one of the four
+  orbit wide shots). A review screenshot that says
   `framing 3/4` while the take drives the lens is a screenshot that lies about itself.
 - **R21 - the audio queue is data, and the HOLD is audible.** The queue is built from
   beat offsets at build time (`clock.start(id) + off`), never hand-kept times, and the
@@ -150,6 +151,23 @@ before that cut. Timings are derived with `seekTo(id)`, never from a start colum
   one canvas, 18167 splats, the opening label on the HUD. `render-gate.mjs` and `ui-verify.mjs`
   now fail with "the page never booted itself" rather than starting the show themselves. The
   rule: a gate that performs the thing it claims to check has stopped checking it.
+- **R25 - whoever touches the picture owns the lens for the rest of the run, and the show
+  keeps advancing under them.** Jon opened the page and the wheel and free-rotate did
+  nothing he could see: the press wrote orbit state, and the very next `step()` re-posed the
+  camera from the take's keys. The live tools never saw it because they drive the loop
+  `paused`, where the re-pose does not run - which is also why every test that claims to check
+  input has to run the loop unpaused and fire the page's own events (`fireOn` in `unit.mjs`,
+  against the listeners the element, document and window stubs now record) rather than call
+  the handlers itself. `scene.follow` is the single switch: the take drives the camera while it
+  is true, and a press, a wheel notch or a `1..4` key clears it through `claimLens()`. That
+  seeds the orbit from the frame that is on screen, not from whichever framing was last set,
+  so the first drag is a continuation of the view instead of a cut to framing 1. The clock,
+  the audio queue and the beat labels keep walking under the takeover - the lens is the
+  person's, the timeline is the show's - and `R` (`restart()`) is the one way to hand the
+  lens back. The HUD names the lens that painted the frame: `take`, `framing n/m` while a wide
+  shot holds it, `your lens` while the mouse does, since a free orbit has no framing number to
+  show. The mouse lens is still an envelope-bound lens: `clearOfEnvelope` runs on every orbit,
+  so a free swing cannot put it inside the tower.
 - **Fade completes one grace-frame early.** `fade.black` reaches exactly 1 at
   `FADE_START + FADE_LEN - dtClamp`, inside the fade window, so the full-black frame is
   rendered before `SHOW_LEN` rather at its boundary; the loop cut then waits for the grace
@@ -317,7 +335,9 @@ bounding-sphere radius about the envelope centre.
 - `NAKATOMIC.hud` - the HUD's text as pure functions: `label(f)` (the beat's label, or
   `HOLD_LABEL` when `beatAt()` is null - R14's hold is not a missing label - and `""`
   before show start), `meta(f, opts)`, `stat(opts)` and `text(f, opts)`. `opts` carries
-  `source`/`framing`/`framings`/`paused`; the scene's own `label()` defers to `hud.label`,
+  `source`/`framing`/`framings`/`paused`; `meta` names three lenses and shows all three -
+  `take`, `framing n/m`, or `your lens` for the orbit the mouse is driving, which has no
+  framing number to show. The scene's own `label()` defers to `hud.label`,
   so one fallback rule governs both.
 - `NAKATOMIC.scene` - exactly `start rebuild running paused follow stats camera gl fov
   framing cameraSource setFraming setPose step label togglePause restart domElement`.
@@ -327,8 +347,11 @@ bounding-sphere radius about the envelope centre.
   `fx.at(t).length` to prove the burst painted rather than only counted. `label(f)` answers
   `HOLD_LABEL` when `beatAt()` is null, and the camera never comes to rest inside the tower
   envelope. `cameraSource` names the camera that painted the current frame: `take` when
-  `step()` is unpaused and carries a beat to key (the rig, through `setPose`), `lens` when a
-  tool pins a pose, `framing` when one of the four orbit wide shots is live. The page boots
+  `step()` is unpaused and carries a beat to key (the rig, through `setPose`), `framing` while
+  one of the four orbit wide shots holds the lens, `lens` for the orbit a press, a wheel or a
+  free drag is driving - and a tool's pinned pose is a lens too. `follow` is the switch under
+  all three: true means the take owns the camera, and any input clears it (R25), so `step()`
+  may re-pose only while nobody has claimed it. `restart()` puts it back. The page boots
   itself: the fragment adds one `document.addEventListener("DOMContentLoaded", …start())`, so
   a person opening `index.html` sees the show rather than the shell, and the two live tools
   assert `running` instead of starting the show for the page (R24).

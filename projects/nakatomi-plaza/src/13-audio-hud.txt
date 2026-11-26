@@ -247,10 +247,15 @@ Object.assign(NAKATOMIC, (() => {
     },
     // opts: { source, framing, framings, paused } - which camera made the frame and
     // whether a tool is holding it still. The meta line is what the review shots read.
+    // Three lenses, three names: the take's keys, one of the four wide shots, or the
+    // wheel/drag orbit the person opening the page is driving. A free orbit has no
+    // framing number to show, so it says whose lens it is instead.
     meta(f, opts) {
+      const lens = opts.source === "take" ? "take"
+        : opts.source === "framing" ? `framing ${opts.framing}/${opts.framings}` : "your lens";
       return `${f.t.toFixed(2)} s of ${clock.SHOW_LEN}`
         + `  ${(f.beat && f.beat.id) || "hold"}`
-        + (opts.source === "take" ? "  take" : `  framing ${opts.framing}/${opts.framings}`)
+        + `  ${lens}`
         + (opts.paused ? "  paused" : "");
     },
     stat(o) { return `${o.points} splats  ${o.voxels} vox  fps ${o.fps.toFixed(0)}`; },

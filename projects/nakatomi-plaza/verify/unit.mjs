@@ -37,6 +37,11 @@ export function stubThreeImport(body) {
 }
 
 function el(tag = "div") {
+  // A browser element keeps its listeners and fires its own events. The gate keeps
+  // them too, and never fires one: the suite fires them by hand (see fireOn) at the
+  // element the page bound its input to, which is what tests the page's wiring rather
+  // than a test's own call to the handler.
+  const listeners = {};
   const e = {
     tagName: tag.toUpperCase(),
     style: {},
@@ -47,7 +52,12 @@ function el(tag = "div") {
     children: [],
     appendChild(c) { this.children.push(c); return c; },
     setAttribute() {}, getAttribute() { return null; },
-    addEventListener() {}, removeEventListener() {},
+    __listeners: listeners,
+    addEventListener(type, fn) { (listeners[type] || (listeners[type] = [])).push(fn); },
+    removeEventListener(type, fn) {
+      const l = listeners[type];
+      if (l) listeners[type] = l.filter((f) => f !== fn);
+    },
     getBoundingClientRect() { return { width: 0, height: 0, left: 0, top: 0 }; },
     querySelectorAll() { return []; },
   };
@@ -115,6 +125,7 @@ export function createSandbox() {
   // never fires one, which is exactly what keeps "boot is clean" true here while a
   // real browser boots the page. `__listeners` is how the suite pins that hook.
   const listeners = {};
+  const windowListeners = {};
   const document = {
     getElementById: (id) => { if (!byId.has(id)) byId.set(id, el("div")); return byId.get(id); },
     createElement: (t) => el(t),
@@ -135,7 +146,15 @@ export function createSandbox() {
     requestAnimationFrame: () => 0,
     cancelAnimationFrame: () => {},
     setTimeout: () => 0, clearTimeout: () => {}, setInterval: () => 0, clearInterval: () => {},
-    addEventListener() {},
+    // The window records its listeners the same way the document and the canvas do:
+    // the page's keyboard and resize wiring hangs on the window, and firing them by
+    // hand is how the suite tests that wiring instead of calling the handlers itself.
+    __listeners: windowListeners,
+    addEventListener(type, fn) { (windowListeners[type] || (windowListeners[type] = [])).push(fn); },
+    removeEventListener(type, fn) {
+      const l = windowListeners[type];
+      if (l) windowListeners[type] = l.filter((f) => f !== fn);
+    },
     devicePixelRatio: 1,
     innerWidth: 800, innerHeight: 600,
   };
@@ -164,6 +183,17 @@ export function boot() {
 
 export function build() {
   execFileSync(process.execPath, [resolve(ROOT, "scripts", "build.mjs")], { cwd: ROOT, stdio: "pipe" });
+}
+
+// Fires every listener an element (or the window) has recorded for a type, the way a
+// browser fires its own events. The gate never fires an event, so a test that wants
+// the page's input wiring has to fire it - and this throws when the wiring is absent,
+// rather handing the test an empty list and letting it pass on nothing.
+export function fireOn(target, type, event = {}) {
+  const bound = ((target.__listeners || {})[type] || []);
+  if (!bound.length) throw new Error(`no ${type} listener wired to that element`);
+  for (const fn of bound) fn(event);
+  return bound.length;
 }
 
 // --- test registry: describe(title, fn) / test(name, fn) -----------------
@@ -724,12 +754,18 @@ describe("scene assembly", () => {
     assert.strictEqual(N.scene.cameraSource, "lens", "a pose a tool pins is that tool's lens");
     N.scene.setFraming(2);
     assert.strictEqual(N.scene.cameraSource, "framing", "setFraming names the tool's wide shot");
-    // Only the loop's own step() may claim the take, and only with a beat to key:
-    // that is the difference between the show's framing and a pinned pose, and it is
-    // the label the live driver asserts for every beat's first painted frame.
+    // Only the loop's own step() may claim the take, and only while the take still
+    // owns the lens: that is the difference between the show's framing and a pinned
+    // pose, and it is the label the live driver asserts for every beat's first
+    // painted frame. A wide shot picked by key keeps the lens (R25), so the step
+    // below does not steal it back - and the live driver's per-beat assertion still
+    // runs on a fresh boot, where the take has the lens.
     N.clock.seekTo("open");
     N.scene.step(N.clock.dtClamp);
-    assert.strictEqual(N.scene.cameraSource, "take", "the take's keys painted that frame");
+    assert.strictEqual(N.scene.cameraSource, "framing", "a framing key gave the take the lens back mid-run");
+    N.scene.restart();
+    N.scene.step(N.clock.dtClamp);
+    assert.strictEqual(N.scene.cameraSource, "take", "the take's keys painted that frame once R had the lens back");
   });
 });
 
@@ -1466,6 +1502,153 @@ describe("camera rig", () => {
         `route key at t=${k.t} is inside the envelope at ${cell.x},${cell.y},${cell.z}`);
       assert.ok(cell.x < 0, `route key at t=${k.t} pulls back on the wrong side of the block`);
     }
+  });
+});
+
+// --- The lens and the mouse: who owns the camera --------------------------
+// The ruling this suite pins (R25): the person who touches the picture owns the lens
+// for the rest of the run, and the show keeps advancing under them. It reached the
+// browser as "the wheel and free-rotate do nothing", because step() posed the camera
+// from the take's keys every frame and so erased the mouse's work one frame after the
+// mouse made it. The live tools never saw it: they drive the loop paused, where the
+// re-pose does not run. Every test here runs the loop unpaused for that reason.
+describe("the lens and the mouse", () => {
+  // A live scene, and the only legal way to get one: fire the page's own boot hook.
+  // It leaves a canvas, a window and the page's input listeners, all of which are
+  // then fired the way a browser fires them.
+  const bootLive = () => {
+    build();
+    const { N, sandbox } = boot();
+    for (const fn of sandbox.document.__listeners.DOMContentLoaded || []) fn();
+    return { N, sandbox };
+  };
+  const posOf = (camera) => ({ x: camera.position.x, y: camera.position.y, z: camera.position.z });
+  const off = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+  // A mouse drag across the picture: the pointer lands on the canvas, moves, lifts.
+  const drag = (canvas, from, to) => {
+    fireOn(canvas, "pointerdown", { clientX: from[0], clientY: from[1], pointerId: 1 });
+    fireOn(canvas, "pointermove", { clientX: to[0], clientY: to[1], pointerId: 1 });
+    fireOn(canvas, "pointerup", { pointerId: 1 });
+  };
+  // 156 px of horizontal drag is 43.7 degrees of orbit at the lens's own distance:
+  // gross enough that any overwrite of the mouse's work is obvious.
+  const SWEEP = [[300, 200], [456, 210]];
+
+  test("the mouse takes the lens and the show keeps advancing under it", () => {
+    const { N, sandbox } = bootLive();
+    N.clock.seekTo("open");
+    N.scene.step(N.clock.dtClamp);
+    assert.strictEqual(N.scene.cameraSource, "take", "the take owns the lens before the mouse does");
+    drag(N.scene.domElement, ...SWEEP);
+    assert.strictEqual(N.scene.follow, false, "a 43 degree drag never handed the lens to the mouse");
+    assert.strictEqual(N.scene.paused, false, "the takeover stopped the clock instead of leaving the show running");
+
+    // End state: the picture is still where the mouse left it after a whole run of
+    // frames, and the timeline kept walking under it. Both are the point - the loop
+    // used to pose the camera from the take's keys on the frame right after the drag.
+    N.scene.step(0.2);
+    const held = posOf(N.scene.camera);
+    const t0 = N.clock.t;
+    for (let i = 0; i < 10; i++) N.scene.step(0.2);
+    const now = posOf(N.scene.camera);
+    assert.strictEqual(N.clock.t - t0, 2, "the clock did not advance a full 10 frames under the takeover");
+    assert.ok(off(now, held) < 1e-9,
+      `the lens slid ${off(now, held).toFixed(3)} cells back to the take over the run - the show re-posed it`);
+    // ... and that held frame is not the take's: the take's key for this instant is
+    // far away, which is what "the lens is yours" means on screen.
+    const beat = N.clock.beatAt(N.clock.t);
+    const key = N.rig.sample(beat.id, N.clock.t);
+    assert.ok(off(now, key.pos) > 5,
+      `the painted lens is only ${off(now, key.pos).toFixed(2)} cells from the take's pose at t=${N.clock.t.toFixed(2)}`);
+    assert.strictEqual(N.scene.cameraSource, "lens", "the HUD does not know the mouse drove that frame");
+    // The meta line is what the review screenshots read, so it has to name the lens
+    // that made the frame. A free orbit has no framing number to show - the wheel and
+    // the drag do not pick from a table - so the label says whose lens it is instead.
+    const meta = sandbox.document.getElementById("meta").textContent;
+    assert.ok(meta.includes("your lens"), `the meta line does not say the mouse owns the lens: ${JSON.stringify(meta)}`);
+    assert.ok(!meta.includes("framing "), `the meta line shows a framing number for a free orbit: ${JSON.stringify(meta)}`);
+  });
+
+  test("the first press is a continuation, not a cut to the last framing", () => {
+    const { N } = bootLive();
+    // Framing 2 ("tower close") leaves orbit state far from the take's boulevard
+    // pose. If the takeover seeded the orbit from the framing that was last set, the
+    // view jumps the instant the pointer is captured; seeded from the frame that is
+    // on screen, a one-pixel drag is a one-pixel move.
+    N.scene.setFraming(2);
+    N.scene.restart();                    // R: the take has the lens and the clock
+    N.clock.seekTo("open");
+    N.scene.step(N.clock.dtClamp);
+    assert.strictEqual(N.scene.cameraSource, "take", "the take has the lens after R");
+    const before = posOf(N.scene.camera);
+    drag(N.scene.domElement, [300, 200], [301, 200]);
+    assert.strictEqual(N.scene.follow, false, "the press did not hand the lens to the mouse, so the cut claim below tests nothing about the lens it took");
+    N.scene.step(N.clock.dtClamp);
+    // One pixel of drag is 0.28 degrees of orbit, and the lens is ~66 cells out, so
+    // the lens may travel about a third of a cell. Anything over that is the view
+    // snapping to whichever setup the orbit state last remembered.
+    const moved = off(posOf(N.scene.camera), before);
+    assert.ok(moved < 0.5,
+      `the takeover cut the view: a one-pixel drag moved the lens ${moved.toFixed(1)} cells, not 0.3`);
+  });
+
+  test("the four keys claim the lens for good, and the HUD says whose lens it is", () => {
+    const { N, sandbox } = bootLive();
+    N.clock.seekTo("open");
+    N.scene.step(N.clock.dtClamp);
+    assert.strictEqual(N.scene.cameraSource, "take", "the take owns the lens before the keyboard does");
+    fireOn(sandbox, "keydown", { key: "4", preventDefault() {} });
+    assert.strictEqual(N.scene.framing, 4, "the 4 key did not pick the fourth framing");
+    N.scene.step(0.2);
+    const held = posOf(N.scene.camera);
+    for (let i = 0; i < 8; i++) N.scene.step(0.2);
+    assert.strictEqual(N.scene.cameraSource, "framing", "the take took the lens back mid-run");
+    assert.ok(off(posOf(N.scene.camera), held) < 1e-9,
+      `the framing lens moved ${off(posOf(N.scene.camera), held).toFixed(3)} cells - the take re-posed it`);
+    const meta = sandbox.document.getElementById("meta").textContent;
+    assert.ok(meta.includes(`framing 4/${4}`), `the meta line does not show the framing on screen: ${JSON.stringify(meta)}`);
+  });
+
+  test("the R key restarts the show and hands the lens back to the take", () => {
+    const { N, sandbox } = bootLive();
+    fireOn(N.scene.domElement, "wheel", { deltaY: -240 });
+    assert.strictEqual(N.scene.follow, false, "a wheel zoom never handed the lens to the mouse");
+    N.clock.seekTo("storm");
+    N.scene.step(0.2);
+    fireOn(sandbox, "keydown", { key: "r" });
+    assert.strictEqual(N.clock.t, 0, "R did not restart the clock");
+    assert.strictEqual(N.scene.follow, true, "R did not hand the lens back to the take");
+    N.scene.step(N.clock.dtClamp);
+    const key = N.rig.sample("open", N.clock.t);
+    assert.ok(off(posOf(N.scene.camera), key.pos) < 1e-6,
+      `the take has the lens again but the frame is ${off(posOf(N.scene.camera), key.pos).toFixed(3)} cells off its pose`);
+    assert.strictEqual(N.scene.cameraSource, "take", "the HUD does not know the take drove that frame");
+  });
+
+  test("the mouse lens cannot enter the tower, at any angle, however hard it zooms", () => {
+    const { N } = bootLive();
+    N.clock.seekTo("open");
+    N.scene.step(N.clock.dtClamp);
+    const lensCell = (v) => ({
+      x: Math.floor(v.x + 1e-9), y: Math.floor(v.y + 1e-9), z: Math.floor(v.z + 1e-9),
+    });
+    // The envelope clamp is not the take's private guard: the wheel pulls the lens to
+    // its own floor, and the drag then swings the orbit through the sky and under the
+    // ground. Every painted frame has to stay clear of the tower band it stands in.
+    for (let i = 0; i < 30; i++) fireOn(N.scene.domElement, "wheel", { deltaY: -600 });
+    const start = posOf(N.scene.camera);
+    const inside = [];
+    let moved = 0;
+    for (const [x, y] of [[90, 40], [90, 560], [600, 300], [60, 300], [700, 90], [700, 500]]) {
+      drag(N.scene.domElement, [400, 300], [x, y]);
+      N.scene.step(0.2);
+      const cam = posOf(N.scene.camera);
+      moved = Math.max(moved, off(cam, start));
+      if (N.envelope.isOutside(lensCell(cam)) !== true) inside.push(lensCell(cam));
+    }
+    assert.ok(moved > 1,
+      `the sweep moved the lens ${moved.toFixed(2)} cells at most - the input is dead, so the envelope check tested nothing`);
+    assert.deepStrictEqual(inside, [], "the mouse put the lens inside the tower envelope");
   });
 });
 

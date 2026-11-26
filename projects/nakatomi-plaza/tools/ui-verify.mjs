@@ -315,6 +315,10 @@ const sceneReport = evalJs(`(() => {
     // renders with: every frame outside the envelope, fov inside the clamp,
     // no cut (steps are dollies), every beat seen and on screen.
     if (!N.rig) return { missing: true };
+    // The framing probes above left the mouse-style lens claimed; this probe is the
+    // take, so it has to hand the lens back first. R is also the way the tool says
+    // "the take painted this", rather than the probe calling the handler itself.
+    N.scene.restart();                        // the take has the lens
     N.scene.togglePause();                    // the loop owns the clock now
     N.clock.seekTo(N.clock.order[0]);
     const dt = N.clock.dtClamp;
@@ -573,8 +577,10 @@ for (const [beat, name, pos, target, fov] of POSE_SHOTS)
 // The take's own lens at a beat's own time: hand the clock to the loop, run the
 // show to the beat's fraction, hand it back, and paint the pose the rig left on
 // the camera. No setFraming, no setPose - this is the show's framing, not the tool's.
+// The restart hands the lens back to the take: the framing and pose shots above
+// claimed it, and a shot whose lens was claimed by a key is not the take's frame.
 for (const [beat, frac, name] of RIG_SHOTS)
-  shoot(name, `N.clock.seekTo(${JSON.stringify(beat)}); `
+  shoot(name, `N.scene.restart(); N.clock.seekTo(${JSON.stringify(beat)}); `
     + `N.scene.togglePause(); `
     + `const tgt = N.clock.start(${JSON.stringify(beat)}) + ${frac} * N.clock.dur(${JSON.stringify(beat)}); `
     + `let g = 0; while (N.clock.t < tgt && g++ < 4000) N.scene.step(N.clock.dtClamp); `

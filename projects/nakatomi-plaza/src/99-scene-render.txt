@@ -11,7 +11,9 @@
 // exception is the scene object itself, whose shape is pinned by that gate.
 //
 // The show's own camera: Task 12 publishes NAKATOMIC.rig = { keys, sample }, and
-// the loop below consumes it when it is there (scene.follow). Until then the loop
+// the loop below consumes it while the take owns the lens (scene.follow). The person
+// opening the page keeps that lens for the rest of the run once they touch it - see
+// claimLens - and R hands it back. Until Task 12 there was no take, so the loop
 // drives the hand-rolled orbit rig - no addons, per the plan's one-rule imports.
 
 Object.assign(NAKATOMIC, (() => {
@@ -189,6 +191,36 @@ Object.assign(NAKATOMIC, (() => {
     return clearOfEnvelope(rig.target, pos);
   };
 
+  // Who owns the lens is a single flag: `scene.follow` says the take drives the
+  // camera, and everything the person opening the page can do to it - drag it, zoom
+  // it, pick one of the four wide shots - goes through here first. The bug this fixes
+  // is the one Jon hit: a wheel or a drag set the orbit, and the next frame re-posed
+  // the camera from the take's keys, so the input looked dead. Re-posing is allowed
+  // only while the take still owns the lens, so claiming it has to happen before the
+  // mouse moves, on the press itself.
+  const claimLens = () => {
+    if (scene.follow) {
+      // Seed the orbit from the frame that is on screen, not from whatever framing or
+      // key was last set: that is what makes the first drag a continuation of the
+      // view rather than a cut to framing 1. The pose is the show's own camera at
+      // this instant, so read it back into spherical terms the orbit understands.
+      const target = pose ? pose.target : rig.target;
+      const p = pose ? pose.pos : orbitPos();
+      const dx = p.x - target.x, dy = p.y - target.y, dz = p.z - target.z;
+      const dist = Math.max(1e-6, Math.hypot(dx, dy, dz));
+      rig.target = { x: target.x, y: target.y, z: target.z };
+      rig.dist = dist;
+      rig.yaw = Math.atan2(dx, dz) * 180 / Math.PI;
+      // Re-aiming through the same pitch range the drag already uses, so a lens that
+      // claims at a steep key cannot point below the floor the drag's own clamp allows.
+      const dip = Math.asin(Math.min(1, Math.max(-1, dy / dist))) * 180 / Math.PI;
+      rig.pitch = Math.min(88, Math.max(-20, dip));
+      scene.follow = false;
+    }
+    pose = null;
+    poseSource = "lens";
+  };
+
   // The scene's public object is assembled before start(): the gate asserts its
   // shape with no GL in the room, so every key exists at eval time.
   const scene = {
@@ -222,6 +254,9 @@ Object.assign(NAKATOMIC, (() => {
       scene.fov = f.fov;
       pose = null;
       poseSource = "framing";
+      // The keys choose a camera, so the take stops driving one: a framing that only
+      // lasts until the next frame is no framing at all. R hands the lens back.
+      scene.follow = false;
       if (rigReady) applyPose(scene.camera, orbitPos(), rig.target, scene.fov);
       return i;
     },
@@ -241,7 +276,16 @@ Object.assign(NAKATOMIC, (() => {
     },
 
     togglePause() { scene.paused = !scene.paused; return scene.paused; },
-    restart() { clock.restart(); pose = null; return clock.t; },
+    // R: the show restarts from the top and the take takes the lens back - however
+    // far the mouse had swung it. The clock is the show's, the lens is the person's,
+    // and pressing R is the one way to hand the second one over.
+    restart() {
+      clock.restart();
+      pose = null;
+      scene.follow = true;
+      poseSource = "take";
+      return clock.t;
+    },
 
     // Rebuilds the splat cloud from the current buffer: the content tasks (7..12)
     // add geometry and the shatter fx change ids, so the cloud has to be re-read.
@@ -327,6 +371,10 @@ Object.assign(NAKATOMIC, (() => {
         Math.max(600, envelope.radius * 8),
       );
       scene.setFraming(1);
+      // Framing 1 is only the seed for the very first frame: setFraming claims the
+      // lens for the key that picked a wide shot, and nobody pressed a key here. The
+      // take owns the camera until the person opening the page touches it.
+      scene.follow = true;
       // rigReady comes first: without it the rebuild below is a no-op, because
       // rebuild's own guard refuses to read a buffer before the rig exists.
       rigReady = true;
@@ -389,6 +437,10 @@ Object.assign(NAKATOMIC, (() => {
       // first pointer/keyboard press unlocks the queue, and until then the show is
       // silent and the queue keeps walking (pump counts crossings with no context).
       NAKATOMIC.audio && NAKATOMIC.audio.unlock();
+      // The claim happens on the press, not on the move: the drag's own pivot comes
+      // from orbit state that claim seeds from the live frame, so a press that never
+      // moves still hands the lens over and the next frame keeps it.
+      claimLens();
       drag = { x: e.clientX, y: e.clientY, yaw: rig.yaw, pitch: rig.pitch };
       canvas.setPointerCapture && canvas.setPointerCapture(e.pointerId);
     });
@@ -402,6 +454,7 @@ Object.assign(NAKATOMIC, (() => {
     canvas.addEventListener("pointerup", up);
     canvas.addEventListener("pointerleave", up);
     canvas.addEventListener("wheel", (e) => {
+      claimLens();
       const min = envelope.radius * 1.05;      // the lens never gets inside the tower
       rig.dist = Math.min(envelope.radius * 6, Math.max(min, rig.dist * (1 + e.deltaY * 0.0012)));
       pose = null;

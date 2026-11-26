@@ -13,7 +13,9 @@ imports three.js core r0.187.0 from cdnjs, so it needs network the first time;
 nothing else loads, and no build step is needed to watch it.
 
 Controls while running: drag orbits, the wheel zooms, `1`..`4` pin one of the
-four fixed framings, `space` pauses, `R` restarts. The first click or key press
+four fixed framings, `space` pauses, `R` restarts. Touching the picture takes the
+camera and keeps it: the clock, the sound and the beat labels carry on without
+the lens, and `R` hands the lens back to the show (R25). The first click or key press
 unlocks sound - the autoplay policy wants a gesture before a page may start
 audio, so until then the show is silent and the audio queue keeps walking.
 
@@ -55,8 +57,8 @@ pose. The full spec, the batch numbers, and the reasoning live in
 The camera obeys three rules the gates assert: it never gets inside the tower
 envelope (R12/R13), every frame is a dolly from the last - a continuous take,
 never a cut (R20), and every beat gets witnessed. The HUD names the beat and
-tells you which camera painted the frame: `take`, or one of the four fixed
-framings when a tool pinned it.
+names the lens that painted the frame: the show's own `take`, a numbered framing
+while a wide shot holds it, or `your lens` while the mouse does.
 
 The world is about 18.2k voxels drawn as 18,167 splats in one point-sprite
 cloud: ground and skyline 9,406 (skyline 2,860 of those), tower core and
@@ -78,12 +80,13 @@ module, and no fragment parses on its own.
 cd projects/nakatomi-plaza
 node scripts/build.mjs            # join src/NN-*.txt -> index.html
 node scripts/build.mjs --check    # extract the module body and parse-check it
-node verify/unit.mjs              # 56 vm-sandbox tests against the built page
+node verify/unit.mjs              # 62 vm-sandbox tests against the built page
 node tools/render-gate.mjs index.html   # pixel end-state gates, six named views
 node tools/ui-verify.mjs          # drive the full show, assert end state
+node tools/lens-check.mjs         # drive the mouse and keys in the real page
 ```
 
-The last two need the `agent-browser` CLI on `PATH` (it drives a real Chromium
+The last three need the `agent-browser` CLI on `PATH` (it drives a real Chromium
 and reads the WebGL back buffer, which the page enables with
 `preserveDrawingBuffer: true`). They do not look at a screenshot and hope:
 they sample the pixels and assert the rendered end state. `render-gate` walks
@@ -96,7 +99,10 @@ lens is outside the envelope, and no witness frame is a full-bleed glass fill.
 `ui-verify` drives the whole 735 s run frame by frame and asserts the end
 state: full black before the cut, exactly one wrap, the hold label on the HUD,
 every beat witnessed by the take's own lens, and the whole audio queue fired on
-the page side. Review screenshots land in `ui-verify/` and `render-gate/` -
+the page side. `lens-check` drives the input, not the picture: a 43 degree drag
+and a wheel clamp have to move the lens and keep it while the clock walks, `R`
+has to hand the lens back to the take, and a `1`..`4` key has to keep its
+framing (R25). Review screenshots land in `ui-verify/` and `render-gate/` -
 git-ignored, so they are artefacts, not history.
 
 ## Layout
@@ -109,7 +115,8 @@ git-ignored, so they are artefacts, not history.
 | `verify/unit.mjs` | one suite, `vm` sandbox, THREE stubbed |
 | `tools/ui-verify.mjs` | live browser: drive the show, assert end state |
 | `tools/render-gate.mjs` | live browser: pixel gates per named view |
-| `DESIGN.md` | spec, clock, batch numbers, rulings R1-R23 |
+| `tools/lens-check.mjs` | live browser: drag, wheel and keys own the lens (R25) |
+| `DESIGN.md` | spec, clock, batch numbers, rulings R1-R25 |
 | `docs/` | plan and loss record (below) |
 
 ## Provenance
@@ -120,5 +127,5 @@ is `docs/loss-record.md`. The v1 beat list was unrecoverable, so the table
 above is a v2 reconstruction - it keeps the v1 clock constants unchanged
 (`BEAT_END` 715, `SHOW_LEN` 735, `FADE_START` 729, storm dur 95, blast at 360)
 and the deltas are reviewable. The v1 rulings carried into v2, and everything
-decided since - R12 through R23 - is recorded in `DESIGN.md` §3 with the
+decided since - R12 through R25 - is recorded in `DESIGN.md` §3 with the
 reasoning. That spec is the contract; this README is the tour.
