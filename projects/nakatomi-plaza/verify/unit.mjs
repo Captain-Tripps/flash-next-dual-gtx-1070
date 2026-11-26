@@ -111,13 +111,20 @@ export function makeTHREEStub() {
 
 export function createSandbox() {
   const byId = new Map();
+  // A browser document records its listeners and fires its own events; the vm gate
+  // never fires one, which is exactly what keeps "boot is clean" true here while a
+  // real browser boots the page. `__listeners` is how the suite pins that hook.
+  const listeners = {};
   const document = {
     getElementById: (id) => { if (!byId.has(id)) byId.set(id, el("div")); return byId.get(id); },
     createElement: (t) => el(t),
     createTextNode: (t) => ({ textContent: t }),
     querySelectorAll: () => [],
     querySelector: () => el("div"),
-    addEventListener() {}, body: el("body"), documentElement: el("html"),
+    addEventListener: (type, fn) => { (listeners[type] || (listeners[type] = [])).push(fn); },
+    removeEventListener() {},
+    __listeners: listeners,
+    body: el("body"), documentElement: el("html"),
     hidden: false, visibilityState: "visible",
   };
   const sandbox = {
@@ -686,6 +693,25 @@ describe("scene assembly", () => {
     assert.deepStrictEqual(Object.keys(N.scene.stats).sort(), "fps fx points voxels".split(" ").sort(), "stats keys");
     // The hold fallback needs no beat label to exist: label() answers for the hold.
     assert.strictEqual(N.scene.label({ t: 360, beat: N.clock.beatAt(360) }), N.clock.beatAt(360).label, "beat label");
+  });
+
+  // The page has to boot itself, because that is what a person opening index.html
+  // gets. Both live tools used to call scene.start() for the page - which is how a
+  // page that never boots by itself still tested green and left a black screen in
+  // the browser. This is the gate for that claim: the module hangs its boot on the
+  // document's own ready event, and firing that event is the whole boot.
+  test("the page boots itself on the document's own ready event", () => {
+    build();
+    const { N, sandbox } = boot();
+    const hooked = sandbox.document.__listeners.DOMContentLoaded || [];
+    assert.ok(hooked.length >= 1,
+      "the module registers no DOM-ready hook, so a browser open leaves only the static shell");
+    assert.strictEqual(N.scene.running, false, "the page must not boot before the document is ready");
+    assert.strictEqual(N.scene.gl, null, "no renderer before the document is ready");
+    for (const fn of hooked) fn();
+    assert.strictEqual(N.scene.running, true, "the DOM-ready hook does not start the show");
+    assert.ok(N.scene.gl && N.scene.domElement, "the boot handed back no renderer and no canvas of its own");
+    assert.strictEqual(N.scene.stats.points, 18167, "the boot did not put the whole world on screen");
   });
 
   test("the HUD says which camera painted the frame", () => {

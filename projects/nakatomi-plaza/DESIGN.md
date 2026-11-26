@@ -139,6 +139,17 @@ before that cut. Timings are derived with `seekTo(id)`, never from a start colum
   end of `drestle` (t 713.2), and `push()`'s own gate proves the final pose equals the
   opening pose. Adding a key at `BEAT_END` would have made the lens dolly home in zero time
   and given the sampled-segment gates a leg nobody measured.
+- **R24 - the page boots itself, and a tool that boots it for the page is not a gate.** Jon
+  opened `index.html` and got the static shell: black stage, foot menu only. The probe said
+  why without an error to read - `NAKATOMIC` assembled, `scene.running` false, no canvas, and
+  `start()` worked when called by hand. Nothing in the page ever called it. Both live tools
+  called `N.scene.start()` on the page's behalf, which is exactly how a page that never boots
+  kept testing green in six views and a full take. The boot now hangs on the document's own
+  `DOMContentLoaded`: eval time still touches no DOM and no GL (the vm stub records the hook
+  and never fires it), and `unit.mjs` fires it by hand to prove the hook is the whole boot -
+  one canvas, 18167 splats, the opening label on the HUD. `render-gate.mjs` and `ui-verify.mjs`
+  now fail with "the page never booted itself" rather than starting the show themselves. The
+  rule: a gate that performs the thing it claims to check has stopped checking it.
 - **Fade completes one grace-frame early.** `fade.black` reaches exactly 1 at
   `FADE_START + FADE_LEN - dtClamp`, inside the fade window, so the full-black frame is
   rendered before `SHOW_LEN` rather at its boundary; the loop cut then waits for the grace
@@ -317,7 +328,10 @@ bounding-sphere radius about the envelope centre.
   `HOLD_LABEL` when `beatAt()` is null, and the camera never comes to rest inside the tower
   envelope. `cameraSource` names the camera that painted the current frame: `take` when
   `step()` is unpaused and carries a beat to key (the rig, through `setPose`), `lens` when a
-  tool pins a pose, `framing` when one of the four orbit wide shots is live.
+  tool pins a pose, `framing` when one of the four orbit wide shots is live. The page boots
+  itself: the fragment adds one `document.addEventListener("DOMContentLoaded", …start())`, so
+  a person opening `index.html` sees the show rather than the shell, and the two live tools
+  assert `running` instead of starting the show for the page (R24).
 
 Appendix B is the beat table the clock fragment carries verbatim.
 

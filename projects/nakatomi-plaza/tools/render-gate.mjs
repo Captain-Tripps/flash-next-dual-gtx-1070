@@ -81,7 +81,12 @@ for (let i = 0; i < 40; i++) {
 const report = evalJs(`(() => {
   const N = window.NAKATOMIC;
   if (!N.scene) return JSON.stringify({ fatal: "NAKATOMIC.scene missing - the render rig is not wired" });
-  N.scene.start();
+  // The gate must not boot the page it is gating: a tool that calls start() for the
+  // page cannot see the page failing to boot, and that is the bug this gate used to
+  // miss. The page's own DOMContentLoaded hook has already run by the time the load
+  // event lets this payload execute.
+  if (!N.scene.running)
+    return JSON.stringify({ fatal: "the page never booted itself - a browser open would show the static shell" });
   N.scene.togglePause();                       // the tool owns the clock; the loop only repaints
   const gl = N.scene.gl;
   const canvas = gl && gl.domElement;

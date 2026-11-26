@@ -2505,6 +2505,16 @@ Object.assign(NAKATOMIC, (() => {
     });
   };
 
+  // The page boots itself. A person opening index.html sees the show, not the static
+  // shell: nothing else calls start(), and every live tool used to boot the page for
+  // it, which is how a page that never boots still tested green. The boot hangs on the
+  // document's own ready event rather than running at eval time, so the vm gate keeps
+  // its promise (no DOM, no GL until a browser says the document is ready): the gate's
+  // stub document records the hook and never fires it, and unit.mjs fires it by hand to
+  // prove the hook boots the whole show. A module script is deferred, so its own
+  // execution is before DOMContentLoaded - this listener can never miss the event.
+  document.addEventListener("DOMContentLoaded", () => NAKATOMIC.scene.start());
+
   return { splats, ensureWorld, colorLinear, scene };
 })());
 
