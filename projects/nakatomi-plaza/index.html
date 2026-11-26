@@ -1232,7 +1232,7 @@ Object.assign(NAKATOMIC, (() => {
 // bridge deck the boulevard crosses on. Nothing here can go down into the sunken
 // garage lot - its floor is y -6 and a cruiser does not fit down there.
 //
-// Ruling R16 (this fragment, 2026-11-25): the convoy is a *static* batch. The show
+// Ruling R19 (this fragment, 2026-11-25): the convoy is a *static* batch. The show
 // is a single continuous outside take, and the beats are camera-side (Task 12), so
 // the response is parked in its wall for the whole show - it does not animate in on
 // the fedConvoy beat. What the beat window carries is the camera's interest, not
@@ -1277,7 +1277,6 @@ Object.assign(NAKATOMIC, (() => {
   const LIGHT_Y = STREET + 2;                   // lightbar band, above the cabin
   const BAR_KINDS = ["red", "blue", "red", "blue", "red", "blue"];
 
-  // --- the route, as waypoint voxels -----------------------------------------
   // --- the route, as waypoint voxels -----------------------------------------
   // Task 12's camera pulls back along these waypoints, and the last one is where
   // the lead car stops. The waypoints are integer cells, and routeAt floors the

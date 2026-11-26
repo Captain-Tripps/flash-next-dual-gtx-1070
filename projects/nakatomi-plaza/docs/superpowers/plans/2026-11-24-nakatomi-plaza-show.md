@@ -324,7 +324,7 @@ wiring moves ahead of the content tasks so Tasks 7-12 land visibly.
   loop, black-and-wipe position); PASS; commit.
 
   What shipped differs in one respect and one typo: the batch is **staged once, statically**
-  (R16), so the convoy is world geometry that stands from t=0 and the `fedConvoy`/`wallOfCars`
+  (R19), so the convoy is world geometry that stands from t=0 and the `fedConvoy`/`wallOfCars`
   windows carry camera interest and HUD labels rather than new geometry. The plan's
   "black-and-wipe" is the *lead car* - the black-and-white that took the ramp into the sunken
   driveway under the bridge, parked at `x -6..-3, z -19` two bands below street level. Route is

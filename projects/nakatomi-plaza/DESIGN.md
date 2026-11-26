@@ -73,6 +73,15 @@ before that cut. Timings are derived with `seekTo(id)`, never from a start colum
   the orbit stand-in for the camera, `NAKATOMIC.ensureWorld`/`NAKATOMIC.splats`, and the
   HUD/fade wiring. Task 12's rig then drives it through `scene.setPose`, and nothing in
   Tasks 7-12 may add a renderer of its own.
+- **R19 - the response is staged, not driven in.** The police convoy, the fed SUVs and the
+  lead car are one static batch, parked in their wall from `t = 0` for the whole show. The
+  show is a single continuous outside take (R12/R13) and a vehicle arriving mid-show would
+  need a cut to look believable, so the `fedConvoy` and `wallOfCars` beat windows carry the
+  camera's interest and the HUD label, not new geometry. The route that the convoy would
+  have driven is still published (`convoy.route`, `convoy.routeAt`) as the data layer
+  Task 12's boulevard pull-back walks along. Because the batch never moves, its screen
+  proof in `tools/ui-verify.mjs` can not be a frame delta: it is the two lightbar palette
+  ids landing on the sensor, the only saturated red and saturated blue in the dusk palette.
 - **Fade completes one grace-frame early.** `fade.black` reaches exactly 1 at
   `FADE_START + FADE_LEN - dtClamp`, inside the fade window, so the full-black frame is
   rendered before `SHOW_LEN` rather at its boundary; the loop cut then waits for the grace
@@ -91,6 +100,9 @@ way the real plaza does. Street level (`streetY`) is y = 0.
 | Sunken driveway (ditch) + bridge | -22..22 | -20..-18 | floor y = -3, walls y = -2..-1, bridge deck y = 0 |
 | Reflecting pool | -5..5 | 25..27 | basin band y = -1, water flush y = 0 |
 | Arrival court (dressing lane) | -20..20 | 20..24 | vehicles y = 0..1, marquee posts y = 0..2, beam y = 3 |
+| Police convoy wall (Task 11) | -21..21 | 20..23 | bodies y = 0..1, lightbars y = 2 |
+| Fed SUVs, boulevard side | 25..39 | -16..-15 | bodies y = 0..1, lightbars y = 2 |
+| Lead car, sunken driveway | -6..-3 | -19 | body y = -2, cabin y = -1, marker y = -2 |
 | Palm grove (12) | 24/30/36 and mirrored | -25 and 25 | trunk y = 0..3, canopy y = 4 |
 | Distant skyline (3 walls) | -55..54 | z = 44, 56, 70 | full-width splices, 6 + 12 + 8 bands |
 | Podium (arcade + lobby) | -20..20 | -17..17 | 0..3 (arcade rows 0..2, deck slab row 3) |
@@ -186,9 +198,21 @@ bounding-sphere radius about the envelope centre.
   over the cloud it replaces, and `scene.stats.fx` reports how many cells that frame
   drew - which is how the live driver proves the burst reached the pixels rather than
   only the data.
-- `NAKATOMIC.ensureWorld()` - builds the ground, lobby, dressing and roof batches into
-  the shared buffer once and returns `{ ground, lobby, dressing, roof, bounds, voxels,
-  buffer }`; a second call returns the same object.
+- `NAKATOMIC.convoy` - the response, staged (R19): `{ window, route, routeAt, routeLength,
+  stage }`. `window` is the two fed beats read off the clock (`[485, 563]`), `route` is the
+  17 waypoints the boulevard approach follows - axis-aligned legs only, from
+  `(-23, street, block's south edge)` to the forecourt stop at `(-16, street, 24)`, dipping
+  through the cut's free interior rows at y -2 and -1 because the bridge deck at y 0 is the
+  ground's - and `routeAt(f)` answers the cell at arc-fraction `f` with `Math.floor`, so an
+  interpolated float can never land a sample at street level inside the skirt. It is a data
+  layer for Task 12's pull-back, not a path any object drives down.
+  `NAKATOMIC.convoyWorld()` is the batch: 147 cells, 90 body + 48 band + 9 light-bar parts,
+  9 FCPD cruisers in two rows (`frontRow` z 20, `backRow` z 23), 3 fed SUVs on the east kerb
+  line, 13 cars, 18 light-bar cells (10 red, 8 blue), and the lead car two bands under the
+  bridge in the sunken driveway.
+- `NAKATOMIC.ensureWorld()` - builds the ground, lobby, dressing, roof and convoy batches
+  into the shared buffer once and returns `{ ground, lobby, dressing, roof, convoy, bounds,
+  voxels, buffer }`; a second call returns the same object.
 - `NAKATOMIC.colorLinear(hex)` - the palette's sRGB hex in the renderer's working space:
   three 0..1 linear channels. `#ffcc77` goes out as `1, 0.6039, 0.1845`, `#ffffff` as
   `1,1,1`. One test runs every palette entry through it, because feeding the raw 0-255
@@ -216,14 +240,27 @@ Appendix B is the beat table the clock fragment carries verbatim.
 | glass | `0xd002` | lit curtain-wall cells, `#ffcc77`, the warm interior glow |
 | glassShatter | `0xd003` | post-blast shards, `#e8f4ff` - in use since Task 10 |
 | wet | `0x15181f` | wet plaza / asphalt |
-| brake | `0xc050` | police flash bar (scene id, below the glass block) |
+| cruiser | auto | `#191c23`, the black-and-white bodies |
+| cruiserBand | auto | `#c4c9d4`, the light band on a cruiser's side |
+| fed | auto | `#20242d`, the fed SUVs |
+| fedGlass | auto | `#39424f`, the SUV glass |
+| lightRed | auto | `#e0453c`, one lightbar cell (v1's `brake` row, as one id per cell) |
+| lightBlue | auto | `#3d76e0`, the other lightbar cell |
+| marker | auto | `#d8b23c`, the lead car's amber marker |
 
 The rows above are the dusk set the plan asked for; what the fragments actually claim is
 one call to `palette.id(hex)` or `palette.define(id, hex)` per material, and the non-glass
 ids are auto-allocated from `0x0100` up. Two of the sky rows are not palette entries at
 all: dusk sits in the renderer's clear colour and `FogExp2`, both `#0a0c12`, and the far
 city's window bands carry the warm (`#8a6a4a`). Treat this appendix as the intent, and
-read `src/0[3-7]*.txt` for what is in the buffer.
+read `src/0[3-9]*.txt` and `src/1[0-9]*.txt` for what is in the buffer.
+
+One rule about the two responder-light hexes: they are single-cell ids on the lightbar band
+and never body paint. A saturated red or blue on a body band would put permanent responder
+colour in every frame, and the pixel gates that read the convoy would stop being delta
+measurements. The same hazard with the other direction of the same palette: the pale cool
+ids can not be used on anything that stands still, because the shatter gates count cool
+pixels.
 
 The gate test in Task 2 fails if any scene id lands at `0xe001` or above. The glass block
 runs `0xd001` to `0xdfff`; anything at `0xe001` and up is reserved and never used by

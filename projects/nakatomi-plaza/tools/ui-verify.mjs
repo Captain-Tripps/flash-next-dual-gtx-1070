@@ -234,7 +234,7 @@ const sceneReport = evalJs(`(() => {
 
   const convoy = (function probeConvoy() {
     // Task 11's end state, read at the beat it is staged for. The batch is static
-    // world geometry (R16), so there is no frame delta to measure: the proof has to
+    // world geometry (R19), so there is no frame delta to measure: the proof has to
     // be the responders' own paint. The two lightbar hexes are the only saturated
     // red and the only saturated blue in the dusk palette, so a pixel that reads
     // that way is a lightbar the lens actually sees.
@@ -398,7 +398,7 @@ if (!sceneReport.fatal) {
     + `(quiet ${sceneReport.fx.quiet.cool}, flash ${sceneReport.fx.flash.cool})`);
 
   // --- the convoy, asserted end-to-end --------------------------------------
-  // Ruling R16 makes the batch static world geometry, so the screen proof cannot be
+  // Ruling R19 makes the batch static world geometry, so the screen proof cannot be
   // a frame delta: it is the responders' own colours landing on the sensor. The
   // lightbars are the only saturated red and saturated blue in the dusk palette, and
   // the lens that sees them is a legal one - outside the envelope, the same rule the
