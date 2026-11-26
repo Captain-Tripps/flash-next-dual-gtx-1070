@@ -1,0 +1,245 @@
+// Fragment 11: the police convoy and the Feds - the response that makes the wall
+// of cars, and the route that brings it in.
+//
+// Task 8 dressed the plaza with the vehicles already parked there: the taxis, the
+// town car, the tree truck. This fragment adds the ones that arrive, and the road
+// they came in on. It is a batch like the dressing batch - every cell outside the
+// envelope, on the block, never re-claiming a cell the ground or the curtain wall
+// owns - plus one thing Task 8 did not need: a route. Task 12's camera pulls back
+// along that route for the convoy beats, so the path has to be a fact the tests
+// can check, not a shape the artist drew once.
+//
+// The route comes up the west side of the block on the boulevard, crosses the
+// bridge over the sunken driveway, dips down the apron into the cut where the lead
+// car ends up, and loops back out and around to the forecourt, where the wall of
+// cruisers is staged. It stays west of the tower's podium skirt (the envelope's
+// lower band maxes at x -22, and the lane is at x -23) and it never runs between
+// the boulevard kerb strips: the kerbs stand at x -35/-34 and 34/35, so the whole
+// block between them is one wide avenue, and the avenue's west lane is where a
+// convoy would actually drive.
+//
+// Vertical: one band is one storey, so a vehicle body is one band and its cabin
+// rides above it. The wall of cruisers stands at street level; the lead car sits
+// in the sunken driveway, at y -2 with its cabin at -1, floor at -3, under the
+// bridge deck the boulevard crosses on. Nothing here can go down into the sunken
+// garage lot - its floor is y -6 and a cruiser does not fit down there.
+//
+// Ruling R19 (this fragment, 2026-11-25): the convoy is a *static* batch. The show
+// is a single continuous outside take, and the beats are camera-side (Task 12), so
+// the response is parked in its wall for the whole show - it does not animate in on
+// the fedConvoy beat. What the beat window carries is the camera's interest, not
+// new geometry; the window is here so Task 13's HUD labels and Task 12's pull-back
+// key can read the same beat the batch was staged for.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const palette = NAKATOMIC.palette;
+  const plan = NAKATOMIC._plan;
+  const clock = NAKATOMIC.clock;
+  const envelope = NAKATOMIC.envelope;
+  const STREET = plan.STREET;
+  const CUT = plan.DITCH;                       // sunken driveway floor band
+
+  // --- materials -------------------------------------------------------------
+  // The responders wear their own entries: the wall of cars is what the beat reads
+  // as, so the two-tone paint and the lightbars have to be separate ids, not one
+  // dark lump. The Feds are a second black - their cars are not police cars.
+  const ids = {
+    cruiser: palette.id("#191c23"),             // the black half of the two-tone
+    cruiserBand: palette.id("#c4c9d4"),         // the white roof and doors
+    fed: palette.id("#20242d"),                 // black SUV, one shade off the cruisers
+    fedGlass: palette.id("#39424f"),            // their glass, always a shade lighter
+    lightRed: palette.id("#e0453c"),            // responder light, one end of the bar
+    lightBlue: palette.id("#3d76e0"),           // the other end
+    marker: palette.id("#d8b23c"),              // the driveway lead car's amber marker
+  };
+
+  // --- where things stand, as one fact per feature ----------------------------
+  // The wall of cruisers: two rows across the forecourt, the front row in the lane
+  // immediately outside the podium skirt (z 20 vs the skirt's z 19), the back row
+  // behind the parked dressing vehicles (z 23 vs their bodies at z 21..22). Both
+  // rows are clear of the marquee (z 24) and of the reflecting pool (z 25..27).
+  const STAGE = { x0: -21, x1: 21, z0: 20, z1: 23 };
+  const FRONT_ROW = { z0: 20, z1: 20, xs: [-21, -14, -7, 0, 7, 14] };
+  const BACK_ROW = { z0: 23, z1: 23, xs: [-17, -4, 9] };
+  const LEAD = { x0: -6, x1: -3, z: -19 };      // the car that took the driveway down
+  const FEDS = [[25, 28], [30, 33], [36, 39]];  // the SUVs along the east kerb line
+  const FEDS_Z = { z0: -16, z1: -15 };
+  const BODY = { y: STREET };                   // every body band is street level
+  const LIGHT_Y = STREET + 2;                   // lightbar band, above the cabin
+  const BAR_KINDS = ["red", "blue", "red", "blue", "red", "blue"];
+
+  // --- the route, as waypoint voxels -----------------------------------------
+  // Task 12's camera pulls back along these waypoints, and the last one is where
+  // the lead car stops. The waypoints are integer cells, and routeAt floors the
+  // coordinate it interpolates: floor is the cell a float point sits in, and it is
+  // what keeps a descending waypoint from landing a sample at street level inside
+  // the skirt.
+  const ROUTE = [
+    { x: -23, y: STREET, z: plan.BLOCK.z0 },   // boulevard, at the block's south edge
+    { x: -23, y: STREET, z: -21 },             // north up the avenue, past the sunken lot
+    { x: -23, y: STREET, z: -20 },             // the corner where the avenue meets the bridge
+    { x: -21, y: STREET, z: -20 },             // east onto the bridge deck, over the cut
+    { x: -14, y: STREET, z: -20 },             // the crossing, still on street level
+    { x: -14, y: -1, z: -20 },                 // down the apron, one band under the deck
+    { x: -14, y: -1, z: -19 },                 // in at the driveway's free row
+    { x: -10, y: -2, z: -19 },                 // the floor, at the lead car's spot
+    { x: -2, y: -2, z: -19 },                  // on through the cut, under the bridge
+    { x: 1, y: -2, z: -19 },                   // along the floor to the far apron
+    { x: 1, y: -1, z: -19 },                   // up one band, still inside the cut
+    { x: -2, y: STREET, z: -20 },              // back out at street level, on the deck
+    { x: -16, y: STREET, z: -20 },             // west along the deck back to the avenue
+    { x: -23, y: STREET, z: -20 },             // out at the avenue's west lane
+    { x: -23, y: STREET, z: 24 },              // north up the plaza, west of the skirt
+    { x: -21, y: STREET, z: 24 },              // in at the forecourt's assembly lane
+    { x: -16, y: STREET, z: 24 },              // stopping short of the cruiser wall
+  ];
+
+  // --- the batch: its own occupancy map, so a cell can not be claimed twice ----
+  const cells = new Map();
+  const runs = [];
+  const parts = { cruiser: [], fed: [], driveway: [] };
+  const claim = (x, y, z, id, part) => {
+    const key = `${x}|${y}|${z}`;
+    const seen = cells.get(key);
+    if (seen !== undefined) {
+      if (seen !== id) throw new Error(`convoy cell ${key} claimed by two palette ids`);
+      return;                                   // same paint twice is the same cell
+    }
+    if (envelope.isOutside({ x, y, z }) !== true)
+      throw new Error(`convoy cell ${key} is inside the envelope (R12/R13)`);
+    if (x < plan.BLOCK.x0 || x > plan.BLOCK.x1 || z < plan.BLOCK.z0 || z > plan.BLOCK.z1)
+      throw new Error(`convoy cell ${key} is off the block`);
+    if (y < CUT + 1) throw new Error(`convoy cell ${key} is under the driveway floor`);
+    const inCut = x >= plan.DITCH_RECT.x0 && x <= plan.DITCH_RECT.x1 &&
+      z >= plan.DITCH_RECT.z0 && z <= plan.DITCH_RECT.z1;
+    if (y < STREET && !inCut)
+      throw new Error(`convoy cell ${key} is below the paving outside the driveway`);
+    cells.set(key, id);
+    parts[part].push({ x, y, z, id });
+  };
+  const put = (x, y, z, len, id, part) => {
+    if (len <= 0) return;
+    for (let i = 0; i < len; i++) claim(x + i, y, z, id, part);
+    vox.addRun(x, y, z, len, id);
+    runs.push({ x, y, z, len, id, part });
+  };
+  const one = (x, y, z, id, part) => put(x, y, z, 1, id, part);
+
+  // A vehicle along the +x axis: body band, two-tone band above it, and a lightbar
+  // on the free band over the cabin. `dir` points the front end down -x or up +x, so
+  // the lightbar sits at the front end and the bar's two colours face out along z.
+  const vehicle = (x0, x1, z0, z1, bodyId, bandId, barId, withBar) => {
+    for (let z = z0; z <= z1; z++) {
+      put(x0, BODY.y, z, x1 - x0 + 1, bodyId, "cruiser");
+      put(x0, BODY.y + 1, z, x1 - x0 + 1, bandId, "cruiser");
+    }
+    if (!withBar) return;
+    // Two bar cells over the cabin roof: red at the front, blue at the rear. They
+    // sit on the free band above the cabin, so the pair reads as a lightbar and the
+    // cell below stays body paint.
+    for (const z of [z0, z1]) {
+      one(x0 + 1, LIGHT_Y, z, barId, "cruiser");
+      one(x1 - 1, LIGHT_Y, z, barId, "cruiser");
+    }
+  };
+
+  const emit = () => {
+    // ---- the wall of cruisers: front row across the forecourt, back row packed
+    // behind it, every one of them two-tone with a bar on the cabin roof.
+    let bar = 0;
+    for (const xs of [FRONT_ROW, BACK_ROW])
+      for (const x of xs.xs) {
+        vehicle(x, x + 3, xs.z0, xs.z1, ids.cruiser, ids.cruiserBand,
+          BAR_KINDS[bar % BAR_KINDS.length] === "red" ? ids.lightRed : ids.lightBlue, true);
+        bar++;
+      }
+
+    // ---- the Feds: three black SUVs along the east kerb line, glass a shade up
+    for (const [x0, x1] of FEDS) {
+      for (let z = FEDS_Z.z0; z <= FEDS_Z.z1; z++) {
+        put(x0, BODY.y, z, x1 - x0 + 1, ids.fed, "fed");
+        put(x0, BODY.y + 1, z, x1 - x0 + 1, ids.fedGlass, "fed");
+      }
+    }
+
+    // ---- the lead car, in the sunken driveway under the bridge: body on the floor
+    // band, cabin below the bridge deck, one amber marker on the kerb side.
+    for (let z = LEAD.z; z <= LEAD.z; z++) {
+      put(LEAD.x0, -2, z, LEAD.x1 - LEAD.x0 + 1, ids.cruiser, "driveway");
+      put(LEAD.x0, -1, z, LEAD.x1 - LEAD.x0 + 1, ids.cruiserBand, "driveway");
+    }
+    one(LEAD.x0 - 1, -2, LEAD.z, ids.marker, "driveway");
+
+    // ---- the numbers: occupancy is the truth, exactly once ---------------------
+    const carCount = FRONT_ROW.xs.length + BACK_ROW.xs.length + FEDS.length + 1;
+    const lightCells = parts.cruiser.filter((c) => c.id === ids.lightRed || c.id === ids.lightBlue);
+    const lightRed = parts.cruiser.filter((c) => c.id === ids.lightRed);
+    const lightBlue = parts.cruiser.filter((c) => c.id === ids.lightBlue);
+
+    return {
+      voxels: runs.slice(),
+      batchVox: runs.length,
+      countVox: cells.size,
+      ids,
+      stage: { ...STAGE },
+      frontRow: FRONT_ROW.xs.slice(),
+      backRow: BACK_ROW.xs.slice(),
+      cruiserCells: parts.cruiser.slice(),
+      fedCells: parts.fed.slice(),
+      drivewayCells: parts.driveway.slice(),
+      lightCells,
+      lightBarCount: lightCells.length,
+      lightRedCount: lightRed.length,
+      lightBlueCount: lightBlue.length,
+      cruiserCount: FRONT_ROW.xs.length + BACK_ROW.xs.length,
+      fedCount: FEDS.length,
+      drivewayCount: 1,
+      carCount,
+      bodyY: BODY.y,
+      lightY: LIGHT_Y,
+    };
+  };
+
+  // One batch, once: like the ground, the lobby and the dressing, a rebuild would
+  // push the same cells back through addRun while the coalesced buffer stayed put.
+  let cached = null;
+  const convoyWorld = () => { if (cached === null) cached = emit(); return cached; };
+
+  // The route, read as arc-length position: routeAt(0) is the boulevard at the
+  // block's south edge, routeAt(1) the forecourt stop, and every intermediate
+  // sample lands in a cell the camera rules allow.
+  const floor1 = (v) => Math.floor(v);
+  const legLen = (a, b) => Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+  const legLengths = ROUTE.slice(1).map((b, i) => legLen(ROUTE[i], b));
+  const routeLen = legLengths.reduce((s, v) => s + v, 0);
+  const routeAt = (f) => {
+    const u = Math.min(Math.max(f, 0), 1) * routeLen;
+    let acc = 0;
+    for (let i = 0; i < legLengths.length; i++) {
+      const l = legLengths[i];
+      const t = l === 0 ? 0 : Math.min(Math.max((u - acc) / l, 0), 1);
+      acc += l;
+      if (u <= acc || i === legLengths.length - 1) {
+        const a = ROUTE[i], b = ROUTE[i + 1];
+        return {
+          x: floor1(a.x + (b.x - a.x) * t),
+          y: floor1(a.y + (b.y - a.y) * t),
+          z: floor1(a.z + (b.z - a.z) * t),
+        };
+      }
+    }
+    return { ...ROUTE[ROUTE.length - 1] };
+  };
+
+  return {
+    convoy: {
+      window: [clock.start("fedConvoy"), clock.start("wallOfCars") + clock.dur("wallOfCars")],
+      route: ROUTE.map((p) => ({ ...p })),
+      routeAt,
+      routeLength: routeLen,
+      stage: { ...STAGE },
+    },
+    convoyWorld,
+  };
+})());

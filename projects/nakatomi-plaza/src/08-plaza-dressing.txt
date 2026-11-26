@@ -1,0 +1,132 @@
+// Fragment 08: the plaza dressings - the two taxis, the town car, the tree
+// truck, and the marquee over the entrance drive.
+//
+// These are the mirror image of the lobby batch: the lobby lives inside the
+// envelope and the camera reads it through glass, while everything here lives
+// outside it, on the street, because these are objects the camera may sit next
+// to. So the batch is built from the camera's own contract outward: every cell
+// must satisfy envelope.isOutside, must stand on the block (isOnGround), and may
+// never re-claim a cell the ground or the curtain wall already owns.
+//
+// The arrival court is the band in front of the podium's south face: z 20..24,
+// clear of the 2 m envelope skirt (which maxes at z = 19), clear of the
+// reflecting pool (z 25..27), clear of the boulevard kerbs (x -35/-34 and
+// 34/35) and clear of the palm grove (x 24/30/36 at z +-25). That is why the
+// lane sits there and not closer to the glass: a vehicle parked inside the
+// skirt would be a cell the show's camera rules forbid the lens to reach.
+//
+// One band = one storey (~3.7 m), so a car body is one band and its cabin rides
+// above it; the lamps sit on the free band above the body corners, and the
+// marquee beam at band 3 clears the cabins and the truck's tree crate.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const palette = NAKATOMIC.palette;
+  const plan = NAKATOMIC._plan;
+  const STREET = plan.STREET;
+  const idGlow = NAKATOMIC.glass.ids.lit;   // lamps and banner glow with the building's own warm
+
+  // --- materials ---
+  const ids = {
+    car: palette.id("#2f333c"),    // the town car, black at dusk
+    taxi: palette.id("#b38f2a"),   // cab yellow, muted by the dusk
+    truck: palette.id("#5a5f6a"),  // the tree truck's cab
+    crate: palette.id("#23402a"),  // the tree it still carries, on the flatbed
+    steel: palette.id("#3a3e48"),  // marquee posts and beam
+  };
+
+  // --- where things stand, as one fact per feature ---
+  const LANE = { x0: -20, x1: 20, z0: 20, z1: 24 };              // the arrival court
+  const BODY = { z0: 21, z1: 22 };                               // vehicles park two cells deep
+  const MARQUEE_Z = 24;                                          // posts on the pool-side kerb line
+  const POSTS = [-12, 12];
+  const BEAM_Y = 3, BANNER_Y = 2;
+
+  // --- the batch, with its own occupancy map: a cell may only have one material ---
+  const cells = new Map();
+  const runs = [];
+  const parts = { vehicle: [], light: [], marquee: [] };
+  const claim = (x, y, z, id, part) => {
+    const key = `${x}|${y}|${z}`;
+    const seen = cells.get(key);
+    if (seen !== undefined) {
+      if (seen !== id) throw new Error(`dressing cell ${key} claimed by two palette ids`);
+      return;
+    }
+    if (z < LANE.z0 || z > LANE.z1 || x < LANE.x0 || x > LANE.x1)
+      throw new Error(`dressing cell ${key} is off the arrival court`);
+    if (y < STREET) throw new Error(`dressing cell ${key} is below the street band`);
+    cells.set(key, id);
+    parts[part].push({ x, y, z, id });
+  };
+  const put = (x, y, z, len, id, part) => {
+    if (len <= 0) return;
+    for (let i = 0; i < len; i++) claim(x + i, y, z, id, part);
+    vox.addRun(x, y, z, len, id);
+    runs.push({ x, y, z, len, id, part });
+  };
+  const one = (x, y, z, id, part) => put(x, y, z, 1, id, part);
+  const slab = (x0, x1, y, z0, z1, id, part) => {
+    for (let z = z0; z <= z1; z++) put(x0, y, z, x1 - x0 + 1, id, part);
+  };
+
+  // a vehicle: body band, cabin on the free band above the middle, two lamps on
+  // the band above the body's front corners
+  const vehicle = (x0, x1, cabin0, cabin1, idBody, idCabin) => {
+    slab(x0, x1, STREET, BODY.z0, BODY.z1, idBody, "vehicle");
+    if (cabin1 >= cabin0) slab(cabin0, cabin1, STREET + 1, BODY.z0, BODY.z1, idCabin, "vehicle");
+    one(x1, STREET + 1, BODY.z0, idGlow, "light");
+    one(x1, STREET + 1, BODY.z1, idGlow, "light");
+  };
+
+  const emit = () => {
+    // ---- the motorcade: two cabs, the town car, then the tree truck ----
+    vehicle(-18, -15, -17, -16, ids.taxi, ids.taxi);
+    vehicle(-10, -7, -9, -8, ids.taxi, ids.taxi);
+    vehicle(0, 6, 2, 4, ids.car, ids.car);
+    // the truck: flatbed, cab at its head, the crate it still carries two bands tall
+    slab(11, 18, STREET, BODY.z0, BODY.z1, ids.truck, "vehicle");
+    slab(11, 12, STREET + 1, BODY.z0, BODY.z1, ids.truck, "vehicle");
+    slab(14, 17, STREET + 1, BODY.z0, BODY.z1, ids.crate, "vehicle");
+    slab(14, 17, STREET + 2, BODY.z0, BODY.z1, ids.crate, "vehicle");
+    one(18, STREET + 1, BODY.z0, idGlow, "light");
+    one(18, STREET + 1, BODY.z1, idGlow, "light");
+
+    // ---- the marquee: posts on the ground, banner between them, beam above ----
+    for (const px of POSTS)
+      for (let y = STREET; y < BANNER_Y + 1; y++) one(px, y, MARQUEE_Z, ids.steel, "marquee");
+    for (let x = POSTS[0] + 3; x <= POSTS[1] - 3; x++) one(x, BANNER_Y, MARQUEE_Z, idGlow, "light");
+    for (let x = POSTS[0]; x <= POSTS[1]; x++) one(x, BEAM_Y, MARQUEE_Z, ids.steel, "marquee");
+
+    // ---- the numbers ---
+    let vehicleMinY = Infinity;
+    for (const c of parts.vehicle) vehicleMinY = Math.min(vehicleMinY, c.y);
+
+    return {
+      voxels: runs.slice(),
+      batchVox: runs.length,
+      countVox: cells.size,
+      ids,
+      lane: { ...LANE },
+      vehicleCells: parts.vehicle.slice(),
+      marqueeCells: parts.marquee.slice(),
+      lightCells: parts.light.slice(),
+      vehicleCount: parts.vehicle.length,
+      marqueeCount: parts.marquee.length,
+      lightCount: parts.light.length,
+      vehicleMinY,
+      marqueeZ: MARQUEE_Z,
+      beamY: BEAM_Y,
+    };
+  };
+
+  // One batch, once: like the ground and the lobby, a rebuild would push the
+  // same cells through addRun again while the coalesced buffer stayed put.
+  let cached = null;
+  const plazaDressing = () => { if (cached === null) cached = emit(); return cached; };
+
+  return {
+    plazaDressing,
+    dressing: { lane: { ...LANE }, bodyDepth: BODY, marqueeZ: MARQUEE_Z, posts: [...POSTS] },
+  };
+})());

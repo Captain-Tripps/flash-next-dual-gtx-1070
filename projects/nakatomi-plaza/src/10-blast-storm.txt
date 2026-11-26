@@ -1,0 +1,112 @@
+// Fragment 10: the blast and the storm - the facade break, the flash, and the
+// shards that fall and drift away from the atrium face.
+//
+// This is the one batch that is NOT a batch. The ground, the dressing, the
+// roof: those are piles of voxels the world carries. The fx is a function of
+// the clock: `paneCells(t)`, `flashCells(t)`, `shardCells(t)` answer "what is
+// visible at this instant", and outside their window they answer "nothing".
+// Two consequences make the restore-on-wrap work:
+//
+//   1. The fx never writes the shared voxel buffer. The curtain wall, the
+//      tower and the plaza are one build, once; an overlay that draws over
+//      them cannot mutate them, and every base cell keeps the colour it had
+//      before the window opened.
+//   2. The windows are not hand-picked numbers: they come from the clock.
+//      R15 makes the shatter live inside the storm window, so the fragment
+//      reads `clock.start("storm")` and `clock.dur("storm")` rather than
+//      baking 390 and 95, and the flash opens on the blast beat for the same
+//      reason. A change to Appendix A changes the fx with it.
+//
+// Geometry: the first facade break is on the atrium face, the lit run of the
+// lower shaft facing the north side of the block (the boulevard the wide
+// shots come in on). The flash stands in the two-cell shell AROUND the
+// envelope skirt, so the camera can always sit clear of the fireball; the
+// shards clear the same shell before they start falling, which is why the
+// drift reads as an outward push past z = -14 and never inside it.
+
+Object.assign(NAKATOMIC, (() => {
+  const clock = NAKATOMIC.clock;
+  const glass = NAKATOMIC.glass;
+  const envelope = NAKATOMIC.envelope;
+  const S = NAKATOMIC.tower.sections.lower;
+  const shatter = glass.ids.shatter;
+
+  // --- the windows, read from the clock, never hand-kept ---------------------
+  const window = [clock.start("storm"), clock.start("storm") + clock.dur("storm")];
+  const flashWindow = [clock.start("blast"), clock.start("blast") + clock.dur("blast")];
+
+  // --- the broken panes: a rectangle of the atrium face, drawn from the real
+  // glass line so a pane can only be a cell the curtain wall actually glazed --
+  const PANE = { x0: -6, x1: 6, y0: 5, y1: 8 };
+  const glassSet = new Map(glass.cells.map((c) => [`${c.x},${c.y},${c.z}`, c]));
+  const paneAll = [];
+  for (let y = PANE.y0; y <= PANE.y1; y++)
+    for (let x = PANE.x0; x <= PANE.x1; x++) {
+      const base = glassSet.get(`${x},${y},${S.z0}`);
+      if (!base) continue;                       // a mullion cell, not a pane
+      paneAll.push({ x, y, z: S.z0, id: shatter, zShift: -0.6, part: "pane" });
+    }
+  if (paneAll.length === 0) throw new Error("the pane rectangle has no glass cells on the atrium face");
+
+  // --- the flash: one band outside the skirt, on the blast beat -------------
+  const flashBand = S.z0 - 3;                    // z = -15, clear of the -14 skirt line
+  const flashAll = [];
+  for (let x = -6; x <= 6; x++)
+    for (let y = 5; y <= 8; y++) flashAll.push({ x, y, z: flashBand, id: shatter, part: "flash" });
+
+  // --- the shards: one per pane, and each one's own deterministic arc ------
+  // A shard leaves the pane line only once it has cleared the envelope shell:
+  // it enters at z = -16 (already clear of the shaft skirt), drifts out along
+  // -z, and falls to the podium terrace - it never dips into the podium bands,
+  // where the shell stands two cells further out than the shaft's. The terrace
+  // is where the sheet of glass actually lands in the shot, and y = 4 keeps
+  // every shard outside the shell at every height it occupies.
+  const SPAN = window[1] - window[0];
+  const uOf = (t) => (t - window[0]) / SPAN;
+  const shardAll = paneAll.map((c, i) => ({
+    x0: c.x,
+    y0: c.y,
+    zStart: flashBand - 1,                       // the first visible cell of the drift
+    reach: 3 + (i % 5),                          // the shard's own outward push, cells
+    sway: ((i % 3) - 1) * 0.18,                  // and a side-to-side, the same three ways
+    fall: Math.max(1, c.y - 4),                  // to the terrace line, and no lower
+  }));
+
+  // A pure function of t: the same instant always draws the same burst, and
+  // nothing at all outside the window. No buffer writes, no palette edits.
+  const inWindow = (t, w) => t >= w[0] && t < w[1];
+
+  const paneCells = (t) => (inWindow(t, window) ? paneAll.slice() : []);
+  const flashCells = (t) => (inWindow(t, flashWindow) ? flashAll.slice() : []);
+  const shardCells = (t) => {
+    if (!inWindow(t, window)) return [];
+    const u = uOf(t);
+    return shardAll.map((s, i) => ({
+      x: s.x0 + Math.round(u * s.reach * s.sway * 4),
+      y: Math.max(4, s.y0 - Math.round(u * s.fall)),
+      z: s.zStart - Math.round(u * s.reach),
+      id: shatter, part: "shard",
+    }));
+  };
+
+  // The overlay layer, once per instant: everything the fx can draw, in one
+  // list, ready for the render rig to push into its own Points pass.
+  const at = (t) => paneCells(t).concat(flashCells(t), shardCells(t));
+
+  // Build-time cross-checks: the fx must never be able to put a cell inside
+  // the camera shell, and it must never draw anything on the street band.
+  for (const c of flashAll)
+    if (!envelope.isOutside({ x: c.x, y: c.y, z: c.z }))
+      throw new Error(`flash cell ${c.x},${c.y},${c.z} sits inside the envelope`);
+  for (const s of shardAll)
+    if (!envelope.isOutside({ x: s.x0, y: s.y0, z: s.zStart }))
+      throw new Error(`the shard drift starts inside the envelope at ${s.x0},${s.y0},${s.zStart}`);
+
+  return {
+    fx: {
+      ids: { shatter },
+      window, flashWindow, pane: { ...PANE, z: S.z0 },
+      paneCells, flashCells, shardCells, at,
+    },
+  };
+})());

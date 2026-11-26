@@ -1,0 +1,2523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Nakatomi Plaza - dusk, one take</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0a0c12; color: #cfd3dd;
+    font: 13px/1.45 ui-monospace, Consolas, monospace; overflow: hidden; }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { width: 100%; height: 100%; display: block; }
+  .hud { position: fixed; left: 12px; right: 12px; pointer-events: none;
+    text-shadow: 0 1px 3px #000; }
+  #beat { top: 12px; font-size: 15px; letter-spacing: .04em; }
+  #meta { top: 34px; color: #8f96a6; font-size: 12px; }
+  #stat { right: auto; top: 58px; color: #6f7787; font-size: 11px; }
+  #foot { bottom: 12px; color: #8f96a6; font-size: 11px; }
+  #fade { position: fixed; inset: 0; background: #000; opacity: 0;
+    pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="beat" class="hud"></div>
+<div id="meta" class="hud"></div>
+<div id="stat" class="hud"></div>
+<div id="foot" class="hud">drag orbit - wheel zoom - 1..4 framings - space pause - R restart - click or key unlocks sound</div>
+<div id="fade"></div>
+<script type="module">
+import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.187.0/three.module.min.js";
+
+// Every fragment attaches its API here; the page's only global.
+const NAKATOMIC = { version: "0.1.0" };
+window.NAKATOMIC = NAKATOMIC;
+
+// Fragment 02: the voxel run buffer and the palette gate.
+//
+// The buffer stores horizontal runs along +X only: addStack turns a vertical
+// stack into one length-1 run per level, so the merge rule stays a single axis.
+// Spans are keyed by (palette id, z, y) and coalesced on insert, so overlapping
+// or repeated runs are never double-counted or double-drawn. Everything
+// downstream - render, AO, the splat view, the pixel gates - reads this list.
+
+Object.assign(NAKATOMIC, {
+  palette: (() => {
+    const RESERVED = 0xe000;           // 0xe001 and above: never scene-owned
+    const ALLOC_FROM = 0x0100;        // auto-allocated scene ids start here
+    const ALLOC_THROUGH = 0xd000;     // 0xd001..0xdfff is the glass block, not for auto-ids
+    const hexById = new Map();
+    const idByHex = new Map();
+
+    const norm = (hex) => {
+      if (typeof hex === "string") {
+        const h = hex.trim().toLowerCase();
+        if (!/^#[0-9a-f]{6}$/.test(h)) throw new Error(`bad palette hex: ${hex}`);
+        return h;
+      }
+      if (Number.isInteger(hex) && hex >= 0) return "#" + hex.toString(16).padStart(6, "0");
+      throw new Error(`bad palette hex: ${hex}`);
+    };
+
+    const define = (id, hex) => {
+      if (!Number.isInteger(id) || id < 0) throw new Error(`bad palette id: ${id}`);
+      if (id > RESERVED) throw new Error(`palette id 0x${id.toString(16)} is reserved`);
+      const h = norm(hex);
+      hexById.set(id, h);
+      idByHex.set(h, id);
+      return id;
+    };
+
+    // A hex's id, allocated from the scene range when it is not yet claimed.
+    const idFor = (hex) => {
+      const h = norm(hex);
+      if (idByHex.has(h)) return idByHex.get(h);
+      let id = ALLOC_FROM;
+      while (hexById.has(id)) {
+        id++;
+        if (id > ALLOC_THROUGH) throw new Error("scene palette ids exhausted");
+      }
+      return define(id, h);
+    };
+
+    // True when every id the scene geometry used stays out of the reserved
+    // range. Throws listing every offender, so a failing gate names the fix.
+    const gate = () => {
+      const offenders = new Set();
+      for (const id of NAKATOMIC.vox.ids()) if (id > RESERVED) offenders.add(`0x${id.toString(16)}`);
+      for (const id of hexById.keys()) if (id > RESERVED) offenders.add(`palette 0x${id.toString(16)}`);
+      if (offenders.size) throw new Error(`reserved palette ids: ${[...offenders].join(", ")}`);
+      return true;
+    };
+
+    return { define, id: idFor, hexOf: (id) => hexById.get(id) ?? null, gate, entries: hexById };
+  })(),
+
+  vox: (() => {
+    const spans = new Map();                       // `${id}|${z}|${y}` -> [{x,len}]
+    const key = (id, y, z) => `${id}|${z}|${y}`;
+    const spansFor = (id, y, z) => {
+      const k = key(id, y, z);
+      let list = spans.get(k);
+      if (!list) { list = []; spans.set(k, list); }
+      return list;
+    };
+
+    const addRun = (x, y, z, len, id) => {
+      if (!Number.isInteger(x) || !Number.isInteger(y) || !Number.isInteger(z))
+        throw new Error(`vox coords must be integers: ${x},${y},${z}`);
+      if (!Number.isInteger(len) || len < 1) throw new Error(`bad run length: ${len}`);
+      if (!Number.isInteger(id)) throw new Error(`bad palette id: ${id}`);
+
+      // Insert one span, then coalesce every span it touches - overlapping or
+      // merely adjacent - so one logical run stays one logical run.
+      const list = spansFor(id, y, z);
+      let start = x, end = x + len;
+      const keep = [];
+      for (const s of list) {
+        if (s.x + s.len < start || s.x > end) { keep.push(s); continue; }
+        start = Math.min(start, s.x);
+        end = Math.max(end, s.x + s.len);
+      }
+      keep.push({ x: start, len: end - start });
+      keep.sort((a, b) => a.x - b.x);
+      spans.set(key(id, y, z), keep);
+    };
+
+    const addStack = (x, y0, z, height, id) => {
+      if (!Number.isInteger(height) || height < 1) throw new Error(`bad stack height: ${height}`);
+      for (let i = 0; i < height; i++) addRun(x, y0 + i, z, 1, id);
+    };
+
+    const forEachRun = (fn) => {
+      for (const [k, list] of spans) {
+        const [id, z, y] = k.split("|").map(Number);
+        for (const s of list) fn({ x: s.x, y, z, len: s.len, id });
+      }
+    };
+    const collect = () => { const runs = []; forEachRun((r) => runs.push(r)); return runs; };
+
+    return {
+      addRun,
+      addStack,
+      // Clears every span. The unit tests take a fresh buffer this way; the
+      // render gate rebuilds the world from the same fragments.
+      reset: () => spans.clear(),
+      get count() { let n = 0; forEachRun((r) => { n += r.len; }); return n; },
+      ids: () => { const s = new Set(); for (const k of spans.keys()) s.add(Number(k.split("|")[0])); return s; },
+      bounds: () => {
+        const b = { min: { x: Infinity, y: Infinity, z: Infinity }, max: { x: -Infinity, y: -Infinity, z: -Infinity } };
+        forEachRun((r) => {
+          b.min.x = Math.min(b.min.x, r.x); b.max.x = Math.max(b.max.x, r.x + r.len - 1);
+          b.min.y = Math.min(b.min.y, r.y); b.max.y = Math.max(b.max.y, r.y);
+          b.min.z = Math.min(b.min.z, r.z); b.max.z = Math.max(b.max.z, r.z);
+        });
+        return b;
+      },
+      runs: collect,
+      // The one buffer view: what render builds from, and what tools/jsp.mjs
+      // turns into splats for the pixel gates.
+      buffer: () => ({ runs: collect(), hexOf: (id) => NAKATOMIC.palette.hexOf(id) }),
+    };
+  })(),
+});
+
+// Fragment 03: the tower core and the outside-envelope contract.
+//
+// Structure only, in storey bands: podium, the 42-story shaft, the 25-35 setback
+// band, the upper shaft, the roof deck and the mechanical penthouse. The
+// curtain-wall glass cells come in Task 4; this fragment draws the concrete and
+// the mullions and leaves the glazed bays open, so no cell is drawn twice.
+//
+// Same-palette-id runs on the same cell self-merge, so spandrels and decks can
+// overlap each other freely; different ids must never claim the same cell, which
+// is why the mullion columns below sit on offsets the concrete posts avoid.
+//
+// The envelope is the contract the camera is held to (Rulings 12/13): the podium
+// footprint plus a 2 m skirt, full height, top at the roof deck. A point inside
+// the envelope is a point the camera is not allowed to occupy.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const idC = NAKATOMIC.palette.id("#6b6f78");   // spandrel / deck concrete
+  const idM = NAKATOMIC.palette.id("#2c3038");   // curtain-wall mullion
+
+  // Dimensions from DESIGN.md 4 - inclusive cell coordinates.
+  const P = { x0: -20, x1: 20, z0: -17, z1: 17, y0: 0, y1: 3 };      // podium
+  const S = { x0: -12, x1: 12, z0: -12, z1: 12, y0: 4, y1: 27 };     // lower shaft
+  const K = { x0: -10, x1: 10, z0: -10, z1: 10, y0: 28, y1: 38 };    // setback band
+  const U = { x0: -11, x1: 11, z0: -11, z1: 11, y0: 39, y1: 45 };    // upper shaft
+  const DECK_Y = 46;
+  const PH = { x0: -9, x1: 9, z0: -9, z1: 9, y0: 47, y1: 49 };       // penthouse
+  const SKIRT = 2;                                  // R12/13: clear of the glass line
+
+  // A band filled solid along +X: one run per z row, so the merge rule holds.
+  const slabBand = (y, f, id) => {
+    for (let z = f.z0; z <= f.z1; z++) vox.addRun(f.x0, y, z, f.x1 - f.x0 + 1, id);
+  };
+
+  // The outer wall of a band: a mullion column every third cell on each face.
+  // The two-cell bays between them are glazing - Task 4 fills them, so no cell
+  // is claimed twice.
+  const wallBand = (y, f, id) => {
+    // Corner posts stand on every row, so both face grids agree on the corner
+    // cell and the glazing rule always sees a closed frame at the corners.
+    for (const [cx, cz] of [[f.x0, f.z0], [f.x0, f.z1], [f.x1, f.z0], [f.x1, f.z1]])
+      vox.addRun(cx, y, cz, 1, id);
+    for (let x = f.x0; x <= f.x1; x++)
+      if ((x - f.x0) % 3 === 0) { vox.addRun(x, y, f.z0, 1, id); vox.addRun(x, y, f.z1, 1, id); }
+    for (let z = f.z0; z <= f.z1; z++)
+      if ((z - f.z0) % 3 === 0) { vox.addRun(f.x0, y, z, 1, id); vox.addRun(f.x1, y, z, 1, id); }
+  };
+
+  const section = (f, id) => { for (let y = f.y0; y <= f.y1; y++) wallBand(y, f, id); };
+
+  // ---- the build ----
+  section(P, idC);                                 // podium mullion grid, arcade level
+  slabBand(P.y1, P, idC);                          // podium deck (plaza terrace)
+  // The arcade glazing between the podium mullions is Task 4's job, along with
+  // the shaft bays - one curtain wall, one grid, so no cell is claimed twice.
+
+  section(S, idM);                                 // shaft, storeys 1-24
+  section(K, idM);                                 // shaft, storeys 25-35 (setback)
+  section(U, idM);                                 // shaft, storeys 36-42
+
+  slabBand(DECK_Y, U, idC);                        // roof deck
+  for (let y = PH.y0; y <= PH.y1; y++) {           // mechanical penthouse
+    for (let x = PH.x0; x <= PH.x1; x++)
+      for (const z of [PH.z0, PH.z1]) vox.addRun(x, y, z, 1, idC);
+    for (let z = PH.z0 + 1; z <= PH.z1 - 1; z++)
+      for (const x of [PH.x0, PH.x1]) vox.addRun(x, y, z, 1, idC);
+  }
+  slabBand(PH.y1, PH, idC);                        // penthouse cap
+
+  const envelope = {
+    min: { x: P.x0 - SKIRT, y: P.y0, z: P.z0 - SKIRT },
+    max: { x: P.x1 + SKIRT, y: DECK_Y, z: P.z1 + SKIRT },
+  };
+
+  // The envelope follows the building, band by band: the horizontal limit is 2 m
+  // clear of the facade at that height. A single podium box would let a camera
+  // sit on the shaft, because the podium is wider than the tower it carries.
+  envelope.profile = [
+    { y0: P.y0, y1: P.y1, x0: P.x0 - SKIRT, x1: P.x1 + SKIRT, z0: P.z0 - SKIRT, z1: P.z1 + SKIRT },
+    { y0: S.y0, y1: S.y1, x0: S.x0 - SKIRT, x1: S.x1 + SKIRT, z0: S.z0 - SKIRT, z1: S.z1 + SKIRT },
+    { y0: K.y0, y1: K.y1, x0: K.x0 - SKIRT, x1: K.x1 + SKIRT, z0: K.z0 - SKIRT, z1: K.z1 + SKIRT },
+    { y0: U.y0, y1: U.y1, x0: U.x0 - SKIRT, x1: U.x1 + SKIRT, z0: U.z0 - SKIRT, z1: U.z1 + SKIRT },
+    { y0: DECK_Y, y1: DECK_Y, x0: U.x0 - SKIRT, x1: U.x1 + SKIRT, z0: U.z0 - SKIRT, z1: U.z1 + SKIRT },
+  ];
+
+  envelope.isOutside = (pt) => {
+    if (pt.y < envelope.min.y || pt.y > envelope.max.y) return true;   // R12/13: over the deck
+    const band = envelope.profile.find((b) => pt.y >= b.y0 && pt.y <= b.y1);
+    if (!band) return true;                                            // a gap is clear space
+    return pt.x < band.x0 || pt.x > band.x1 || pt.z < band.z0 || pt.z > band.z1;
+  };
+  const cx = (envelope.min.x + envelope.max.x) / 2;
+  const cy = (envelope.min.y + envelope.max.y) / 2;
+  const cz = (envelope.min.z + envelope.max.z) / 2;
+  envelope.radius = Math.hypot(envelope.max.x - cx, envelope.max.y - cy, envelope.max.z - cz);
+  envelope.centre = { x: cx, y: cy, z: cz };
+
+  return {
+    envelope,
+    tower: {
+      built: true,
+      height: DECK_Y,
+      roofDeck: DECK_Y,
+      penthouseTop: PH.y1,
+      storeys: 42,
+      footprint: { shaft: [S.x1 - S.x0 + 1, S.z1 - S.z0 + 1], podium: [P.x1 - P.x0 + 1, P.z1 - P.z0 + 1] },
+      sections: { podium: P, lower: S, setback: K, upper: U, penthouse: PH },
+    },
+  };
+})());
+
+// Fragment 04: the curtain wall - glass cells over every shaft and podium bay,
+// plus the dusk lit rule that decides which bays glow at 6 pm on Christmas Eve.
+//
+// Task 3 drew the mullion grid: a frame column every third cell of each face,
+// corners always on the frame. This fragment fills the bays between them with
+// glass, so the facade ring is fully covered and no cell is claimed twice.
+//
+// Two quantities carry the look:
+//   litFraction - the glazing coverage of the facade ring (brief: 0.55..0.75).
+//   litShare    - the share of glazed cells that glow from inside (brief's
+//                 ruling "most dark, lobby bright", so well under half).
+// The glow itself is an additive layer in the render (Task 14 samples it); the
+// buffer here carries the warm colour so the lit bays read warm in the splats.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const palette = NAKATOMIC.palette;
+
+  // Glass ids are pinned inside the 0xd001 block - never auto-allocated, so the
+  // block stays reserved for glazing and the gate never sees an id it can't name.
+  const ids = {
+    dark: palette.define(0xd001, "#2b3243"),    // dusk glass, reflecting the sky
+    lit: palette.define(0xd002, "#ffcc77"),     // warm interior glow
+    shatter: palette.define(0xd003, "#e8f4ff"), // the blast panes (Task 10)
+  };
+  const glassIds = Object.values(ids);
+
+  const S = NAKATOMIC.tower.sections;
+  const bands = [S.podium, S.lower, S.setback, S.upper];
+
+  // The facade ring of a band, cell by cell, corners once. The podium's top row
+  // is a deck slab, not a bay.
+  const ring = (f) => {
+    const y1 = f === S.podium ? f.y1 - 1 : f.y1;
+    const out = [];
+    for (let y = f.y0; y <= y1; y++) {
+      for (let x = f.x0; x <= f.x1; x++) out.push({ x, y, z: f.z0, f, face: "z" });
+      for (let x = f.x0; x <= f.x1; x++) out.push({ x, y, z: f.z1, f, face: "z" });
+      for (let z = f.z0 + 1; z <= f.z1 - 1; z++) {
+        out.push({ x: f.x0, y, z, f, face: "x" });
+        out.push({ x: f.x1, y, z, f, face: "x" });
+      }
+    }
+    return out;
+  };
+
+  // A bay is glazed when it sits between mullions. Corner cells are always frame,
+  // which keeps the two face rules agreeing on the corner cell.
+  const isFrame = (c) => {
+    const f = c.f;
+    if (c.x === f.x0 || c.x === f.x1) {
+      if (c.z === f.z0 || c.z === f.z1) return true;
+      return (c.z - f.z0) % 3 === 0;
+    }
+    return (c.x - f.x0) % 3 === 0;
+  };
+
+  // The dusk rule. The arcade and the atrium glow warm; the tower above is dark
+  // at dusk except the odd office left on after work. The podium's own ring is
+  // capped one row under its deck slab (see `ring`), so every podium cell this
+  // facade draws is arcade level - the first line below is the podium's rule.
+  const ATRIUM_Y = 9;
+  const isLit = (c) => {
+    const f = c.f;
+    if (c.y <= S.podium.y1 - 1) return true;                                   // lobby, arcade
+    if (f === S.lower && c.z === S.lower.z0 && c.y <= ATRIUM_Y) return true;   // atrium face
+    if (c.y < 13) return false;                                                // dark band above the atrium
+    return (c.x - f.x0 + (c.z - f.z0) + c.y) % 8 === 0;                        // a few offices on
+  };
+
+  const cells = [];
+  for (const f of bands)
+    for (const c of ring(f)) {
+      if (isFrame(c)) continue;
+      const lit = isLit(c);
+      const id = lit ? ids.lit : ids.dark;
+      // Thin run: one cell deep, so the glass sits on the facade plane the
+      // mullions define instead of burying itself in the floor plate.
+      vox.addRun(c.x, c.y, c.z, 1, id);
+      cells.push({ x: c.x, y: c.y, z: c.z, id, lit });
+    }
+
+  // Facade ring cells, band by band: both face planes full width, minus the
+  // corners the second plane would otherwise count twice.
+  const facadeCells = bands.reduce((n, f) => {
+    const y1 = f === S.podium ? f.y1 - 1 : f.y1;
+    const rows = y1 - f.y0 + 1;
+    const ringPerRow = 2 * (f.x1 - f.x0 + 1) + 2 * (f.z1 - f.z0 + 1) - 4;
+    return n + rows * ringPerRow;
+  }, 0);
+
+  const litCount = cells.reduce((n, c) => n + (c.lit ? 1 : 0), 0);
+
+  return {
+    glass: {
+      cells,
+      ids,
+      glassIds,
+      facadeCells,
+      litFraction: cells.length / facadeCells,   // glazing coverage of the facade
+      litShare: litCount / cells.length,         // the dusk rule, as a share of glaze
+      litCount,
+      lit: (id) => id === ids.lit || id === ids.shatter,
+    },
+  };
+})());
+
+// Fragment 05: the ground contract - the sunken garage lot, the sunken driveway
+// with its bridge, the entry plaza with a reflecting pool, a palm grove, and the
+// distant skyline as full-width splices.
+//
+// The numbers are the contract, not an outcome: countVox is locked at 9406 and
+// skylineCount at 2860 (30.4 % of the batch), the two numbers v1 verified. The
+// skyline band is 110 columns wide, so its volume is width x the sum of the three
+// wall heights (6 + 12 + 8 = 26 bands = 2860) and the rest of the ground carries
+// the remaining 6546, which resolves as:
+//
+//   paving (deck band, holes cut)  4885
+//   lot floor 341 + 5 retaining rings 400
+//   driveway floor 135 + 2 rings 184 + bridge deck 135
+//   pool (basin band + water band)   66
+//   boulevard kerbs, with a crossing 244
+//   12 palms (4 trunk + 3x3 canopy) 156
+//
+// A rectangle's retaining ring is 2(w + d) - 4 cells, so the lot's 31 x 11 ring is
+// 80 cells and five bands of it is 400 - that is how the lot width was chosen.
+//
+// Vertical: the paving deck is the band at y = -1, its top face is street level,
+// so anything that stands on the ground starts at y = 0 (streetY) - the same band
+// the tower's first podium row occupies. The garage lot floor is y = -6 and the
+// sunken driveway floor is y = -3.
+//
+// Volumes are counted in voxels, the unit the rest of the contract uses: 1 unit
+// horizontally = 1 m, 1 band vertically = one storey.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const palette = NAKATOMIC.palette;
+
+  const idStone = palette.id("#7d7f86");     // plaza paving, wet stone at dusk
+  const idCurb = palette.id("#5a5d64");      // boulevard kerb stones
+  const idGarage = palette.id("#4e5259");    // garage lot shell
+  const idDitch = palette.id("#454a52");     // sunken driveway shell
+  const idBridge = palette.id("#6b6f78");    // bridge deck; the tower's concrete id,
+                                             // and it only ever claims its own cells
+  const idWater = palette.id("#243a4d");     // reflecting pool: basin and water
+  const idTrunk = palette.id("#4a3b2e");     // palm trunks
+  const idFrond = palette.id("#20361f");     // palm canopies
+  const idSky = palette.id("#1c2230");       // skyline mass
+  const idSkyWin = palette.id("#8a6a4a");    // skyline window bands, the lit far city
+
+  const DECK = -1;                           // paving band; top face = street level
+  const STREET = 0;                          // streetY: what stands on the ground
+  const LOT = -6;                            // garage lot floor band
+  const DITCH = -3;                          // sunken driveway floor band
+
+  // --- the plan ---
+  const BLOCK = { x0: -43, x1: 43, z0: -31, z1: 30 };            // the block: plaza + boulevard
+  const LOT_RECT = { x0: -15, x1: 15, z0: -31, z1: -21 };        // sunken lot, 31 x 11
+  const DITCH_RECT = { x0: -22, x1: 22, z0: -20, z1: -18 };      // sunken driveway, 45 x 3
+  const POOL = { x0: -5, x1: 5, z0: 25, z1: 27 };                // reflecting pool, 11 x 3
+  const KERB_X = [-35, 34];                                      // boulevard kerb strips, 2 wide
+  const KERB_GAP = -1;                                           // pedestrian crossing
+  const PALMS = [[-36, -25], [-30, -25], [-24, -25], [24, -25], [30, -25], [36, -25],
+                 [-36, 25], [-30, 25], [-24, 25], [24, 25], [30, 25], [36, 25]];
+  const SKY = { x0: -55, x1: 54 };                               // 110 columns
+  const SKY_WALLS = [{ z: 44, h: 6 }, { z: 56, h: 12 }, { z: 70, h: 8 }];
+  const SKY_IDS = [idSkyWin, idSkyWin, ...Array(4).fill(idSky)]; // window bands, then mass
+  const SKY_ID_SET = new Set(SKY_IDS);
+
+  // --- the batch, with its own occupancy map so a cell can not be claimed twice ---
+  const runs = [];
+  const cells = new Map();
+  const claim = (x, y, z, id) => {
+    const key = `${x}|${y}|${z}`;
+    const seen = cells.get(key);
+    if (seen !== undefined) {
+      if (seen !== id) throw new Error(`ground cell ${key} claimed by two palette ids`);
+      return;
+    }
+    cells.set(key, id);
+  };
+  const put = (x, y, z, len, id) => {
+    if (len <= 0) return;
+    vox.addRun(x, y, z, len, id);
+    runs.push({ x, y, z, len, id });
+    for (let i = 0; i < len; i++) claim(x + i, y, z, id);
+  };
+  const fill = (x0, x1, y, z0, z1, id) => {
+    for (let z = z0; z <= z1; z++) put(x0, y, z, x1 - x0 + 1, id);
+  };
+  const stack = (x, y0, z, height, id) => {
+    for (let i = 0; i < height; i++) put(x, y0 + i, z, 1, id);
+  };
+  const ring = (r, y, id) => {
+    for (let x = r.x0; x <= r.x1; x++) { put(x, y, r.z0, 1, id); put(x, y, r.z1, 1, id); }
+    for (let z = r.z0 + 1; z <= r.z1 - 1; z++) { put(r.x0, y, z, 1, id); put(r.x1, y, z, 1, id); }
+  };
+
+  const emit = () => {
+    // ---- the plaza deck, cut open where the lot, the driveway and the pool go down
+    const holes = [LOT_RECT, DITCH_RECT, POOL];
+    for (let z = BLOCK.z0; z <= BLOCK.z1; z++) {
+      let x = BLOCK.x0;
+      for (const h of holes.filter((q) => z >= q.z0 && z <= q.z1).sort((a, b) => a.x0 - b.x0)) {
+        if (h.x0 > x) put(x, DECK, z, h.x0 - x, idStone);
+        x = Math.max(x, h.x1 + 1);
+      }
+      if (x <= BLOCK.x1) put(x, DECK, z, BLOCK.x1 - x + 1, idStone);
+    }
+
+    // ---- the sunken garage lot: floor, shell walls, open to the sky above
+    fill(LOT_RECT.x0, LOT_RECT.x1, LOT, LOT_RECT.z0, LOT_RECT.z1, idGarage);
+    for (let y = LOT + 1; y <= DECK; y++) ring(LOT_RECT, y, idGarage);
+
+    // ---- the sunken driveway and the bridge that carries the boulevard across it
+    fill(DITCH_RECT.x0, DITCH_RECT.x1, DITCH, DITCH_RECT.z0, DITCH_RECT.z1, idDitch);
+    for (let y = DITCH + 1; y <= DECK; y++) ring(DITCH_RECT, y, idDitch);
+    fill(DITCH_RECT.x0, DITCH_RECT.x1, STREET, DITCH_RECT.z0, DITCH_RECT.z1, idBridge);
+
+    // ---- the reflecting pool: basin floor, then water flush with the paving
+    fill(POOL.x0, POOL.x1, DECK, POOL.z0, POOL.z1, idWater);
+    fill(POOL.x0, POOL.x1, STREET, POOL.z0, POOL.z1, idWater);
+
+    // ---- boulevard kerbs, with a crossing at the block's centre line
+    for (const cx of KERB_X)
+      for (let z = BLOCK.z0; z <= BLOCK.z1; z++) {
+        if (z === KERB_GAP) continue;
+        put(cx, STREET, z, 2, idCurb);
+      }
+
+    // ---- palm grove along the boulevard: 4-band trunks, 3 x 3 canopy
+    for (const [px, pz] of PALMS) {
+      stack(px, STREET, pz, 4, idTrunk);
+      fill(px - 1, px + 1, STREET + 4, pz - 1, pz + 1, idFrond);
+    }
+
+    // ---- the distant skyline: stacked full-width splices, no gap column
+    for (const w of SKY_WALLS)
+      for (let i = 0; i < w.h; i++) {
+        const band = SKY_IDS[Math.min(i, SKY_IDS.length - 1)];
+        put(SKY.x0, STREET - 1 + i, w.z, SKY.x1 - SKY.x0 + 1, band);
+      }
+
+    // ---- the numbers. The occupancy map is the truth: it holds every cell the
+    // batch claims, counted once, which is what a merged run buffer can lose.
+    const skyIdSet = SKY_ID_SET;
+    let skylineCount = 0;
+    for (const [, id] of cells) if (skyIdSet.has(id)) skylineCount++;
+    const area = (r) => (r.x1 - r.x0 + 1) * (r.z1 - r.z0 + 1);
+    const b = {
+      min: { x: Infinity, y: Infinity, z: Infinity },
+      max: { x: -Infinity, y: -Infinity, z: -Infinity },
+    };
+    for (const r of runs) {
+      b.min.x = Math.min(b.min.x, r.x);
+      b.max.x = Math.max(b.max.x, r.x + r.len - 1);
+      b.min.y = Math.min(b.min.y, r.y);
+      b.max.y = Math.max(b.max.y, r.y);
+      b.min.z = Math.min(b.min.z, r.z);
+      b.max.z = Math.max(b.max.z, r.z);
+    }
+
+    return {
+      voxels: runs.slice(),
+      batchVox: runs.length,
+      countVox: cells.size,
+      bounds: b,
+      // the sunken space each feature holds, in voxel bands, not the masonry
+      garageVolume: area(LOT_RECT) * (DECK - LOT + 1),
+      ditchVolume: area(DITCH_RECT) * (DECK - DITCH + 1),
+      plazaVolume: area(BLOCK) - area(LOT_RECT) - area(DITCH_RECT) - area(POOL),
+      waterVolume: area(POOL),
+      palmCount: PALMS.length,
+      skylineCount,
+      streetY: STREET,
+    };
+  };
+
+  // The batch is emitted once: the render loop reads the shared buffer, so a
+  // rebuild would push the same cells through addRun again and grow the batch's
+  // own `runs` list while the coalesced buffer stayed put - a split second world.
+  let cached = null;
+  const ground = () => { if (cached === null) cached = emit(); return cached; };
+
+  return {
+    ground,
+    isOnGround: (x, z) => x >= BLOCK.x0 && x <= BLOCK.x1 && z >= BLOCK.z0 && z <= BLOCK.z1,
+    skyline: { x0: SKY.x0, x1: SKY.x1, walls: SKY_WALLS, ids: [...SKY_ID_SET] },
+    _plan: { BLOCK, LOT_RECT, DITCH_RECT, POOL, PALMS, KERB_X, DECK, STREET, LOT, DITCH },
+  };
+})());
+
+// Fragment 06: the show clock. One beat table, one continuous take.
+//
+// The constants are the v1 hand-off numbers, pinned by tests: the 24 durations sum
+// to BEAT_END = 715, blast starts at 360, storm runs 390..485 at dur 95 (it absorbs
+// the slack), HOLD 20, SHOW_LEN 735, FADE_LEN 6, FADE_START 729.
+//
+// The wrap is a one-clamp grace: the frame clock may not advance by more than
+// dtClamp per tick, and the loop cut only happens once t passes
+// wrapAt = SHOW_LEN + dtClamp. That gives the fade an observable full-black frame
+// before the cut instead of the cut swallowing it, and it means a page that sat in a
+// background tab can not skip through the show on the first frame back.
+
+Object.assign(NAKATOMIC, (() => {
+  // Appendix A, in scene order. Deltas are Jon-reviewable; the durations are the
+  // contract, not a starting point to drift from.
+  const BEATS = [
+    { id: "open", label: "Dusk over the boulevard - establishing", dur: 34 },
+    { id: "taxiConvoy", label: "Taxi convoy onto the lot", dur: 38 },
+    { id: "horseCar", label: "Horse car and motorcycle escort", dur: 33 },
+    { id: "limoNakatomi", label: "Nakatomi Plaza signage, glass lobby", dur: 38 },
+    { id: "treeTruck", label: "Christmas tree truck, light trucks", dur: 36 },
+    { id: "archWalk", label: "Walkway, palms, marquee", dur: 35 },
+    { id: "treeSet", label: "Tree set down beneath the glass", dur: 34 },
+    { id: "skateHolly", label: "Holly on skates to the doors", dur: 32 },
+    { id: "gunRun", label: "Gun run staged on the roof", dur: 38 },
+    { id: "tileHelo", label: "Tile helo - the whomp", dur: 42 },
+    { id: "blast", label: "Blast - first facade break (starts at 360)", dur: 30 },
+    { id: "storm", label: "Storm over the skyline (dur 95)", dur: 95 },
+    { id: "fedConvoy", label: "Fed convoys up the boulevard", dur: 42 },
+    { id: "wallOfCars", label: "Wall of police cars on the lot", dur: 36 },
+    { id: "lobbyLights", label: "Lobby lights hold under dusk", dur: 34 },
+    { id: "carDepart", label: "Cars off the lot at dusk pull-back", dur: 22 },
+    { id: "treeGlow", label: "Tree glow, canopy shimmer", dur: 18 },
+    { id: "fountainSettle", label: "Fountain settles, water still", dur: 15 },
+    { id: "plazaWide", label: "Plaza wide, empty walkway", dur: 13 },
+    { id: "skyPush1", label: "Skyline push-in 1", dur: 11 },
+    { id: "skyPush2", label: "Skyline push-in 2", dur: 10 },
+    { id: "towerPull", label: "Tower pull-back to boulevard", dur: 9 },
+    { id: "rooftopGlow", label: "Rooftop glow, penthouse lights", dur: 8 },
+    { id: "drestle", label: "Final settling frame before the hold", dur: 12 },
+  ];
+
+  const BEAT_END = 715;      // the beat timeline's length
+  const HOLD = 20;           // R14: still frame at the end
+  const SHOW_LEN = BEAT_END + HOLD;   // 735
+  const FADE_LEN = 6;
+  const FADE_START = SHOW_LEN - FADE_LEN;   // 729
+  const dtClamp = 0.25;      // one frame of grace: the most a tick may advance
+  const wrapAt = SHOW_LEN + dtClamp;        // the loop cut
+  const HOLD_LABEL = "Hold - still frame";  // what the HUD shows in the hold
+
+  const order = BEATS.map((b) => b.id);
+  const byId = new Map();
+  let acc = 0;
+  for (const b of BEATS) {
+    if (byId.has(b.id)) throw new Error(`duplicate beat id ${b.id}`);
+    byId.set(b.id, { id: b.id, label: b.label, dur: b.dur, start: acc, end: acc + b.dur });
+    acc += b.dur;
+  }
+  if (acc !== BEAT_END) throw new Error(`beat durations sum to ${acc}, not ${BEAT_END}`);
+
+  const fade = { black: 0, begun: false };
+  let t = 0;
+
+  const beatAt = (time) => {
+    if (!(time >= 0) || time >= BEAT_END) return null;   // null through the hold
+    for (const b of byId.values()) if (time >= b.start && time < b.end) return b;
+    return null;                                          // unreachable, but honest
+  };
+
+  const clock = {
+    BEATS, order,
+    len: BEAT_END, BEAT_END, HOLD, SHOW_LEN, FADE_LEN, FADE_START, dtClamp, wrapAt,
+    HOLD_LABEL, fade,
+    get t() { return t; },
+    start: (id) => { const b = byId.get(id); if (!b) throw new Error(`unknown beat ${id}`); return b.start; },
+    dur: (id) => { const b = byId.get(id); if (!b) throw new Error(`unknown beat ${id}`); return b.dur; },
+    beatAt,
+    seekTo(id) { t = clock.start(id); fade.black = 0; fade.begun = false; return t; },
+    restart() { t = 0; fade.black = 0; fade.begun = false; },
+    // The render loop calls this with its own dt; everything it needs for the frame
+    // comes back in one object, so the loop never has to guess about state.
+    tick(dt) {
+      const step = Math.min(Math.max(Number(dt) || 0, 0), dtClamp);
+      let wrapped = false;
+      t += step;
+      if (t > wrapAt) { t = 0; wrapped = true; }          // grace: one clamped frame, once
+      fade.begun = t >= FADE_START;
+      fade.black = Math.min(1, Math.max(0, (t - FADE_START + dtClamp) / FADE_LEN));
+      return { t, beat: beatAt(t), black: fade.black, wrapped };
+    },
+  };
+
+  return { clock };
+})());
+
+// Fragment 07: the lobby, the fountain and the Christmas tree.
+//
+// All three sit behind the curtain wall, in the podium's arcade band - the band
+// the camera only ever sees through glass (R12/R13 keep the lens outside the
+// envelope). So the shape of this batch is decided by two rules:
+//
+//   1. Nothing here may claim a cell the tower or the curtain wall already owns.
+//      The podium's top row (y = P.y1) is a concrete deck slab, and the podium's
+//      face rings (x = +-20, z = +-17) are mullions and bays, so everything below
+//      stays in the interior rectangle and below the deck.
+//   2. The fountain's water is the ground's water. The ground batch already
+//      carved the reflecting pool (POOL, basin band + water band) and counts it
+//      as waterVolume; this fragment reports that volume and puts the fountain's
+//      rim, stem and spray above the water line instead, never re-claiming it.
+//
+// What the camera reads: warm glass at the arcade (Task 4's dusk rule), and
+// behind it a lit interior - the lobby's own walls and downlights - so the glow
+// has depth instead of being one bright sheet on the glass plane. The tree is
+// dark green with one bright star on top, which is how a Christmas tree reads at
+// dusk: silhouette first, then the star.
+//
+// The batch reports per-part counts, and its own occupancy map is what makes
+// `countVox` the sum of the parts: a cell claimed by two materials throws.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const palette = NAKATOMIC.palette;
+  const plan = NAKATOMIC._plan;
+  const P = NAKATOMIC.tower.sections.podium;
+  const POOL = plan.POOL;
+  const STREET = plan.STREET;
+  const idGlow = NAKATOMIC.glass.ids.lit;   // the lobby glows with the glass's own warm
+
+  // --- materials, all auto-allocated from the scene range ---
+  const ids = {
+    floor: palette.id("#3a332c"),   // lobby floor, dark marble under the glow
+    wall: palette.id("#6a5c4c"),    // lobby interior wall, warm stone
+    bough: palette.id("#1c3a24"),   // the tree
+    light: palette.id("#fff2c0"),   // downlights, and the star on the tree
+    rim: palette.id("#8a8d94"),     // fountain coping and stem
+    spray: palette.id("#7fb2d8"),   // the jet, above the water line
+  };
+
+  // --- where things stand, as one fact per feature ---
+  const IL = { x0: P.x0 + 1, x1: P.x1 - 1, z0: P.z0 + 1, z1: P.z1 - 1 };  // interior, clear of the face rings
+  const TC = { x: 8, z: 14 };          // the tree, in front of the lobby's front glass
+  const TREE_FOOT = 2;                 // 5 x 5 at the base, 3 x 3 one band up
+  const GLOW_BANDS = [STREET + 1, STREET + 2];   // the arcade is three bands tall: floor, wall, wall
+  const LIGHT_ROW = [-15, -5, 5, 15];
+  const LIGHT_COL = [-10, 0, 10];
+
+  // --- the batch, with its own occupancy map: a cell may only have one material ---
+  const insidePodium = (x, z) => x >= IL.x0 && x <= IL.x1 && z >= IL.z0 && z <= IL.z1;
+  const cells = new Map();
+  const runs = [];
+  const parts = { floor: [], wall: [], bough: [], light: [], star: [], rim: [], spray: [] };
+  const claim = (x, y, z, id, part) => {
+    const key = `${x}|${y}|${z}`;
+    const seen = cells.get(key);
+    if (seen !== undefined) {
+      if (seen !== id) throw new Error(`lobby cell ${key} claimed by two palette ids`);
+      return;
+    }
+    if (insidePodium(x, z) && y >= P.y1) throw new Error(`lobby cell ${key} reaches the podium deck at y = ${P.y1}`);
+    cells.set(key, id);
+    parts[part].push({ x, y, z, id });
+  };
+  const put = (x, y, z, len, id, part) => {
+    if (len <= 0) return;
+    for (let i = 0; i < len; i++) claim(x + i, y, z, id, part);
+    vox.addRun(x, y, z, len, id);
+    runs.push({ x, y, z, len, id, part });
+  };
+  const one = (x, y, z, id, part) => put(x, y, z, 1, id, part);
+  const rect = (x0, x1, y, z0, z1, id, part) => {
+    for (let z = z0; z <= z1; z++) put(x0, y, z, x1 - x0 + 1, id, part);
+  };
+  // The edge of a rectangle, as one run per row. The lobby's lit wall sits on the
+  // interior rectangle's edge - one cell behind the curtain wall - and the
+  // fountain's coping sits on the pool's edge, above the water line.
+  const ring = (r, y, id, part) => {
+    put(r.x0, y, r.z0, r.x1 - r.x0 + 1, id, part);
+    put(r.x0, y, r.z1, r.x1 - r.x0 + 1, id, part);
+    for (let z = r.z0 + 1; z <= r.z1 - 1; z++) {
+      put(r.x0, y, z, 1, id, part);
+      put(r.x1, y, z, 1, id, part);
+    }
+  };
+
+  const emit = () => {
+    // ---- the lobby floor, cut around the tree's foot ----
+    const hole = { x0: TC.x - TREE_FOOT, x1: TC.x + TREE_FOOT, z0: TC.z - TREE_FOOT, z1: TC.z + TREE_FOOT };
+    for (let z = IL.z0; z <= IL.z1; z++) {
+      let x = IL.x0;
+      if (z >= hole.z0 && z <= hole.z1) {
+        if (hole.x0 > x) put(x, STREET, z, hole.x0 - x, ids.floor, "floor");
+        x = Math.max(x, hole.x1 + 1);
+      }
+      if (x <= IL.x1) put(x, STREET, z, IL.x1 - x + 1, ids.floor, "floor");
+    }
+
+    // ---- the tree: silhouette bands, then the star ----
+    for (let y = STREET; y <= STREET + 1; y++) {
+      const h = TREE_FOOT - (y - STREET);
+      rect(TC.x - h, TC.x + h, y, TC.z - h, TC.z + h, ids.bough, "bough");
+    }
+    one(TC.x, STREET + 2, TC.z, ids.light, "star");
+
+    // ---- the lobby's lit walls, one cell behind the glass line ----
+    for (const y of GLOW_BANDS) ring(IL, y, idGlow, "wall");
+
+    // ---- the lobby's downlights, at the ceiling band ----
+    for (const lx of LIGHT_ROW)
+      for (const lz of LIGHT_COL) one(lx, STREET + 2, lz, ids.light, "light");
+
+    // ---- the fountain, above the water the ground already carved ----
+    ring(POOL, STREET + 1, ids.rim, "rim");
+    const cx = (POOL.x0 + POOL.x1) >> 1, cz = (POOL.z0 + POOL.z1) >> 1;
+    one(cx, STREET + 1, cz, ids.rim, "rim");                                  // stem
+    for (let x = cx - 1; x <= cx + 1; x++)
+      for (let z = cz - 1; z <= cz + 1; z++)
+        if (x !== cx || z !== cz) one(x, STREET + 2, z, ids.rim, "rim");       // upper basin
+    for (let y = STREET + 2; y <= STREET + 3; y++) one(cx, y, cz, ids.spray, "spray");
+
+    // ---- the numbers, and the cross-contract checks ------------------------
+    // The curtain wall owns the facade ring; a lobby cell may never sit on it.
+    const glassPlane = new Set(NAKATOMIC.glass.cells.map((c) => `${c.x}|${c.y}|${c.z}`));
+    for (const key of cells.keys())
+      if (glassPlane.has(key)) throw new Error(`lobby cell ${key} sits on the glass line`);
+
+    const footprint = [];
+    for (let x = POOL.x0; x <= POOL.x1; x++)
+      for (let z = POOL.z0; z <= POOL.z1; z++) footprint.push(`${x},${z}`);
+
+    return {
+      voxels: runs.slice(),
+      batchVox: runs.length,
+      countVox: cells.size,
+      ids,
+      floorCount: parts.floor.length,
+      glowCount: parts.wall.length,
+      treeCount: parts.bough.length,
+      lightsCount: parts.light.length,
+      starCount: parts.star.length,
+      fountainCount: parts.rim.length + parts.spray.length,
+      treeCells: parts.bough.slice(),
+      treeMinY: STREET,
+      treeTopY: STREET + 1,
+      starCell: parts.star[0],
+      glowCells: parts.wall.slice(),
+      fountainCells: parts.rim.concat(parts.spray),
+      // the pool is the ground's, so its water is reported, not re-claimed
+      waterCells: footprint.length,
+      waterBand: STREET,
+      waterFootprint: footprint,
+    };
+  };
+
+  // One batch, once: like the ground, a rebuild would push the same cells through
+  // addRun again while the coalesced buffer stayed put.
+  let cached = null;
+  const lobbyWorld = () => { if (cached === null) cached = emit(); return cached; };
+
+  return {
+    lobbyWorld,
+    lobby: { interior: IL, tree: TC, pool: POOL, glowBands: [...GLOW_BANDS] },
+  };
+})());
+
+// Fragment 08: the plaza dressings - the two taxis, the town car, the tree
+// truck, and the marquee over the entrance drive.
+//
+// These are the mirror image of the lobby batch: the lobby lives inside the
+// envelope and the camera reads it through glass, while everything here lives
+// outside it, on the street, because these are objects the camera may sit next
+// to. So the batch is built from the camera's own contract outward: every cell
+// must satisfy envelope.isOutside, must stand on the block (isOnGround), and may
+// never re-claim a cell the ground or the curtain wall already owns.
+//
+// The arrival court is the band in front of the podium's south face: z 20..24,
+// clear of the 2 m envelope skirt (which maxes at z = 19), clear of the
+// reflecting pool (z 25..27), clear of the boulevard kerbs (x -35/-34 and
+// 34/35) and clear of the palm grove (x 24/30/36 at z +-25). That is why the
+// lane sits there and not closer to the glass: a vehicle parked inside the
+// skirt would be a cell the show's camera rules forbid the lens to reach.
+//
+// One band = one storey (~3.7 m), so a car body is one band and its cabin rides
+// above it; the lamps sit on the free band above the body corners, and the
+// marquee beam at band 3 clears the cabins and the truck's tree crate.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const palette = NAKATOMIC.palette;
+  const plan = NAKATOMIC._plan;
+  const STREET = plan.STREET;
+  const idGlow = NAKATOMIC.glass.ids.lit;   // lamps and banner glow with the building's own warm
+
+  // --- materials ---
+  const ids = {
+    car: palette.id("#2f333c"),    // the town car, black at dusk
+    taxi: palette.id("#b38f2a"),   // cab yellow, muted by the dusk
+    truck: palette.id("#5a5f6a"),  // the tree truck's cab
+    crate: palette.id("#23402a"),  // the tree it still carries, on the flatbed
+    steel: palette.id("#3a3e48"),  // marquee posts and beam
+  };
+
+  // --- where things stand, as one fact per feature ---
+  const LANE = { x0: -20, x1: 20, z0: 20, z1: 24 };              // the arrival court
+  const BODY = { z0: 21, z1: 22 };                               // vehicles park two cells deep
+  const MARQUEE_Z = 24;                                          // posts on the pool-side kerb line
+  const POSTS = [-12, 12];
+  const BEAM_Y = 3, BANNER_Y = 2;
+
+  // --- the batch, with its own occupancy map: a cell may only have one material ---
+  const cells = new Map();
+  const runs = [];
+  const parts = { vehicle: [], light: [], marquee: [] };
+  const claim = (x, y, z, id, part) => {
+    const key = `${x}|${y}|${z}`;
+    const seen = cells.get(key);
+    if (seen !== undefined) {
+      if (seen !== id) throw new Error(`dressing cell ${key} claimed by two palette ids`);
+      return;
+    }
+    if (z < LANE.z0 || z > LANE.z1 || x < LANE.x0 || x > LANE.x1)
+      throw new Error(`dressing cell ${key} is off the arrival court`);
+    if (y < STREET) throw new Error(`dressing cell ${key} is below the street band`);
+    cells.set(key, id);
+    parts[part].push({ x, y, z, id });
+  };
+  const put = (x, y, z, len, id, part) => {
+    if (len <= 0) return;
+    for (let i = 0; i < len; i++) claim(x + i, y, z, id, part);
+    vox.addRun(x, y, z, len, id);
+    runs.push({ x, y, z, len, id, part });
+  };
+  const one = (x, y, z, id, part) => put(x, y, z, 1, id, part);
+  const slab = (x0, x1, y, z0, z1, id, part) => {
+    for (let z = z0; z <= z1; z++) put(x0, y, z, x1 - x0 + 1, id, part);
+  };
+
+  // a vehicle: body band, cabin on the free band above the middle, two lamps on
+  // the band above the body's front corners
+  const vehicle = (x0, x1, cabin0, cabin1, idBody, idCabin) => {
+    slab(x0, x1, STREET, BODY.z0, BODY.z1, idBody, "vehicle");
+    if (cabin1 >= cabin0) slab(cabin0, cabin1, STREET + 1, BODY.z0, BODY.z1, idCabin, "vehicle");
+    one(x1, STREET + 1, BODY.z0, idGlow, "light");
+    one(x1, STREET + 1, BODY.z1, idGlow, "light");
+  };
+
+  const emit = () => {
+    // ---- the motorcade: two cabs, the town car, then the tree truck ----
+    vehicle(-18, -15, -17, -16, ids.taxi, ids.taxi);
+    vehicle(-10, -7, -9, -8, ids.taxi, ids.taxi);
+    vehicle(0, 6, 2, 4, ids.car, ids.car);
+    // the truck: flatbed, cab at its head, the crate it still carries two bands tall
+    slab(11, 18, STREET, BODY.z0, BODY.z1, ids.truck, "vehicle");
+    slab(11, 12, STREET + 1, BODY.z0, BODY.z1, ids.truck, "vehicle");
+    slab(14, 17, STREET + 1, BODY.z0, BODY.z1, ids.crate, "vehicle");
+    slab(14, 17, STREET + 2, BODY.z0, BODY.z1, ids.crate, "vehicle");
+    one(18, STREET + 1, BODY.z0, idGlow, "light");
+    one(18, STREET + 1, BODY.z1, idGlow, "light");
+
+    // ---- the marquee: posts on the ground, banner between them, beam above ----
+    for (const px of POSTS)
+      for (let y = STREET; y < BANNER_Y + 1; y++) one(px, y, MARQUEE_Z, ids.steel, "marquee");
+    for (let x = POSTS[0] + 3; x <= POSTS[1] - 3; x++) one(x, BANNER_Y, MARQUEE_Z, idGlow, "light");
+    for (let x = POSTS[0]; x <= POSTS[1]; x++) one(x, BEAM_Y, MARQUEE_Z, ids.steel, "marquee");
+
+    // ---- the numbers ---
+    let vehicleMinY = Infinity;
+    for (const c of parts.vehicle) vehicleMinY = Math.min(vehicleMinY, c.y);
+
+    return {
+      voxels: runs.slice(),
+      batchVox: runs.length,
+      countVox: cells.size,
+      ids,
+      lane: { ...LANE },
+      vehicleCells: parts.vehicle.slice(),
+      marqueeCells: parts.marquee.slice(),
+      lightCells: parts.light.slice(),
+      vehicleCount: parts.vehicle.length,
+      marqueeCount: parts.marquee.length,
+      lightCount: parts.light.length,
+      vehicleMinY,
+      marqueeZ: MARQUEE_Z,
+      beamY: BEAM_Y,
+    };
+  };
+
+  // One batch, once: like the ground and the lobby, a rebuild would push the
+  // same cells through addRun again while the coalesced buffer stayed put.
+  let cached = null;
+  const plazaDressing = () => { if (cached === null) cached = emit(); return cached; };
+
+  return {
+    plazaDressing,
+    dressing: { lane: { ...LANE }, bodyDepth: BODY, marqueeZ: MARQUEE_Z, posts: [...POSTS] },
+  };
+})());
+
+// Fragment 09: the roof - the gun run, the pulled-glass stacks, and the tile
+// helicopter that pulled them.
+//
+// Above the roof deck is the one region the camera rules always allow: R12/13
+// call anything over the deck outside by definition, so this batch builds with
+// the envelope as its floor, not its wall. Every cell here lives at band
+// roofDeck + 1 or higher; the claim guard rejects anything lower, which makes
+// collisions with the tower, the glass line and the penthouse physically
+// impossible rather than something a test has to remember.
+//
+// The stacks ARE the glass the helo pulled from the facade - the tile-helo of
+// the film hoisting panels off the curtain wall - so they wear the shatter id
+// Appendix A pins (0xd003), the same id Task 10's blast burst uses. The gun run
+// is the brass the roof fight left behind, stacked along the penthouse edge.
+//
+// The helo hovers on the courtyard side (z 20..21) with its winch line down to
+// a panel at deck height: that is the beat where the roof gets stripped, read
+// as one object - body, rotor disc, tail, line, cargo - not as a screenshot.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const palette = NAKATOMIC.palette;
+  const tower = NAKATOMIC.tower;
+  const U = tower.sections.upper;
+  const PH = tower.sections.penthouse;
+  const DECK = tower.roofDeck;                  // 46: the envelope's top
+  const GLASS = NAKATOMIC.glass.ids;
+  const idGlow = GLASS.lit;
+
+  // --- materials ---
+  const ids = {
+    brass: palette.id("#6e5c2e"),   // the gun run
+    hull: palette.id("#46503e"),    // the helo, muted green
+    metal: palette.id("#59606a"),   // rotor disc, winch line
+  };
+  const shatter = GLASS.shatter;    // pinned, not allocated - it is Appendix A's shard id
+
+  // --- where things stand ---
+  const STACKS = [[-11, -11], [-11, 10], [10, -11], [10, 10]];   // 2 x 2 corners of the deck, clear of the penthouse
+  const RUN_Y = DECK + 1;
+  const HELO = { x0: -4, x1: 3, z0: 20, z1: 21, y0: DECK + 4, y1: DECK + 5 };
+  const DISC = { y: DECK + 6, x0: -10, x1: 7 };
+  const WINCH = { x: 2, z: 20 };
+
+  // --- the batch, one material per cell, and nothing below the roof line ---
+  const cells = new Map();
+  const runs = [];
+  const parts = { stack: [], run: [], helo: [], light: [] };
+  const inPH = (x, z, y) => x >= PH.x0 && x <= PH.x1 && z >= PH.z0 && z <= PH.z1 && y >= PH.y0 && y <= PH.y1;
+  const claim = (x, y, z, id, part) => {
+    const key = `${x}|${y}|${z}`;
+    if (y <= DECK) throw new Error(`roof cell ${key} is at or below the deck band`);
+    if (inPH(x, z, y)) throw new Error(`roof cell ${key} is inside the penthouse`);
+    const seen = cells.get(key);
+    if (seen !== undefined) {
+      if (seen !== id) throw new Error(`roof cell ${key} claimed by two palette ids`);
+      return;
+    }
+    cells.set(key, id);
+    parts[part].push({ x, y, z, id });
+  };
+  const put = (x, y, z, len, id, part) => {
+    if (len <= 0) return;
+    for (let i = 0; i < len; i++) claim(x + i, y, z, id, part);
+    vox.addRun(x, y, z, len, id);
+    runs.push({ x, y, z, len, id, part });
+  };
+  const one = (x, y, z, id, part) => put(x, y, z, 1, id, part);
+
+  const emit = () => {
+    // ---- the pulled-glass stacks: two tiers each, at the deck's four corners ----
+    for (const [sx, sz] of STACKS) {
+      for (const dx of [0, 1]) for (const dz of [0, 1]) one(sx + dx, RUN_Y, sz + dz, shatter, "stack");
+      for (const dx of [0, 1]) one(sx + dx, RUN_Y + 1, sz, shatter, "stack");
+    }
+
+    // ---- the gun run: brass stacked along both penthouse edges, on the deck band ----
+    put(-8, RUN_Y, PH.z0 - 1, 17, ids.brass, "run");
+    put(-8, RUN_Y, PH.z1 + 1, 17, ids.brass, "run");
+
+    // ---- the tile helo, hovering over the courtyard it worked from ----
+    for (let y = HELO.y0; y <= HELO.y1; y++)
+      for (let z = HELO.z0; z <= HELO.z1; z++)
+        put(HELO.x0, y, z, HELO.x1 - HELO.x0 + 1, ids.hull, "helo");
+    for (let z = HELO.z0; z <= HELO.z1; z++)                           // tail boom
+      put(-8, HELO.y0, z, 4, ids.hull, "helo");
+    for (let z = HELO.z0; z <= HELO.z1; z++)                           // rotor disc, one flat run each
+      put(DISC.x0, DISC.y, z, DISC.x1 - DISC.x0 + 1, ids.metal, "helo");
+    for (let y = RUN_Y + 1; y <= HELO.y0 - 1; y++)                     // winch line to the panel
+      one(WINCH.x, y, WINCH.z, ids.metal, "helo");
+    one(WINCH.x, RUN_Y, WINCH.z, shatter, "helo");                     // the panel it is hauling
+    one(HELO.x0 + 3, HELO.y0 - 1, HELO.z0, idGlow, "light");           // lights under the hull
+    one(HELO.x0 + 4, HELO.y0 - 1, HELO.z1, idGlow, "light");
+
+    // ---- the numbers ---
+    let stackMinY = Infinity, heloMinY = Infinity, heloTopY = -Infinity;
+    for (const c of parts.stack) stackMinY = Math.min(stackMinY, c.y);
+    for (const c of parts.helo) { heloMinY = Math.min(heloMinY, c.y); heloTopY = Math.max(heloTopY, c.y); }
+
+    return {
+      voxels: runs.slice(),
+      batchVox: runs.length,
+      countVox: cells.size,
+      ids,
+      stackCells: parts.stack.slice(),
+      runCells: parts.run.slice(),
+      heloCells: parts.helo.slice(),
+      lightCells: parts.light.slice(),
+      stackCount: parts.stack.length,
+      runCount: parts.run.length,
+      heloCount: parts.helo.length,
+      lightCount: parts.light.length,
+      stackMinY,
+      heloMinY,
+      heloTopY,
+      hover: { ...HELO },
+    };
+  };
+
+  // One batch, once: like the ground and the other scene batches, a rebuild
+  // would push the same cells through addRun again while the buffer stayed put.
+  let cached = null;
+  const roofWorld = () => { if (cached === null) cached = emit(); return cached; };
+
+  return {
+    roofWorld,
+    roofline: { stacks: STACKS.map((s) => [...s]), helo: { ...HELO }, disc: { ...DISC }, winch: { ...WINCH } },
+  };
+})());
+
+// Fragment 10: the blast and the storm - the facade break, the flash, and the
+// shards that fall and drift away from the atrium face.
+//
+// This is the one batch that is NOT a batch. The ground, the dressing, the
+// roof: those are piles of voxels the world carries. The fx is a function of
+// the clock: `paneCells(t)`, `flashCells(t)`, `shardCells(t)` answer "what is
+// visible at this instant", and outside their window they answer "nothing".
+// Two consequences make the restore-on-wrap work:
+//
+//   1. The fx never writes the shared voxel buffer. The curtain wall, the
+//      tower and the plaza are one build, once; an overlay that draws over
+//      them cannot mutate them, and every base cell keeps the colour it had
+//      before the window opened.
+//   2. The windows are not hand-picked numbers: they come from the clock.
+//      R15 makes the shatter live inside the storm window, so the fragment
+//      reads `clock.start("storm")` and `clock.dur("storm")` rather than
+//      baking 390 and 95, and the flash opens on the blast beat for the same
+//      reason. A change to Appendix A changes the fx with it.
+//
+// Geometry: the first facade break is on the atrium face, the lit run of the
+// lower shaft facing the north side of the block (the boulevard the wide
+// shots come in on). The flash stands in the two-cell shell AROUND the
+// envelope skirt, so the camera can always sit clear of the fireball; the
+// shards clear the same shell before they start falling, which is why the
+// drift reads as an outward push past z = -14 and never inside it.
+
+Object.assign(NAKATOMIC, (() => {
+  const clock = NAKATOMIC.clock;
+  const glass = NAKATOMIC.glass;
+  const envelope = NAKATOMIC.envelope;
+  const S = NAKATOMIC.tower.sections.lower;
+  const shatter = glass.ids.shatter;
+
+  // --- the windows, read from the clock, never hand-kept ---------------------
+  const window = [clock.start("storm"), clock.start("storm") + clock.dur("storm")];
+  const flashWindow = [clock.start("blast"), clock.start("blast") + clock.dur("blast")];
+
+  // --- the broken panes: a rectangle of the atrium face, drawn from the real
+  // glass line so a pane can only be a cell the curtain wall actually glazed --
+  const PANE = { x0: -6, x1: 6, y0: 5, y1: 8 };
+  const glassSet = new Map(glass.cells.map((c) => [`${c.x},${c.y},${c.z}`, c]));
+  const paneAll = [];
+  for (let y = PANE.y0; y <= PANE.y1; y++)
+    for (let x = PANE.x0; x <= PANE.x1; x++) {
+      const base = glassSet.get(`${x},${y},${S.z0}`);
+      if (!base) continue;                       // a mullion cell, not a pane
+      paneAll.push({ x, y, z: S.z0, id: shatter, zShift: -0.6, part: "pane" });
+    }
+  if (paneAll.length === 0) throw new Error("the pane rectangle has no glass cells on the atrium face");
+
+  // --- the flash: one band outside the skirt, on the blast beat -------------
+  const flashBand = S.z0 - 3;                    // z = -15, clear of the -14 skirt line
+  const flashAll = [];
+  for (let x = -6; x <= 6; x++)
+    for (let y = 5; y <= 8; y++) flashAll.push({ x, y, z: flashBand, id: shatter, part: "flash" });
+
+  // --- the shards: one per pane, and each one's own deterministic arc ------
+  // A shard leaves the pane line only once it has cleared the envelope shell:
+  // it enters at z = -16 (already clear of the shaft skirt), drifts out along
+  // -z, and falls to the podium terrace - it never dips into the podium bands,
+  // where the shell stands two cells further out than the shaft's. The terrace
+  // is where the sheet of glass actually lands in the shot, and y = 4 keeps
+  // every shard outside the shell at every height it occupies.
+  const SPAN = window[1] - window[0];
+  const uOf = (t) => (t - window[0]) / SPAN;
+  const shardAll = paneAll.map((c, i) => ({
+    x0: c.x,
+    y0: c.y,
+    zStart: flashBand - 1,                       // the first visible cell of the drift
+    reach: 3 + (i % 5),                          // the shard's own outward push, cells
+    sway: ((i % 3) - 1) * 0.18,                  // and a side-to-side, the same three ways
+    fall: Math.max(1, c.y - 4),                  // to the terrace line, and no lower
+  }));
+
+  // A pure function of t: the same instant always draws the same burst, and
+  // nothing at all outside the window. No buffer writes, no palette edits.
+  const inWindow = (t, w) => t >= w[0] && t < w[1];
+
+  const paneCells = (t) => (inWindow(t, window) ? paneAll.slice() : []);
+  const flashCells = (t) => (inWindow(t, flashWindow) ? flashAll.slice() : []);
+  const shardCells = (t) => {
+    if (!inWindow(t, window)) return [];
+    const u = uOf(t);
+    return shardAll.map((s, i) => ({
+      x: s.x0 + Math.round(u * s.reach * s.sway * 4),
+      y: Math.max(4, s.y0 - Math.round(u * s.fall)),
+      z: s.zStart - Math.round(u * s.reach),
+      id: shatter, part: "shard",
+    }));
+  };
+
+  // The overlay layer, once per instant: everything the fx can draw, in one
+  // list, ready for the render rig to push into its own Points pass.
+  const at = (t) => paneCells(t).concat(flashCells(t), shardCells(t));
+
+  // Build-time cross-checks: the fx must never be able to put a cell inside
+  // the camera shell, and it must never draw anything on the street band.
+  for (const c of flashAll)
+    if (!envelope.isOutside({ x: c.x, y: c.y, z: c.z }))
+      throw new Error(`flash cell ${c.x},${c.y},${c.z} sits inside the envelope`);
+  for (const s of shardAll)
+    if (!envelope.isOutside({ x: s.x0, y: s.y0, z: s.zStart }))
+      throw new Error(`the shard drift starts inside the envelope at ${s.x0},${s.y0},${s.zStart}`);
+
+  return {
+    fx: {
+      ids: { shatter },
+      window, flashWindow, pane: { ...PANE, z: S.z0 },
+      paneCells, flashCells, shardCells, at,
+    },
+  };
+})());
+
+// Fragment 11: the police convoy and the Feds - the response that makes the wall
+// of cars, and the route that brings it in.
+//
+// Task 8 dressed the plaza with the vehicles already parked there: the taxis, the
+// town car, the tree truck. This fragment adds the ones that arrive, and the road
+// they came in on. It is a batch like the dressing batch - every cell outside the
+// envelope, on the block, never re-claiming a cell the ground or the curtain wall
+// owns - plus one thing Task 8 did not need: a route. Task 12's camera pulls back
+// along that route for the convoy beats, so the path has to be a fact the tests
+// can check, not a shape the artist drew once.
+//
+// The route comes up the west side of the block on the boulevard, crosses the
+// bridge over the sunken driveway, dips down the apron into the cut where the lead
+// car ends up, and loops back out and around to the forecourt, where the wall of
+// cruisers is staged. It stays west of the tower's podium skirt (the envelope's
+// lower band maxes at x -22, and the lane is at x -23) and it never runs between
+// the boulevard kerb strips: the kerbs stand at x -35/-34 and 34/35, so the whole
+// block between them is one wide avenue, and the avenue's west lane is where a
+// convoy would actually drive.
+//
+// Vertical: one band is one storey, so a vehicle body is one band and its cabin
+// rides above it. The wall of cruisers stands at street level; the lead car sits
+// in the sunken driveway, at y -2 with its cabin at -1, floor at -3, under the
+// bridge deck the boulevard crosses on. Nothing here can go down into the sunken
+// garage lot - its floor is y -6 and a cruiser does not fit down there.
+//
+// Ruling R19 (this fragment, 2026-11-25): the convoy is a *static* batch. The show
+// is a single continuous outside take, and the beats are camera-side (Task 12), so
+// the response is parked in its wall for the whole show - it does not animate in on
+// the fedConvoy beat. What the beat window carries is the camera's interest, not
+// new geometry; the window is here so Task 13's HUD labels and Task 12's pull-back
+// key can read the same beat the batch was staged for.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const palette = NAKATOMIC.palette;
+  const plan = NAKATOMIC._plan;
+  const clock = NAKATOMIC.clock;
+  const envelope = NAKATOMIC.envelope;
+  const STREET = plan.STREET;
+  const CUT = plan.DITCH;                       // sunken driveway floor band
+
+  // --- materials -------------------------------------------------------------
+  // The responders wear their own entries: the wall of cars is what the beat reads
+  // as, so the two-tone paint and the lightbars have to be separate ids, not one
+  // dark lump. The Feds are a second black - their cars are not police cars.
+  const ids = {
+    cruiser: palette.id("#191c23"),             // the black half of the two-tone
+    cruiserBand: palette.id("#c4c9d4"),         // the white roof and doors
+    fed: palette.id("#20242d"),                 // black SUV, one shade off the cruisers
+    fedGlass: palette.id("#39424f"),            // their glass, always a shade lighter
+    lightRed: palette.id("#e0453c"),            // responder light, one end of the bar
+    lightBlue: palette.id("#3d76e0"),           // the other end
+    marker: palette.id("#d8b23c"),              // the driveway lead car's amber marker
+  };
+
+  // --- where things stand, as one fact per feature ----------------------------
+  // The wall of cruisers: two rows across the forecourt, the front row in the lane
+  // immediately outside the podium skirt (z 20 vs the skirt's z 19), the back row
+  // behind the parked dressing vehicles (z 23 vs their bodies at z 21..22). Both
+  // rows are clear of the marquee (z 24) and of the reflecting pool (z 25..27).
+  const STAGE = { x0: -21, x1: 21, z0: 20, z1: 23 };
+  const FRONT_ROW = { z0: 20, z1: 20, xs: [-21, -14, -7, 0, 7, 14] };
+  const BACK_ROW = { z0: 23, z1: 23, xs: [-17, -4, 9] };
+  const LEAD = { x0: -6, x1: -3, z: -19 };      // the car that took the driveway down
+  const FEDS = [[25, 28], [30, 33], [36, 39]];  // the SUVs along the east kerb line
+  const FEDS_Z = { z0: -16, z1: -15 };
+  const BODY = { y: STREET };                   // every body band is street level
+  const LIGHT_Y = STREET + 2;                   // lightbar band, above the cabin
+  const BAR_KINDS = ["red", "blue", "red", "blue", "red", "blue"];
+
+  // --- the route, as waypoint voxels -----------------------------------------
+  // Task 12's camera pulls back along these waypoints, and the last one is where
+  // the lead car stops. The waypoints are integer cells, and routeAt floors the
+  // coordinate it interpolates: floor is the cell a float point sits in, and it is
+  // what keeps a descending waypoint from landing a sample at street level inside
+  // the skirt.
+  const ROUTE = [
+    { x: -23, y: STREET, z: plan.BLOCK.z0 },   // boulevard, at the block's south edge
+    { x: -23, y: STREET, z: -21 },             // north up the avenue, past the sunken lot
+    { x: -23, y: STREET, z: -20 },             // the corner where the avenue meets the bridge
+    { x: -21, y: STREET, z: -20 },             // east onto the bridge deck, over the cut
+    { x: -14, y: STREET, z: -20 },             // the crossing, still on street level
+    { x: -14, y: -1, z: -20 },                 // down the apron, one band under the deck
+    { x: -14, y: -1, z: -19 },                 // in at the driveway's free row
+    { x: -10, y: -2, z: -19 },                 // the floor, at the lead car's spot
+    { x: -2, y: -2, z: -19 },                  // on through the cut, under the bridge
+    { x: 1, y: -2, z: -19 },                   // along the floor to the far apron
+    { x: 1, y: -1, z: -19 },                   // up one band, still inside the cut
+    { x: -2, y: STREET, z: -20 },              // back out at street level, on the deck
+    { x: -16, y: STREET, z: -20 },             // west along the deck back to the avenue
+    { x: -23, y: STREET, z: -20 },             // out at the avenue's west lane
+    { x: -23, y: STREET, z: 24 },              // north up the plaza, west of the skirt
+    { x: -21, y: STREET, z: 24 },              // in at the forecourt's assembly lane
+    { x: -16, y: STREET, z: 24 },              // stopping short of the cruiser wall
+  ];
+
+  // --- the batch: its own occupancy map, so a cell can not be claimed twice ----
+  const cells = new Map();
+  const runs = [];
+  const parts = { cruiser: [], fed: [], driveway: [] };
+  const claim = (x, y, z, id, part) => {
+    const key = `${x}|${y}|${z}`;
+    const seen = cells.get(key);
+    if (seen !== undefined) {
+      if (seen !== id) throw new Error(`convoy cell ${key} claimed by two palette ids`);
+      return;                                   // same paint twice is the same cell
+    }
+    if (envelope.isOutside({ x, y, z }) !== true)
+      throw new Error(`convoy cell ${key} is inside the envelope (R12/R13)`);
+    if (x < plan.BLOCK.x0 || x > plan.BLOCK.x1 || z < plan.BLOCK.z0 || z > plan.BLOCK.z1)
+      throw new Error(`convoy cell ${key} is off the block`);
+    if (y < CUT + 1) throw new Error(`convoy cell ${key} is under the driveway floor`);
+    const inCut = x >= plan.DITCH_RECT.x0 && x <= plan.DITCH_RECT.x1 &&
+      z >= plan.DITCH_RECT.z0 && z <= plan.DITCH_RECT.z1;
+    if (y < STREET && !inCut)
+      throw new Error(`convoy cell ${key} is below the paving outside the driveway`);
+    cells.set(key, id);
+    parts[part].push({ x, y, z, id });
+  };
+  const put = (x, y, z, len, id, part) => {
+    if (len <= 0) return;
+    for (let i = 0; i < len; i++) claim(x + i, y, z, id, part);
+    vox.addRun(x, y, z, len, id);
+    runs.push({ x, y, z, len, id, part });
+  };
+  const one = (x, y, z, id, part) => put(x, y, z, 1, id, part);
+
+  // A vehicle along the +x axis: body band, two-tone band above it, and a lightbar
+  // on the free band over the cabin. `dir` points the front end down -x or up +x, so
+  // the lightbar sits at the front end and the bar's two colours face out along z.
+  const vehicle = (x0, x1, z0, z1, bodyId, bandId, barId, withBar) => {
+    for (let z = z0; z <= z1; z++) {
+      put(x0, BODY.y, z, x1 - x0 + 1, bodyId, "cruiser");
+      put(x0, BODY.y + 1, z, x1 - x0 + 1, bandId, "cruiser");
+    }
+    if (!withBar) return;
+    // Two bar cells over the cabin roof: red at the front, blue at the rear. They
+    // sit on the free band above the cabin, so the pair reads as a lightbar and the
+    // cell below stays body paint.
+    for (const z of [z0, z1]) {
+      one(x0 + 1, LIGHT_Y, z, barId, "cruiser");
+      one(x1 - 1, LIGHT_Y, z, barId, "cruiser");
+    }
+  };
+
+  const emit = () => {
+    // ---- the wall of cruisers: front row across the forecourt, back row packed
+    // behind it, every one of them two-tone with a bar on the cabin roof.
+    let bar = 0;
+    for (const xs of [FRONT_ROW, BACK_ROW])
+      for (const x of xs.xs) {
+        vehicle(x, x + 3, xs.z0, xs.z1, ids.cruiser, ids.cruiserBand,
+          BAR_KINDS[bar % BAR_KINDS.length] === "red" ? ids.lightRed : ids.lightBlue, true);
+        bar++;
+      }
+
+    // ---- the Feds: three black SUVs along the east kerb line, glass a shade up
+    for (const [x0, x1] of FEDS) {
+      for (let z = FEDS_Z.z0; z <= FEDS_Z.z1; z++) {
+        put(x0, BODY.y, z, x1 - x0 + 1, ids.fed, "fed");
+        put(x0, BODY.y + 1, z, x1 - x0 + 1, ids.fedGlass, "fed");
+      }
+    }
+
+    // ---- the lead car, in the sunken driveway under the bridge: body on the floor
+    // band, cabin below the bridge deck, one amber marker on the kerb side.
+    for (let z = LEAD.z; z <= LEAD.z; z++) {
+      put(LEAD.x0, -2, z, LEAD.x1 - LEAD.x0 + 1, ids.cruiser, "driveway");
+      put(LEAD.x0, -1, z, LEAD.x1 - LEAD.x0 + 1, ids.cruiserBand, "driveway");
+    }
+    one(LEAD.x0 - 1, -2, LEAD.z, ids.marker, "driveway");
+
+    // ---- the numbers: occupancy is the truth, exactly once ---------------------
+    const carCount = FRONT_ROW.xs.length + BACK_ROW.xs.length + FEDS.length + 1;
+    const lightCells = parts.cruiser.filter((c) => c.id === ids.lightRed || c.id === ids.lightBlue);
+    const lightRed = parts.cruiser.filter((c) => c.id === ids.lightRed);
+    const lightBlue = parts.cruiser.filter((c) => c.id === ids.lightBlue);
+
+    return {
+      voxels: runs.slice(),
+      batchVox: runs.length,
+      countVox: cells.size,
+      ids,
+      stage: { ...STAGE },
+      frontRow: FRONT_ROW.xs.slice(),
+      backRow: BACK_ROW.xs.slice(),
+      cruiserCells: parts.cruiser.slice(),
+      fedCells: parts.fed.slice(),
+      drivewayCells: parts.driveway.slice(),
+      lightCells,
+      lightBarCount: lightCells.length,
+      lightRedCount: lightRed.length,
+      lightBlueCount: lightBlue.length,
+      cruiserCount: FRONT_ROW.xs.length + BACK_ROW.xs.length,
+      fedCount: FEDS.length,
+      drivewayCount: 1,
+      carCount,
+      bodyY: BODY.y,
+      lightY: LIGHT_Y,
+    };
+  };
+
+  // One batch, once: like the ground, the lobby and the dressing, a rebuild would
+  // push the same cells back through addRun while the coalesced buffer stayed put.
+  let cached = null;
+  const convoyWorld = () => { if (cached === null) cached = emit(); return cached; };
+
+  // The route, read as arc-length position: routeAt(0) is the boulevard at the
+  // block's south edge, routeAt(1) the forecourt stop, and every intermediate
+  // sample lands in a cell the camera rules allow.
+  const floor1 = (v) => Math.floor(v);
+  const legLen = (a, b) => Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+  const legLengths = ROUTE.slice(1).map((b, i) => legLen(ROUTE[i], b));
+  const routeLen = legLengths.reduce((s, v) => s + v, 0);
+  const routeAt = (f) => {
+    const u = Math.min(Math.max(f, 0), 1) * routeLen;
+    let acc = 0;
+    for (let i = 0; i < legLengths.length; i++) {
+      const l = legLengths[i];
+      const t = l === 0 ? 0 : Math.min(Math.max((u - acc) / l, 0), 1);
+      acc += l;
+      if (u <= acc || i === legLengths.length - 1) {
+        const a = ROUTE[i], b = ROUTE[i + 1];
+        return {
+          x: floor1(a.x + (b.x - a.x) * t),
+          y: floor1(a.y + (b.y - a.y) * t),
+          z: floor1(a.z + (b.z - a.z) * t),
+        };
+      }
+    }
+    return { ...ROUTE[ROUTE.length - 1] };
+  };
+
+  return {
+    convoy: {
+      window: [clock.start("fedConvoy"), clock.start("wallOfCars") + clock.dur("wallOfCars")],
+      route: ROUTE.map((p) => ({ ...p })),
+      routeAt,
+      routeLength: routeLen,
+      stage: { ...STAGE },
+    },
+    convoyWorld,
+  };
+})());
+
+// Fragment 12: the camera rig - one continuous take that stays outside the tower.
+//
+// R12/R13 say the lens never enters the building's shell, and the take never
+// cuts. So the rig is one keyframe track over the 715 s of beats, and each beat
+// is a window onto it. `keys(id)` is the slice a beat owns; `sample(id, t)`
+// interpolates the master track at that instant. One track means a beat boundary
+// cannot teleport: a beat's last key IS the next beat's first key, and the build
+// check below enforces it, so a cut is a build failure rather than a bad frame.
+//
+// Keyframes are written as a fraction of the beat they belong to (0 = the beat's
+// first frame, 1 = its last), so every time comes out of the clock. A beat's
+// lens starts at the pose the previous beat arrived at, holds there through the
+// beat's opening, then dollies to its own pose. That is the shape of a real
+// one-take choreography: the move happens inside the beat, the boundary is a
+// hold.
+//
+// Every key is a witness point: a place the lens can sit and see the beat's
+// action without being inside it. The envelope test is the constraint, and keys
+// are authored in cell coordinates so the test reads as a fact - the lens's own
+// cell, put through `envelope.isOutside`. The glass-line key on the treeSet beat
+// is the interesting case: 3.5 cells out from the curtain wall face, in the free
+// air beside the shaft (cell x 15, against the shaft's wall plane at x 12 and
+// its clear shell at x 14). A lens that close to glass is the whole point of the
+// shot, so it gets its own check rather than a comment.
+//
+// The targets are not checked. A lens looks *at* the tower - a target inside the
+// shell is what a witness shot looks like, and R12 is about where the lens
+// stands, not where it points.
+//
+// fov is clamped to 35..60 at build time, so the shot changes are dollies and
+// head moves, not zooms: a long lens can't clip the depth gate and a wide one
+// can't fisheye the plaza.
+
+Object.assign(NAKATOMIC, (() => {
+  const clock = NAKATOMIC.clock;
+  const envelope = NAKATOMIC.envelope;
+  const convoy = NAKATOMIC.convoy;
+  const S = NAKATOMIC.tower.sections;
+
+  const FOV_MIN = 35;
+  const FOV_MAX = 60;
+  // The lens may sit outside the block - the boulevard and the skyline are where
+  // the wide shots live - but it stays inside the model's own world.
+  const WORLD = { x0: -60, x1: 60, z0: -70, z1: 70, y0: 1, y1: 80 };
+
+  const keys = [];
+  const push = (t, pos, target, fov) => {
+    const f = Math.min(Math.max(fov, FOV_MIN), FOV_MAX);
+    if (keys.length && t <= keys[keys.length - 1].t)
+      throw new Error(`key at t=${t} is not later than t=${keys[keys.length - 1].t}`);
+    keys.push({ t, pos, target, fov: f });
+  };
+
+  // One beat's keyframes: [frac, pos, target, fov], with frac a share of the
+  // beat. The clock owns the times, so Appendix A can change and the take moves
+  // with it.
+  const beat = (id, list) => {
+    const t0 = clock.start(id);
+    const dur = clock.dur(id);
+    const at = (f) => {
+      const t = t0 + f * dur;
+      if (t > t0 + dur + 1e-9) throw new Error(`key past the end of ${id}`);
+      return t;
+    };
+    for (const [f, pos, target, fov] of list) push(at(f), pos, target, fov);
+  };
+
+  // ---- the take, beat by beat ----------------------------------------------
+  // 1 establishing: far and high over the boulevard, the tower whole in frame.
+  beat("open", [
+    [0, [30, 40, 60], [0, 28, 0], 44],
+    [0.35, [34, 38, 55], [0, 27, -2], 43],
+    [0.85, [40, 33, 46], [0, 26, -4], 42],
+  ]);
+  // 2 the taxi convoy onto the sunken lot, seen from the boulevard end of the cut.
+  beat("taxiConvoy", [
+    [0, [40, 33, 46], [0, 26, -4], 42],
+    [0.5, [24, 24, -10], [-2, 10, -22], 46],
+    [0.85, [8, 16, -48], [0, 2, -26], 50],
+  ]);
+  // 3 the escort drives the avenue's west lane, one block out.
+  beat("horseCar", [
+    [0, [8, 16, -48], [0, 2, -26], 50],
+    [0.6, [-44, 10, -22], [-23, 3, -14], 44],
+    [0.85, [-40, 9, -8], [-23, 4, -4], 44],
+  ]);
+  // 4 the forecourt: signage over the drive, the glass lobby behind it.
+  beat("limoNakatomi", [
+    [0, [-40, 9, -8], [-23, 4, -4], 44],
+    [0.5, [-16, 7, 22], [-4, 9, 17], 50],
+    [0.85, [0, 5, 33], [2, 8, 17], 52],
+  ]);
+  // 5 the tree truck and the light trucks crossing the plaza.
+  beat("treeTruck", [
+    [0, [0, 5, 33], [2, 8, 17], 52],
+    [0.6, [-8, 6, 31], [-4, 7, 19], 54],
+    [0.85, [-14, 7, 28], [-8, 8, 19], 54],
+  ]);
+  // 6 the walkway, the palm line and the marquee, low and moving.
+  beat("archWalk", [
+    [0, [-14, 7, 28], [-8, 8, 19], 54],
+    [0.5, [-22, 6, 26], [-16, 6, 19], 56],
+    [0.85, [-28, 8, 24], [-24, 7, 18], 56],
+  ]);
+  // 7 the tree set down inside the glass. The glass-line key is the exit pose:
+  // 3.5 cells out from the shaft's curtain wall, lens in cell x 15.
+  beat("treeSet", [
+    [0, [-28, 8, 24], [-24, 7, 18], 56],
+    [0.45, [-6, 6, 24], [0, 6, 14], 56],
+    // The approach to the glass line is an L, not a diagonal: the lens runs
+    // east of the shaft first (still cell x 15+, outside the shell), then
+    // south along the face. A straight diagonal from the plaza centre would
+    // cut the shaft's corner cell, and the sampled take would be inside.
+    [0.65, [16.5, 5.5, 20], [4, 5, 12], 56],
+    [0.85, [15.5, 5, 12.5], [2, 5, 4], 58],
+  ]);
+  // 8 holly on skates to the doors, low on the atrium side.
+  beat("skateHolly", [
+    [0, [15.5, 5, 12.5], [2, 5, 4], 58],
+    [0.5, [16, 5, -18], [4, 4, -12], 58],
+    [0.85, [8, 5, -22], [0, 4, -12], 56],
+  ]);
+  // 9 the gun run staged on the deck: the lens climbs the tower's corner.
+  beat("gunRun", [
+    [0, [8, 5, -22], [0, 4, -12], 56],
+    [0.5, [26, 26, -30], [0, 30, -8], 48],
+    [0.85, [24, 52, -20], [0, 46, -4], 46],
+  ]);
+  // 10 the tile helo and its winch, over the deck on the courtyard side.
+  beat("tileHelo", [
+    [0, [24, 52, -20], [0, 46, -4], 46],
+    [0.5, [20, 54, 24], [0, 47, 10], 44],
+    [0.85, [18, 52, 30], [0, 47, 14], 42],
+  ]);
+  // 11 the blast: a dolly in on the atrium face, the break filling the frame.
+  beat("blast", [
+    [0, [18, 52, 30], [0, 47, 14], 42],
+    // The descent from the deck to the north face cannot drop straight down:
+    // a diagonal through the core would put the sampled lens inside the upper
+    // shaft. This leg falls down the tower's north-east corner, clear of the
+    // shell, then runs north onto the north-face dolly.
+    [0.12, [16, 47, -15], [2, 44, -8], 42],
+    [0.45, [2, 12, -34], [0, 7, -13], 40],
+    [0.85, [-4, 8, -24], [0, 6, -12], 36],
+  ]);
+  // 12 the storm: out and up with the skyline behind the tower, 95 s of it.
+  beat("storm", [
+    [0, [-4, 8, -24], [0, 6, -12], 36],
+    [0.3, [-16, 24, -46], [0, 14, -10], 44],
+    [0.6, [-34, 32, -58], [0, 20, -6], 50],
+    [0.85, [-44, 36, -64], [0, 22, -4], 52],
+  ]);
+  // 13 the feds come up the boulevard: the lens pulls back along the lane the
+  // route drives (Task 11's waypoints, one block west of the podium skirt).
+  beat("fedConvoy", [
+    [0, [-44, 36, -64], [0, 22, -4], 52],
+    [0.45, [-32, 14, -26], [-23, 4, -14], 48],
+    [0.85, [-31, 9, 2], [-23, 4, 12], 48],
+  ]);
+  // 14 the wall of cruisers: two rows across the forecourt, counted off.
+  beat("wallOfCars", [
+    [0, [-31, 9, 2], [-23, 4, 12], 48],
+    [0.5, [-28, 8, 34], [-14, 4, 21], 50],
+    [0.85, [-14, 7, 36], [-4, 4, 21], 52],
+  ]);
+  // 15 the lobby lights holding under the dusk, back at the atrium glass.
+  beat("lobbyLights", [
+    [0, [-14, 7, 36], [-4, 4, 21], 52],
+    [0.5, [-18, 6, -30], [-2, 6, -12], 54],
+    [0.85, [-6, 5, -26], [0, 5, -12], 54],
+  ]);
+  // 16 the cars leave the lot, and the lens pulls back with them.
+  beat("carDepart", [
+    [0, [-6, 5, -26], [0, 5, -12], 54],
+    [0.5, [-20, 18, -42], [-6, 6, -22], 50],
+    [0.85, [-30, 26, -52], [-8, 8, -24], 48],
+  ]);
+  // 17 the tree glowing through the canopy, close on the atrium face.
+  beat("treeGlow", [
+    [0, [-30, 26, -52], [-8, 8, -24], 48],
+    [0.6, [2, 7, -26], [0, 6, -12], 44],
+    [0.85, [12, 6, -19], [0, 6, -12], 40],
+  ]);
+  // 18 the fountain, its water level and still.
+  beat("fountainSettle", [
+    [0, [12, 6, -19], [0, 6, -12], 40],
+    [0.5, [-4, 5, -21], [-4, 3, -8], 46],
+    [0.85, [-10, 5, -23], [-6, 3, -6], 46],
+  ]);
+  // 19 the plaza wide, the walkway empty.
+  beat("plazaWide", [
+    [0, [-10, 5, -23], [-6, 3, -6], 46],
+    // Step one cell block west of the shell first, then the long run south
+    // stays west of the shaft the whole way: the direct diagonal from the
+    // north face clips the shaft's west corner at cell -14.
+    [0.15, [-15, 6, -24], [-8, 5, -10], 48],
+    [0.6, [-24, 12, 26], [-6, 8, 16], 50],
+    [0.85, [-28, 16, 38], [-4, 12, 18], 52],
+  ]);
+  // 20 sky push 1: the lens lifts into the skyline.
+  beat("skyPush1", [
+    [0, [-28, 16, 38], [-4, 12, 18], 52],
+    [0.6, [-14, 34, 50], [-2, 34, 24], 42],
+    [0.85, [-8, 40, 56], [0, 40, 26], 40],
+  ]);
+  // 21 sky push 2: higher still, the skyline walls behind the tower.
+  beat("skyPush2", [
+    [0, [-8, 40, 56], [0, 40, 26], 40],
+    [0.6, [-2, 46, 52], [0, 44, 22], 38],
+    [0.85, [2, 50, 48], [0, 46, 18], 38],
+  ]);
+  // 22 the pull-back to the boulevard, the tower's whole height in frame.
+  beat("towerPull", [
+    [0, [2, 50, 48], [0, 46, 18], 38],
+    [0.5, [-12, 46, 52], [0, 40, 8], 42],
+    [0.85, [-20, 42, 56], [0, 34, 0], 44],
+  ]);
+  // 23 the rooftop glow and the penthouse lights, above the deck line.
+  beat("rooftopGlow", [
+    [0, [-20, 42, 56], [0, 34, 0], 44],
+    [0.5, [-16, 56, 34], [0, 48, 4], 46],
+    [0.85, [-12, 58, 28], [0, 48, 2], 46],
+  ]);
+  // 24 the settling frame, back at the opening pose: the take's two ends meet, so
+  // the wrap does not jump. The last key is the first key, pose for pose.
+  beat("drestle", [
+    [0, [-12, 58, 28], [0, 48, 2], 46],
+    [0.5, [8, 46, 46], [0, 36, 4], 45],
+    [0.85, [30, 40, 60], [0, 28, 0], 44],
+  ]);
+
+  // --- the witness invariant, as a build-time gate ---------------------------
+  // The lens cell of every key has to pass the envelope test, and the lens has
+  // to stay inside the model's world. A key that fails is a rig bug, not a
+  // clamp: fragment 99's own clamp would hide it, and a hidden clamp is a shot
+  // nobody meant to shoot.
+  for (const k of keys) {
+    const cell = {
+      x: Math.floor(k.pos[0] + 1e-9), y: Math.floor(k.pos[1] + 1e-9), z: Math.floor(k.pos[2] + 1e-9),
+    };
+    if (envelope.isOutside(cell) !== true)
+      throw new Error(`rig key at t=${k.t} sits inside the envelope at ${cell.x},${cell.y},${cell.z}`);
+    if (cell.x < WORLD.x0 || cell.x > WORLD.x1 || cell.z < WORLD.z0 || cell.z > WORLD.z1 ||
+      cell.y < WORLD.y0 || cell.y > WORLD.y1)
+      throw new Error(`rig key at t=${k.t} is outside the model world at ${cell.x},${cell.y},${cell.z}`);
+  }
+
+  // No cuts: the pose a beat exits on is the pose the next beat enters on, in the
+  // same place, and the two times sit either side of the boundary. That is what
+  // makes this one take and not a stack of shots.
+  const keysOf = (id) => {
+    const t0 = clock.start(id);
+    return keys.filter((k) => k.t >= t0 - 1e-9 && k.t <= t0 + clock.dur(id) + 1e-9);
+  };
+  const same = (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+  for (let i = 0; i + 1 < clock.order.length; i++) {
+    const exit = keysOf(clock.order[i]);
+    const enter = keysOf(clock.order[i + 1]);
+    if (!same(exit[exit.length - 1].pos, enter[0].pos) || !same(exit[exit.length - 1].target, enter[0].target))
+      throw new Error(`${clock.order[i]} cuts to ${clock.order[i + 1]} - a continuous take cannot cut`);
+  }
+  // The loop home: the take ends where it started, so the wrap is a hold, not a jump.
+  if (!same(keys[0].pos, keys[keys.length - 1].pos) || !same(keys[0].target, keys[keys.length - 1].target))
+    throw new Error("the take does not end on its opening pose - the wrap would jump");
+
+  // The glass-line key, checked on its own terms: 3.5 cells out from the shaft's
+  // glass plane (cell x 12), at plaza level, with the curtain wall between it and
+  // the tower.
+  const GLASS_X = S.lower.x1 + 3.5;
+  const proximity = keys.find((k) => Math.abs(k.pos[0] - GLASS_X) < 1e-9);
+  if (!proximity) throw new Error("the take has no glass-line key 3.5 cells off the curtain wall");
+  if (proximity.pos[1] > S.lower.y1)
+    throw new Error("the glass-line key is not at plaza level");
+
+  // --- the interpolation -----------------------------------------------------
+  // Linear along the key track: the only mode that can be checked for
+  // non-teleporting, because an eased curve has no fixed epsilon.
+  const atOrBefore = (t) => {
+    for (let i = keys.length - 1; i >= 0; i--) if (keys[i].t <= t) return i;
+    return 0;
+  };
+  const copy = (k) => ({
+    t: k.t,
+    pos: { x: k.pos[0], y: k.pos[1], z: k.pos[2] },
+    target: { x: k.target[0], y: k.target[1], z: k.target[2] },
+    fov: k.fov,
+  });
+  const sampleAt = (t) => {
+    const i = atOrBefore(t);
+    const a = keys[i];
+    const b = keys[Math.min(i + 1, keys.length - 1)];
+    if (b === a) return { ...copy(a), t };
+    const u = b.t === a.t ? 1 : Math.min(Math.max((t - a.t) / (b.t - a.t), 0), 1);
+    const lerp = (p, q) => p + (q - p) * u;
+    return {
+      t,
+      pos: { x: lerp(a.pos[0], b.pos[0]), y: lerp(a.pos[1], b.pos[1]), z: lerp(a.pos[2], b.pos[2]) },
+      target: { x: lerp(a.target[0], b.target[0]), y: lerp(a.target[1], b.target[1]), z: lerp(a.target[2], b.target[2]) },
+      fov: Math.min(Math.max(lerp(a.fov, b.fov), FOV_MIN), FOV_MAX),
+    };
+  };
+
+  // Which beat a key belongs to. The clock's own window is the answer, so the
+  // published id can not drift from what beatAt reports. A key that falls in the
+  // hold window (there is none today) belongs to the take's last beat, whose
+  // final key is the loop home.
+  const beatOf = (k) => {
+    const b = clock.beatAt(k.t);
+    return b ? b.id : clock.order[clock.order.length - 1];
+  };
+
+  // A beat's own keys, as the slice of the master track it owns.
+  const keysFor = (id) => keysOf(id).map((k) => ({
+    t: k.t, pos: [k.pos[0], k.pos[1], k.pos[2]], target: [k.target[0], k.target[1], k.target[2]], fov: k.fov,
+  }));
+
+  // The witness layer for the fed beats: the pull-back is shot west of the lane
+  // and above it, looking down the boulevard the batch stands on. These keys are
+  // not the take - the take's fed legs are authored above - but the arc is the
+  // convoy route's own waypoints, so the shot matches the geometry that was laid
+  // down at t = 0 (R19). Seven samples across the beat, one every frac of 1/6.
+  const routeKeys = (id) => {
+    const t0 = clock.start(id);
+    const dur = clock.dur(id);
+    const out = [];
+    for (let i = 0; i <= 6; i++) {
+      const f = i / 6;
+      const p = convoy.routeAt(f);
+      const k = {
+        t: t0 + f * dur,
+        pos: [p.x - 9, p.y + 7, p.z - 10],
+        target: [p.x, p.y + 2, p.z + 4],
+        fov: 48,
+      };
+      const cell = { x: Math.floor(k.pos[0]), y: Math.floor(k.pos[1]), z: Math.floor(k.pos[2]) };
+      if (envelope.isOutside(cell) !== true)
+        throw new Error(`route key at t=${k.t} is inside the envelope at ${cell.x},${cell.y},${cell.z}`);
+      out.push(k);
+    }
+    return out;
+  };
+
+  return {
+    rig: {
+      keys: keysFor,
+      // The beat argument is not decoration: it picks the slice, and the slice's
+      // ends are what a caller outside the beat's own window clamps to.
+      sample: (id, t) => {
+        const t0 = clock.start(id);
+        const t1 = t0 + clock.dur(id);
+        const p = sampleAt(Math.min(Math.max(t, t0), t1));
+        return { ...p, t };
+      },
+      allKeys: () => keys.map((k) => ({ t: k.t, id: beatOf(k) })),
+      all: () => keys.map((k) => ({
+        t: k.t, pos: [k.pos[0], k.pos[1], k.pos[2]], target: [k.target[0], k.target[1], k.target[2]], fov: k.fov,
+      })),
+      routeKeys,
+      fovRange: [FOV_MIN, FOV_MAX],
+      glassLineKey: { t: proximity.t, pos: [proximity.pos[0], proximity.pos[1], proximity.pos[2]], from: S.lower.x1 },
+      window: [clock.start(clock.order[0]), clock.start("drestle") + clock.dur("drestle")],
+    },
+  };
+})());
+
+// Fragment 13: the show's audio queue and the HUD's text - both driven by the clock.
+//
+// The queue is data first: an entry names a voice and keys itself to a beat, and the
+// beat decides its time (`clock.start(id) + off`) - the rig's R20 lesson applies here
+// too, no entry carries a hand-kept number. Because it is data, the gate can walk the
+// whole show with no browser and no AudioContext, and the plan's invariant (Review
+// Focus 5) is pinned at build time: every entry audible from BEAT_END on carries the
+// hold marker, and the gate rejects any that does not. A sound during the HOLD is
+// legal only because it says so.
+//
+// Autoplay: the AudioContext is created inside unlock(), which the page calls from the
+// first pointer/keyboard gesture. Nothing here touches the DOM, GL or audio at eval
+// time - the boot gate runs this fragment with neither.
+
+Object.assign(NAKATOMIC, (() => {
+  const clock = NAKATOMIC.clock;
+
+  // --- voices. Each is a factory of WebAudio nodes; none runs until the context is
+  // live, so the queue above stays testable without a browser. `when` is a context
+  // time, `out` the master gain. Envelopes always start from a near-zero value: an
+  // exponential ramp cannot start at silence, and starting at 0 means starting at a
+  // click instead of at the start of the sound.
+  const white = (ctx, dur) => {
+    const buf = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate * dur)), ctx.sampleRate);
+    const a = buf.getChannelData(0);
+    for (let i = 0; i < a.length; i++) a[i] = Math.random() * 2 - 1;
+    return buf;
+  };
+  const voices = {
+    // Tile Helo - the whomp: a low rotor whoop, sub glide down, blade slap under it.
+    whomp(ctx, out, when) {
+      const o = ctx.createOscillator();
+      o.type = "sine";
+      o.frequency.setValueAtTime(82, when);
+      o.frequency.exponentialRampToValueAtTime(46, when + 0.3);
+      const lp = ctx.createBiquadFilter();
+      lp.type = "lowpass"; lp.frequency.value = 150; lp.Q.value = 4;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(1e-3, when);
+      g.gain.exponentialRampToValueAtTime(0.55, when + 0.06);
+      g.gain.exponentialRampToValueAtTime(1e-3, when + 0.5);
+      o.connect(lp).connect(g).connect(out);
+      o.start(when); o.stop(when + 0.55);
+      const slap = ctx.createBufferSource();
+      slap.buffer = white(ctx, 0.06);
+      const sg = ctx.createGain();
+      sg.gain.setValueAtTime(1e-3, when);
+      sg.gain.exponentialRampToValueAtTime(0.12, when + 0.005);
+      sg.gain.exponentialRampToValueAtTime(1e-3, when + 0.07);
+      slap.connect(sg).connect(out);
+      slap.start(when); slap.stop(when + 0.08);
+    },
+    // The blast crack, and thunder: a noise burst over a sub that slides down.
+    crack(ctx, out, when) {
+      const n = ctx.createBufferSource();
+      n.buffer = white(ctx, 0.4);
+      const bp = ctx.createBiquadFilter();
+      bp.type = "bandpass"; bp.frequency.value = 900; bp.Q.value = 0.8;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(1e-3, when);
+      g.gain.exponentialRampToValueAtTime(0.9, when + 0.004);
+      g.gain.exponentialRampToValueAtTime(1e-3, when + 0.45);
+      n.connect(bp).connect(g).connect(out);
+      n.start(when); n.stop(when + 0.5);
+      const sub = ctx.createOscillator();
+      sub.type = "sine";
+      sub.frequency.setValueAtTime(55, when);
+      sub.frequency.exponentialRampToValueAtTime(28, when + 0.3);
+      const slp = ctx.createBiquadFilter();
+      slp.type = "lowpass"; slp.frequency.value = 90;
+      const sg = ctx.createGain();
+      sg.gain.setValueAtTime(1e-3, when);
+      sg.gain.exponentialRampToValueAtTime(0.5, when + 0.01);
+      sg.gain.exponentialRampToValueAtTime(1e-3, when + 0.4);
+      sub.connect(slp).connect(sg).connect(out);
+      sub.start(when); sub.stop(when + 0.45);
+    },
+    // Sirens, near and far: the two-tone wail, twice, with a bandpass to thin it.
+    siren(ctx, out, when) {
+      const o = ctx.createOscillator();
+      o.type = "sawtooth";
+      const f = o.frequency;
+      f.setValueAtTime(660, when);
+      for (const c of [0, 1]) {
+        const b = when + c * 0.9;
+        f.linearRampToValueAtTime(980, b + 0.45);
+        f.linearRampToValueAtTime(660, b + 0.9);
+      }
+      const bp = ctx.createBiquadFilter();
+      bp.type = "bandpass"; bp.frequency.value = 1400; bp.Q.value = 2;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(1e-3, when);
+      g.gain.exponentialRampToValueAtTime(0.28, when + 0.05);
+      g.gain.exponentialRampToValueAtTime(1e-3, when + 1.85);
+      o.connect(bp).connect(g).connect(out);
+      o.start(when); o.stop(when + 1.9);
+    },
+    // Facade break: glass falling in place of the blast's low end.
+    glass(ctx, out, when) {
+      const n = ctx.createBufferSource();
+      n.buffer = white(ctx, 0.9);
+      const hp = ctx.createBiquadFilter();
+      hp.type = "highpass"; hp.frequency.value = 2500;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(1e-3, when);
+      g.gain.exponentialRampToValueAtTime(0.5, when + 0.01);
+      g.gain.exponentialRampToValueAtTime(1e-3, when + 0.9);
+      n.connect(hp).connect(g).connect(out);
+      n.start(when); n.stop(when + 0.95);
+      for (const [hz, decay] of [[2600, 0.5], [2000, 0.62], [1500, 0.78]]) {
+        const t = ctx.createOscillator();
+        t.type = "triangle";
+        t.frequency.setValueAtTime(hz, when);
+        t.frequency.exponentialRampToValueAtTime(hz * 0.4, when + decay);
+        const tg = ctx.createGain();
+        tg.gain.setValueAtTime(1e-3, when);
+        tg.gain.exponentialRampToValueAtTime(0.12, when + 0.01);
+        tg.gain.exponentialRampToValueAtTime(1e-3, when + decay);
+        t.connect(tg).connect(out);
+        t.start(when); t.stop(when + decay + 0.05);
+      }
+    },
+    // Motorpool: the limo and the fed SUVs - a low rumble that swells in.
+    engine(ctx, out, when) {
+      const lp = ctx.createBiquadFilter();
+      lp.type = "lowpass"; lp.frequency.value = 140; lp.Q.value = 6;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(1e-3, when);
+      g.gain.exponentialRampToValueAtTime(0.4, when + 0.7);
+      g.gain.exponentialRampToValueAtTime(1e-3, when + 2.3);
+      lp.connect(g).connect(out);
+      for (const [hz, type] of [[46, "sawtooth"], [92, "sawtooth"]]) {
+        const o = ctx.createOscillator();
+        o.type = type; o.frequency.value = hz;
+        o.connect(lp);
+        o.start(when); o.stop(when + 2.4);
+      }
+    },
+    // The hold: low room tone, the show's tail under the still frame.
+    room(ctx, out, when) {
+      const lp = ctx.createBiquadFilter();
+      lp.type = "lowpass"; lp.frequency.value = 200;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(1e-3, when);
+      g.gain.exponentialRampToValueAtTime(0.15, when + 2);
+      g.gain.exponentialRampToValueAtTime(1e-3, when + 11);
+      lp.connect(g).connect(out);
+      for (const hz of [44, 66.3]) {
+        const o = ctx.createOscillator();
+        o.type = "sine"; o.frequency.value = hz;
+        o.connect(lp);
+        o.start(when); o.stop(when + 11.2);
+      }
+    },
+  };
+
+  // --- the queue, keyed to the beat table. Entries carry `off` - a beat offset, so
+  // the beat decides the absolute time. One hold entry exists on purpose: the show is
+  // not silent under the still frame, and it is the only sound allowed out there.
+  const entries = [
+    { name: "engine", id: "limoNakatomi", off: 3 },          // motorpool rolls in
+    ...Array.from({ length: 7 }, (_, i) =>                   // tile helo, 7 whomps
+      ({ name: "whomp", id: "tileHelo", off: i * 6 })),
+    { name: "crack", id: "blast", off: 0.5 },                // the break itself
+    { name: "glass", id: "storm", off: 0.3 },                // first facade fallout
+    { name: "crack", id: "storm", off: 2.5 },                // thunder, one beat later
+    { name: "siren", id: "storm", off: 30 },                 // distant, inside the storm
+    { name: "engine", id: "fedConvoy", off: 1 },             // the feds come up the boulevard
+    { name: "siren", id: "fedConvoy", off: 14 },
+    { name: "siren", id: "wallOfCars", off: 2 },
+    { name: "siren", id: "wallOfCars", off: 20 },
+    { name: "engine", id: "carDepart", off: 2 },             // cars off the lot
+    { name: "room", hold: true, off: 2 },                    // audible under the hold
+  ];
+  const queue = entries.map((e) => {
+    const t = e.hold ? clock.BEAT_END + e.off : clock.start(e.id) + e.off;
+    return { name: e.name, id: e.id, off: e.off, t, ...(e.hold ? { hold: true } : {}) };
+  }).sort((a, b) => a.t - b.t);
+
+  // Build-time gates, mirroring what the unit suite asserts: a voice has to exist to
+  // synth the entry, the hold invariant has to hold both ways, and a beat-keyed entry
+  // has to land inside the beat's own window. clock.start throws on a bad id.
+  let prev = -Infinity;
+  for (const e of queue) {
+    if (!(e.name in voices)) throw new Error(`audio entry ${e.name}@${e.t} has no voice`);
+    if (!(e.t > prev)) throw new Error(`audio entries at ${prev} and ${e.t} do not move forward`);
+    prev = e.t;
+    if (!!e.hold !== (e.t >= clock.BEAT_END))
+      throw new Error(`audio entry ${e.name}@${e.t} disagrees with the hold window`);
+    if (!e.hold) {
+      if (!clock.order.includes(e.id)) throw new Error(`audio entry keys to ${e.id}, outside clock.order`);
+      const s = clock.start(e.id);
+      if (!(e.t >= s && e.t < s + clock.dur(e.id)))
+        throw new Error(`audio entry ${e.name}@${e.t} sits outside the window of ${e.id}`);
+    }
+  }
+
+  // --- the playhead walker. The render loop hands pump its frame; pump schedules
+  // only what crossed between the last frame and this one. A step backwards (the
+  // wrap, a paused tool's seek) schedules nothing: the show plays forward, once.
+  let lastT = -1;
+  let fired = 0;                      // crossings the page's pump has reported
+  let ctx = null;
+  let master = null;
+
+  const audio = {
+    queue, voices,
+    get live() { return ctx !== null; },
+    get fired() { return fired; },
+    // Only ever called from a gesture handler: the autoplay policy hands the context
+    // to the page on the first pointerdown/keydown, not at load.
+    unlock() {
+      if (ctx) return ctx;
+      const AC = (typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext)) || null;
+      if (!AC) return null;
+      ctx = new AC();
+      master = ctx.createGain();
+      master.gain.value = 0.9;
+      master.connect(ctx.destination);
+      return ctx;
+    },
+    reset() { lastT = -1; fired = 0; },
+    eventsBetween(prev, next) {
+      if (!(next > prev)) return [];
+      return queue.filter((e) => e.t > prev && e.t <= next);
+    },
+    pump(f) {
+      const next = Number(f.t) || 0;
+      const from = f.wrapped ? -1 : lastT;
+      lastT = next;
+      const evs = audio.eventsBetween(from, next);
+      fired += evs.length;
+      if (ctx) for (const e of evs) voices[e.name](ctx, master, ctx.currentTime + 0.02);
+      return evs.length;
+    },
+  };
+
+  // --- the HUD's text, also pure functions. The label rule is the plan's Review
+  // Focus 5 in one place: beatAt is null through the hold, and null is not a missing
+  // label - it is the hold, so it has its own text.
+  const hud = {
+    label(f) {
+      if (!f) return "";
+      const b = f.beat || clock.beatAt(f.t);
+      if (b) return b.label;
+      return f.t >= clock.BEAT_END ? clock.HOLD_LABEL : "";
+    },
+    // opts: { source, framing, framings, paused } - which camera made the frame and
+    // whether a tool is holding it still. The meta line is what the review shots read.
+    meta(f, opts) {
+      return `${f.t.toFixed(2)} s of ${clock.SHOW_LEN}`
+        + `  ${(f.beat && f.beat.id) || "hold"}`
+        + (opts.source === "take" ? "  take" : `  framing ${opts.framing}/${opts.framings}`)
+        + (opts.paused ? "  paused" : "");
+    },
+    stat(o) { return `${o.points} splats  ${o.voxels} vox  fps ${o.fps.toFixed(0)}`; },
+    text(f, opts) {
+      return { beat: hud.label(f), meta: hud.meta(f, opts), stat: hud.stat(opts) };
+    },
+  };
+
+  return { audio, hud };
+})());
+
+// Fragment 99: the render rig - world to screen. First pixels.
+//
+// R18 said the wiring belonged in Task 13; Jon pulled it forward as Task 7.5 on
+// 2026-11-25 so Tasks 7-12 land visibly instead of blind. The `99-` prefix is not
+// cosmetics: fragments 01..98 must have published their APIs before this one reads
+// the shared buffer, because the world is assembled here, once.
+//
+// Nothing at eval time touches the DOM, GL or the ground batch: the boot gate in
+// verify/unit.mjs runs the page with no browser, and it stays green only because
+// the renderer, the camera and the event bindings appear inside start(). The one
+// exception is the scene object itself, whose shape is pinned by that gate.
+//
+// The show's own camera: Task 12 publishes NAKATOMIC.rig = { keys, sample }, and
+// the loop below consumes it when it is there (scene.follow). Until then the loop
+// drives the hand-rolled orbit rig - no addons, per the plan's one-rule imports.
+
+Object.assign(NAKATOMIC, (() => {
+  const vox = NAKATOMIC.vox;
+  const clock = NAKATOMIC.clock;
+  const envelope = NAKATOMIC.envelope;
+
+  // --- the buffer view, in point form. Page-side twin of tools/jsp.mjs, kept
+  // THREE-free so the gate can run it with no GL and compare both sides. --------
+  const splats = (buffer) => {
+    if (!buffer || !Array.isArray(buffer.runs))
+      throw new Error("splats wants the buffer view: { runs: [...], hexOf(id) }");
+    const points = [];
+    const colors = [];
+    for (const r of buffer.runs) {
+      const hex = buffer.hexOf(r.id);
+      if (!hex) throw new Error(`no palette colour for id 0x${Number(r.id).toString(16)}`);
+      for (let i = 0; i < r.len; i++) {
+        points.push([r.x + i, r.y, r.z]);
+        colors.push(hex);
+      }
+    }
+    return { points, colors };
+  };
+
+  // --- one world, built once. Fragments 03/04 emitted at boot; the ground,
+  // lobby, dressing and convoy batches are on demand, so this is the place that
+  // pulls them in. A second call returns the cached world: the render loop must
+  // never rebuild the plaza per frame. ----------------------------------------
+  let world = null;
+  const ensureWorld = () => {
+    if (world === null) {
+      const ground = NAKATOMIC.ground();
+      const lobby = NAKATOMIC.lobbyWorld();
+      const dressing = NAKATOMIC.plazaDressing();
+      const roof = NAKATOMIC.roofWorld();
+      const convoy = NAKATOMIC.convoyWorld();
+      world = {
+        ground,
+        lobby,
+        dressing,
+        roof,
+        convoy,
+        bounds: vox.bounds(),
+        voxels: vox.count,
+        buffer: vox.buffer(),
+      };
+    }
+    return world;
+  };
+
+  // --- framing 1..4: the four camera setups the show reads as its own wide shots.
+  // yaw is the orbit angle in degrees (0 = the +z side of the block, so ~180 faces
+  // the plaza front, where the glass atrium and the lobby arcade are), pitch is the
+  // elevation, and `dist` is a multiple of the envelope radius - every setup here
+  // starts further out than the tower's own corner, before the clamp ever runs.
+  const FRAMINGS = [
+    // Framing 1 is the wide establishing shot: the whole massing (roofline to lot
+    // edge) has to sit in frame with sky above it, so the target sits mid-tower and
+    // the lens stays well out. Framing 2 is the tower close, 3 the lobby-level pass,
+    // 4 looks back over the deck.
+    { name: "boulevard wide", yaw: 208, pitch: 10, dist: 2.4, fov: 46, target: [0, 18, -6] },
+    { name: "tower close", yaw: 168, pitch: 12, dist: 1.15, fov: 42, target: [0, 24, 0] },
+    { name: "lobby level", yaw: 186, pitch: 4, dist: 2.25, fov: 50, target: [0, 4, -8] },
+    { name: "over the deck", yaw: 196, pitch: 48, dist: 2.3, fov: 44, target: [0, 16, 10] },
+  ];
+
+  // sRGB hex -> the linear values the renderer's working space wants, so the
+  // palette hexes the gates assert on are the hexes the eye sees. Inline because
+  // THREE.Color is not available to the gate stub, and math is cheaper anyway.
+  // The /255 is the whole business: srgbToLinear wants a 0..1 channel, and handing
+  // it the raw byte makes pow((107 + 0.055) / 1.055, 2.4) = 65,350, which clamps to
+  // white in the shader and washes the whole plaza out. Exposed as NAKATOMIC.colorLinear
+  // so the gate can pin the range for every palette entry, and so the fx tasks read
+  // colours through the same one function.
+  const srgbToLinear = (c) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+  const colorLinear = (hex) => {
+    const n = parseInt(hex.slice(1), 16);
+    return [
+      srgbToLinear(((n >> 16) & 0xff) / 255),
+      srgbToLinear(((n >> 8) & 0xff) / 255),
+      srgbToLinear((n & 0xff) / 255),
+    ];
+  };
+
+  // R12/R13: the lens stays outside the tower envelope, always. The orbit target
+  // can sit inside the building, so a distance clamp alone does not guarantee it -
+  // this walks the point out along its own ray from the target until the envelope
+  // agrees. That makes `envelope.isOutside(camera.position)` an invariant, not a
+  // configuration, and Task 14 asserts it as one.
+  const clearOfEnvelope = (target, p) => {
+    let pos = { x: p.x, y: p.y, z: p.z };
+    if (envelope.isOutside(pos)) return pos;
+    let dx = pos.x - target.x, dy = pos.y - target.y, dz = pos.z - target.z;
+    let len = Math.hypot(dx, dy, dz);
+    if (len < 1e-6) { dy = 1; len = 1; }               // a lens on its own target: lift it up
+    const ux = dx / len, uy = dy / len, uz = dz / len;
+    let d = Math.max(len, 1);
+    for (let i = 0; i < 240 && !envelope.isOutside(pos); i++) {
+      d *= 1.08;
+      pos = { x: target.x + ux * d, y: target.y + uy * d, z: target.z + uz * d };
+    }
+    return pos;
+  };
+
+  // --- the blast/storm fx: the one overlay that is a function of t. It never
+  // joins the static cloud - the base glass line is one build, once, and the
+  // fx only draws *over* it, which is what lets the wrap restore everything by
+  // returning empty cells outside the window. The overlay is a fixed-size
+  // Points buffer repainted per frame inside the window; outside it, drawRange
+  // goes to zero and the layer is gone. ---------------------------------------
+  let fxObj = null;
+  const FX_MAX = 512;
+  const paintFx = (t) => {
+    if (!NAKATOMIC.fx) return;
+    const cells = NAKATOMIC.fx.at(t);
+    if (!fxObj) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(FX_MAX * 3), 3));
+      geo.setAttribute("color", new THREE.Float32BufferAttribute(new Float32Array(FX_MAX * 3), 3));
+      geo.setDrawRange(0, 0);
+      const mat = new THREE.PointsMaterial({
+        size: 1.15, sizeAttenuation: true, vertexColors: true, fog: true, depthWrite: false,
+      });
+      mat.depthTest = true;
+      fxObj = new THREE.Points(geo, mat);
+      fxObj.renderOrder = 2;                       // after the cloud, over the glass it replaces
+      sceneObj.add(fxObj);
+    }
+    const pos = fxObj.geometry.attributes.position.array;
+    const col = fxObj.geometry.attributes.color.array;
+    let n = 0;
+    for (const c of cells) {
+      if (n >= FX_MAX) break;
+      const hex = NAKATOMIC.palette.hexOf(c.id);
+      const lin = colorLinear(hex);
+      pos[n * 3] = c.x; pos[n * 3 + 1] = c.y; pos[n * 3 + 2] = c.z + (c.zShift || 0);
+      col[n * 3] = lin[0]; col[n * 3 + 1] = lin[1]; col[n * 3 + 2] = lin[2];
+      n++;
+    }
+    fxObj.geometry.setDrawRange(0, n);
+    fxObj.geometry.attributes.position.needsUpdate = true;
+    fxObj.geometry.attributes.color.needsUpdate = true;
+    scene.stats.fx = n;
+  };
+
+  // rig state: spherical orbit around a target. `pose` is the show's own camera
+  // (Task 12's rig feeds it through setPose); while it is set, orbit state idles.
+  const rig = {
+    yaw: 0, pitch: 0, dist: 0, target: { x: 0, y: 0, z: 0 },
+  };
+  let pose = null;
+  // Which camera made the frame the HUD describes: the show's own take ("take",
+  // set by step() from Task 12's keys), a pose pinned by a tool ("lens"), or one
+  // of the four fixed framings. The screenshots beside the pixel bars are the
+  // review proof, so they have to say what they show.
+  let poseSource = "framing";
+  let rigReady = false;
+
+  const applyPose = (camera, pos, target, fov) => {
+    camera.position.set(pos.x, pos.y, pos.z);
+    if (fov) { camera.fov = fov; camera.updateProjectionMatrix(); }
+    camera.lookAt(target.x, target.y, target.z);
+  };
+
+  const orbitPos = () => {
+    const cp = Math.cos(rig.pitch * Math.PI / 180);
+    const cy = Math.cos(rig.yaw * Math.PI / 180);
+    const sz = Math.sin(rig.yaw * Math.PI / 180);
+    const pos = {
+      x: rig.target.x + rig.dist * cp * sz,
+      y: rig.target.y + rig.dist * Math.sin(rig.pitch * Math.PI / 180),
+      z: rig.target.z + rig.dist * cp * cy,
+    };
+    return clearOfEnvelope(rig.target, pos);
+  };
+
+  // The scene's public object is assembled before start(): the gate asserts its
+  // shape with no GL in the room, so every key exists at eval time.
+  const scene = {
+    running: false,
+    paused: false,
+    follow: true,
+    gl: null,
+    camera: null,
+    domElement: null,
+    fov: FRAMINGS[0].fov,
+    framing: 1,
+    // Read-only view of which camera painted the current frame: "take" (Task 12's
+    // keys through step()), "lens" (a pose pinned by a tool), "framing" (one of four).
+    get cameraSource() { return poseSource; },
+    stats: { points: 0, voxels: 0, fps: 0, fx: 0 },
+
+    // The HUD's label rule, as a pure function: beatAt is null through the hold,
+    // so a null beat is not a missing label - it is the hold, and it needs a label.
+    // Task 13's `hud.label` owns that rule; deferring here keeps the page's label
+    // and the HUD fragment's from ever disagreeing.
+    label(f) { return NAKATOMIC.hud.label(f); },
+
+    setFraming(n) {
+      const i = Math.min(Math.max(Number(n) || 1, 1), FRAMINGS.length);
+      const f = FRAMINGS[i - 1];
+      scene.framing = i;
+      rig.yaw = f.yaw;
+      rig.pitch = f.pitch;
+      rig.dist = envelope.radius * f.dist;
+      rig.target = { x: f.target[0], y: f.target[1], z: f.target[2] };
+      scene.fov = f.fov;
+      pose = null;
+      poseSource = "framing";
+      if (rigReady) applyPose(scene.camera, orbitPos(), rig.target, scene.fov);
+      return i;
+    },
+
+    // The show's own camera pose: { pos, target, fov } in buffer units. Task 12's
+    // per-beat keys land here; the envelope clamp still runs, so a key that tries
+    // to put the lens inside the tower ends up outside it anyway.
+    setPose(p) {
+      if (!p || !p.pos) return null;
+      const target = p.target || { x: 0, y: 0, z: 0 };
+      const pos = clearOfEnvelope(target, { x: p.pos.x, y: p.pos.y, z: p.pos.z });
+      pose = { pos, target, fov: p.fov };
+      poseSource = p.from || "lens";
+      if (pose.fov) scene.fov = pose.fov;
+      if (rigReady) applyPose(scene.camera, pose.pos, pose.target, pose.fov);
+      return pose;
+    },
+
+    togglePause() { scene.paused = !scene.paused; return scene.paused; },
+    restart() { clock.restart(); pose = null; return clock.t; },
+
+    // Rebuilds the splat cloud from the current buffer: the content tasks (7..12)
+    // add geometry and the shatter fx change ids, so the cloud has to be re-read.
+    rebuild() {
+      if (!rigReady) return scene.stats;
+      world = null;
+      const w = ensureWorld();
+      const s = splats(w.buffer);
+      const n = s.points.length;
+      const positions = new Float32Array(n * 3);
+      const colors = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        const p = s.points[i];
+        positions[i * 3] = p[0]; positions[i * 3 + 1] = p[1]; positions[i * 3 + 2] = p[2];
+        const c = colorLinear(s.colors[i]);
+        colors[i * 3] = c[0]; colors[i * 3 + 1] = c[1]; colors[i * 3 + 2] = c[2];
+      }
+      if (cloud) {
+        sceneObj.remove(cloud);
+        cloud.geometry.dispose();
+        cloud.material.dispose();
+      }
+      cloud = null;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+      geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+      const mat = new THREE.PointsMaterial({
+        size: 0.95, sizeAttenuation: true, vertexColors: true, fog: true,
+      });
+      cloud = new THREE.Points(geo, mat);
+      sceneObj.add(cloud);
+      scene.stats.points = n;
+      scene.stats.voxels = w.voxels;
+      return scene.stats;
+    },
+
+    // One frame of the show. The rAF wrapper calls it, and the pixel gates drive it
+    // by hand, so both paths exercise the same code: one clock tick, one pose, one
+    // render, one HUD update, one fade value.
+    step(dt) {
+      // While paused the tool owns the clock (it seeks, then paints), so the frame
+      // comes from the clock's current state instead of a stale tick.
+      frame = scene.paused ? frameFromClock() : clock.tick(dt);
+      const w = ensureWorld();
+      // Task 13's audio queue walks the same frame: while paused the tool owns the
+      // clock (it seeks, then paints), so it must never hear a replay of the show.
+      if (!scene.paused && NAKATOMIC.audio) NAKATOMIC.audio.pump(frame);
+      if (!scene.paused && scene.follow && NAKATOMIC.rig && frame.beat) {
+        const key = NAKATOMIC.rig.sample(frame.beat.id, frame.t);
+        if (key) scene.setPose({ pos: key.pos, target: key.target, fov: key.fov, from: "take" });
+      }
+      if (rigReady) {
+        paintFx(frame.t);
+        if (pose) applyPose(scene.camera, pose.pos, pose.target, pose.fov);
+        else applyPose(scene.camera, orbitPos(), rig.target, scene.fov);
+        if (hud) paintHud(frame);
+        gl.render(sceneObj, scene.camera);
+      }
+      return frame;
+    },
+
+    start() {
+      if (scene.running) return scene;
+      const stage = document.getElementById("stage");
+      gl = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+      gl.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      gl.setSize(window.innerWidth, window.innerHeight);
+      gl.outputColorSpace = THREE.SRGBColorSpace;
+      const dusk = new THREE.Color(0x0a0c12);
+      gl.setClearColor(dusk, 1);
+      stage.appendChild(gl.domElement);
+      scene.gl = gl;
+      scene.domElement = gl.domElement;
+
+      sceneObj = new THREE.Scene();
+      sceneObj.background = dusk;
+      sceneObj.fog = new THREE.FogExp2(0x0a0c12, 0.0022);
+
+      const w = ensureWorld();
+      scene.camera = new THREE.PerspectiveCamera(
+        FRAMINGS[0].fov, window.innerWidth / window.innerHeight, 0.5,
+        // far reaches past the skyline walls at z = 70 from any orbit the rig allows
+        Math.max(600, envelope.radius * 8),
+      );
+      scene.setFraming(1);
+      // rigReady comes first: without it the rebuild below is a no-op, because
+      // rebuild's own guard refuses to read a buffer before the rig exists.
+      rigReady = true;
+      scene.rebuild();
+      hud = {
+        beat: document.getElementById("beat"),
+        meta: document.getElementById("meta"),
+        stat: document.getElementById("stat"),
+        fade: document.getElementById("fade"),
+      };
+      bindInput(gl.domElement);
+      scene.running = true;
+      loop = (now) => {
+        requestAnimationFrame(loop);
+        const dt = lastNow === null ? clock.dtClamp : (now - lastNow) / 1000;
+        lastNow = now;
+        scene.step(dt);
+        // A plain EMA of the frame rate: the HUD reads it, nothing in the show does.
+        const rate = 1 / Math.max(dt, 1e-4);
+        scene.stats.fps = scene.stats.fps ? scene.stats.fps * 0.9 + rate * 0.1 : rate;
+      };
+      requestAnimationFrame(loop);
+      return scene;
+    },
+  };
+
+  // --- internals the closure owns; the public object above is the only handle ----
+  let gl = null;
+  let sceneObj = null;
+  let cloud = null;
+  let hud = null;
+  // A frame from the clock without advancing it: what `step` reads while paused.
+  const frameFromClock = () => ({
+    t: clock.t, beat: clock.beatAt(clock.t), black: clock.fade.black, wrapped: false,
+  });
+  let frame = frameFromClock();
+  let lastNow = null;
+  let loop = null;
+
+  // The text itself lives in Task 13's hud fragment, so the queue's invariant and
+  // the HUD's hold fallback are one function, not two that could drift. This one
+  // only pushes the strings into elements - and the fade overlay's opacity stays
+  // here, because that is the renderer's job, not the text's.
+  const paintHud = (f) => {
+    const lines = NAKATOMIC.hud.text(f, {
+      source: poseSource, framing: scene.framing, framings: FRAMINGS.length,
+      paused: scene.paused, points: scene.stats.points, voxels: scene.stats.voxels,
+      fps: scene.stats.fps,
+    });
+    hud.beat.textContent = lines.beat;
+    hud.meta.textContent = lines.meta;
+    hud.stat.textContent = lines.stat;
+    hud.fade.style.opacity = String(f.black);
+  };
+
+  const bindInput = (canvas) => {
+    let drag = null;
+    canvas.addEventListener("pointerdown", (e) => {
+      // The autoplay policy wants a gesture before a page may start a sound: the
+      // first pointer/keyboard press unlocks the queue, and until then the show is
+      // silent and the queue keeps walking (pump counts crossings with no context).
+      NAKATOMIC.audio && NAKATOMIC.audio.unlock();
+      drag = { x: e.clientX, y: e.clientY, yaw: rig.yaw, pitch: rig.pitch };
+      canvas.setPointerCapture && canvas.setPointerCapture(e.pointerId);
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      rig.yaw = drag.yaw + (e.clientX - drag.x) * 0.28;
+      rig.pitch = Math.min(88, Math.max(-20, drag.pitch - (e.clientY - drag.y) * 0.22));
+      pose = null;
+    });
+    const up = () => { drag = null; };
+    canvas.addEventListener("pointerup", up);
+    canvas.addEventListener("pointerleave", up);
+    canvas.addEventListener("wheel", (e) => {
+      const min = envelope.radius * 1.05;      // the lens never gets inside the tower
+      rig.dist = Math.min(envelope.radius * 6, Math.max(min, rig.dist * (1 + e.deltaY * 0.0012)));
+      pose = null;
+    }, { passive: true });
+    window.addEventListener("keydown", (e) => {
+      NAKATOMIC.audio && NAKATOMIC.audio.unlock();
+      const k = e.key;
+      if (k >= "1" && k <= String(FRAMINGS.length)) scene.setFraming(Number(k));
+      else if (k === " ") { scene.togglePause(); e.preventDefault(); }
+      else if (k === "r" || k === "R") scene.restart();
+    });
+    window.addEventListener("resize", () => {
+      if (!gl) return;
+      gl.setSize(window.innerWidth, window.innerHeight);
+      scene.camera.aspect = window.innerWidth / window.innerHeight;
+      scene.camera.updateProjectionMatrix();
+    });
+  };
+
+  // The page boots itself. A person opening index.html sees the show, not the static
+  // shell: nothing else calls start(), and every live tool used to boot the page for
+  // it, which is how a page that never boots still tested green. The boot hangs on the
+  // document's own ready event rather than running at eval time, so the vm gate keeps
+  // its promise (no DOM, no GL until a browser says the document is ready): the gate's
+  // stub document records the hook and never fires it, and unit.mjs fires it by hand to
+  // prove the hook boots the whole show. A module script is deferred, so its own
+  // execution is before DOMContentLoaded - this listener can never miss the event.
+  document.addEventListener("DOMContentLoaded", () => NAKATOMIC.scene.start());
+
+  return { splats, ensureWorld, colorLinear, scene };
+})());
+
+</script>
+</body>
+</html>

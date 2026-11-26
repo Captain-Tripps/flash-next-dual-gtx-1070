@@ -1,0 +1,263 @@
+// Fragment 13: the show's audio queue and the HUD's text - both driven by the clock.
+//
+// The queue is data first: an entry names a voice and keys itself to a beat, and the
+// beat decides its time (`clock.start(id) + off`) - the rig's R20 lesson applies here
+// too, no entry carries a hand-kept number. Because it is data, the gate can walk the
+// whole show with no browser and no AudioContext, and the plan's invariant (Review
+// Focus 5) is pinned at build time: every entry audible from BEAT_END on carries the
+// hold marker, and the gate rejects any that does not. A sound during the HOLD is
+// legal only because it says so.
+//
+// Autoplay: the AudioContext is created inside unlock(), which the page calls from the
+// first pointer/keyboard gesture. Nothing here touches the DOM, GL or audio at eval
+// time - the boot gate runs this fragment with neither.
+
+Object.assign(NAKATOMIC, (() => {
+  const clock = NAKATOMIC.clock;
+
+  // --- voices. Each is a factory of WebAudio nodes; none runs until the context is
+  // live, so the queue above stays testable without a browser. `when` is a context
+  // time, `out` the master gain. Envelopes always start from a near-zero value: an
+  // exponential ramp cannot start at silence, and starting at 0 means starting at a
+  // click instead of at the start of the sound.
+  const white = (ctx, dur) => {
+    const buf = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate * dur)), ctx.sampleRate);
+    const a = buf.getChannelData(0);
+    for (let i = 0; i < a.length; i++) a[i] = Math.random() * 2 - 1;
+    return buf;
+  };
+  const voices = {
+    // Tile Helo - the whomp: a low rotor whoop, sub glide down, blade slap under it.
+    whomp(ctx, out, when) {
+      const o = ctx.createOscillator();
+      o.type = "sine";
+      o.frequency.setValueAtTime(82, when);
+      o.frequency.exponentialRampToValueAtTime(46, when + 0.3);
+      const lp = ctx.createBiquadFilter();
+      lp.type = "lowpass"; lp.frequency.value = 150; lp.Q.value = 4;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(1e-3, when);
+      g.gain.exponentialRampToValueAtTime(0.55, when + 0.06);
+      g.gain.exponentialRampToValueAtTime(1e-3, when + 0.5);
+      o.connect(lp).connect(g).connect(out);
+      o.start(when); o.stop(when + 0.55);
+      const slap = ctx.createBufferSource();
+      slap.buffer = white(ctx, 0.06);
+      const sg = ctx.createGain();
+      sg.gain.setValueAtTime(1e-3, when);
+      sg.gain.exponentialRampToValueAtTime(0.12, when + 0.005);
+      sg.gain.exponentialRampToValueAtTime(1e-3, when + 0.07);
+      slap.connect(sg).connect(out);
+      slap.start(when); slap.stop(when + 0.08);
+    },
+    // The blast crack, and thunder: a noise burst over a sub that slides down.
+    crack(ctx, out, when) {
+      const n = ctx.createBufferSource();
+      n.buffer = white(ctx, 0.4);
+      const bp = ctx.createBiquadFilter();
+      bp.type = "bandpass"; bp.frequency.value = 900; bp.Q.value = 0.8;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(1e-3, when);
+      g.gain.exponentialRampToValueAtTime(0.9, when + 0.004);
+      g.gain.exponentialRampToValueAtTime(1e-3, when + 0.45);
+      n.connect(bp).connect(g).connect(out);
+      n.start(when); n.stop(when + 0.5);
+      const sub = ctx.createOscillator();
+      sub.type = "sine";
+      sub.frequency.setValueAtTime(55, when);
+      sub.frequency.exponentialRampToValueAtTime(28, when + 0.3);
+      const slp = ctx.createBiquadFilter();
+      slp.type = "lowpass"; slp.frequency.value = 90;
+      const sg = ctx.createGain();
+      sg.gain.setValueAtTime(1e-3, when);
+      sg.gain.exponentialRampToValueAtTime(0.5, when + 0.01);
+      sg.gain.exponentialRampToValueAtTime(1e-3, when + 0.4);
+      sub.connect(slp).connect(sg).connect(out);
+      sub.start(when); sub.stop(when + 0.45);
+    },
+    // Sirens, near and far: the two-tone wail, twice, with a bandpass to thin it.
+    siren(ctx, out, when) {
+      const o = ctx.createOscillator();
+      o.type = "sawtooth";
+      const f = o.frequency;
+      f.setValueAtTime(660, when);
+      for (const c of [0, 1]) {
+        const b = when + c * 0.9;
+        f.linearRampToValueAtTime(980, b + 0.45);
+        f.linearRampToValueAtTime(660, b + 0.9);
+      }
+      const bp = ctx.createBiquadFilter();
+      bp.type = "bandpass"; bp.frequency.value = 1400; bp.Q.value = 2;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(1e-3, when);
+      g.gain.exponentialRampToValueAtTime(0.28, when + 0.05);
+      g.gain.exponentialRampToValueAtTime(1e-3, when + 1.85);
+      o.connect(bp).connect(g).connect(out);
+      o.start(when); o.stop(when + 1.9);
+    },
+    // Facade break: glass falling in place of the blast's low end.
+    glass(ctx, out, when) {
+      const n = ctx.createBufferSource();
+      n.buffer = white(ctx, 0.9);
+      const hp = ctx.createBiquadFilter();
+      hp.type = "highpass"; hp.frequency.value = 2500;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(1e-3, when);
+      g.gain.exponentialRampToValueAtTime(0.5, when + 0.01);
+      g.gain.exponentialRampToValueAtTime(1e-3, when + 0.9);
+      n.connect(hp).connect(g).connect(out);
+      n.start(when); n.stop(when + 0.95);
+      for (const [hz, decay] of [[2600, 0.5], [2000, 0.62], [1500, 0.78]]) {
+        const t = ctx.createOscillator();
+        t.type = "triangle";
+        t.frequency.setValueAtTime(hz, when);
+        t.frequency.exponentialRampToValueAtTime(hz * 0.4, when + decay);
+        const tg = ctx.createGain();
+        tg.gain.setValueAtTime(1e-3, when);
+        tg.gain.exponentialRampToValueAtTime(0.12, when + 0.01);
+        tg.gain.exponentialRampToValueAtTime(1e-3, when + decay);
+        t.connect(tg).connect(out);
+        t.start(when); t.stop(when + decay + 0.05);
+      }
+    },
+    // Motorpool: the limo and the fed SUVs - a low rumble that swells in.
+    engine(ctx, out, when) {
+      const lp = ctx.createBiquadFilter();
+      lp.type = "lowpass"; lp.frequency.value = 140; lp.Q.value = 6;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(1e-3, when);
+      g.gain.exponentialRampToValueAtTime(0.4, when + 0.7);
+      g.gain.exponentialRampToValueAtTime(1e-3, when + 2.3);
+      lp.connect(g).connect(out);
+      for (const [hz, type] of [[46, "sawtooth"], [92, "sawtooth"]]) {
+        const o = ctx.createOscillator();
+        o.type = type; o.frequency.value = hz;
+        o.connect(lp);
+        o.start(when); o.stop(when + 2.4);
+      }
+    },
+    // The hold: low room tone, the show's tail under the still frame.
+    room(ctx, out, when) {
+      const lp = ctx.createBiquadFilter();
+      lp.type = "lowpass"; lp.frequency.value = 200;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(1e-3, when);
+      g.gain.exponentialRampToValueAtTime(0.15, when + 2);
+      g.gain.exponentialRampToValueAtTime(1e-3, when + 11);
+      lp.connect(g).connect(out);
+      for (const hz of [44, 66.3]) {
+        const o = ctx.createOscillator();
+        o.type = "sine"; o.frequency.value = hz;
+        o.connect(lp);
+        o.start(when); o.stop(when + 11.2);
+      }
+    },
+  };
+
+  // --- the queue, keyed to the beat table. Entries carry `off` - a beat offset, so
+  // the beat decides the absolute time. One hold entry exists on purpose: the show is
+  // not silent under the still frame, and it is the only sound allowed out there.
+  const entries = [
+    { name: "engine", id: "limoNakatomi", off: 3 },          // motorpool rolls in
+    ...Array.from({ length: 7 }, (_, i) =>                   // tile helo, 7 whomps
+      ({ name: "whomp", id: "tileHelo", off: i * 6 })),
+    { name: "crack", id: "blast", off: 0.5 },                // the break itself
+    { name: "glass", id: "storm", off: 0.3 },                // first facade fallout
+    { name: "crack", id: "storm", off: 2.5 },                // thunder, one beat later
+    { name: "siren", id: "storm", off: 30 },                 // distant, inside the storm
+    { name: "engine", id: "fedConvoy", off: 1 },             // the feds come up the boulevard
+    { name: "siren", id: "fedConvoy", off: 14 },
+    { name: "siren", id: "wallOfCars", off: 2 },
+    { name: "siren", id: "wallOfCars", off: 20 },
+    { name: "engine", id: "carDepart", off: 2 },             // cars off the lot
+    { name: "room", hold: true, off: 2 },                    // audible under the hold
+  ];
+  const queue = entries.map((e) => {
+    const t = e.hold ? clock.BEAT_END + e.off : clock.start(e.id) + e.off;
+    return { name: e.name, id: e.id, off: e.off, t, ...(e.hold ? { hold: true } : {}) };
+  }).sort((a, b) => a.t - b.t);
+
+  // Build-time gates, mirroring what the unit suite asserts: a voice has to exist to
+  // synth the entry, the hold invariant has to hold both ways, and a beat-keyed entry
+  // has to land inside the beat's own window. clock.start throws on a bad id.
+  let prev = -Infinity;
+  for (const e of queue) {
+    if (!(e.name in voices)) throw new Error(`audio entry ${e.name}@${e.t} has no voice`);
+    if (!(e.t > prev)) throw new Error(`audio entries at ${prev} and ${e.t} do not move forward`);
+    prev = e.t;
+    if (!!e.hold !== (e.t >= clock.BEAT_END))
+      throw new Error(`audio entry ${e.name}@${e.t} disagrees with the hold window`);
+    if (!e.hold) {
+      if (!clock.order.includes(e.id)) throw new Error(`audio entry keys to ${e.id}, outside clock.order`);
+      const s = clock.start(e.id);
+      if (!(e.t >= s && e.t < s + clock.dur(e.id)))
+        throw new Error(`audio entry ${e.name}@${e.t} sits outside the window of ${e.id}`);
+    }
+  }
+
+  // --- the playhead walker. The render loop hands pump its frame; pump schedules
+  // only what crossed between the last frame and this one. A step backwards (the
+  // wrap, a paused tool's seek) schedules nothing: the show plays forward, once.
+  let lastT = -1;
+  let fired = 0;                      // crossings the page's pump has reported
+  let ctx = null;
+  let master = null;
+
+  const audio = {
+    queue, voices,
+    get live() { return ctx !== null; },
+    get fired() { return fired; },
+    // Only ever called from a gesture handler: the autoplay policy hands the context
+    // to the page on the first pointerdown/keydown, not at load.
+    unlock() {
+      if (ctx) return ctx;
+      const AC = (typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext)) || null;
+      if (!AC) return null;
+      ctx = new AC();
+      master = ctx.createGain();
+      master.gain.value = 0.9;
+      master.connect(ctx.destination);
+      return ctx;
+    },
+    reset() { lastT = -1; fired = 0; },
+    eventsBetween(prev, next) {
+      if (!(next > prev)) return [];
+      return queue.filter((e) => e.t > prev && e.t <= next);
+    },
+    pump(f) {
+      const next = Number(f.t) || 0;
+      const from = f.wrapped ? -1 : lastT;
+      lastT = next;
+      const evs = audio.eventsBetween(from, next);
+      fired += evs.length;
+      if (ctx) for (const e of evs) voices[e.name](ctx, master, ctx.currentTime + 0.02);
+      return evs.length;
+    },
+  };
+
+  // --- the HUD's text, also pure functions. The label rule is the plan's Review
+  // Focus 5 in one place: beatAt is null through the hold, and null is not a missing
+  // label - it is the hold, so it has its own text.
+  const hud = {
+    label(f) {
+      if (!f) return "";
+      const b = f.beat || clock.beatAt(f.t);
+      if (b) return b.label;
+      return f.t >= clock.BEAT_END ? clock.HOLD_LABEL : "";
+    },
+    // opts: { source, framing, framings, paused } - which camera made the frame and
+    // whether a tool is holding it still. The meta line is what the review shots read.
+    meta(f, opts) {
+      return `${f.t.toFixed(2)} s of ${clock.SHOW_LEN}`
+        + `  ${(f.beat && f.beat.id) || "hold"}`
+        + (opts.source === "take" ? "  take" : `  framing ${opts.framing}/${opts.framings}`)
+        + (opts.paused ? "  paused" : "");
+    },
+    stat(o) { return `${o.points} splats  ${o.voxels} vox  fps ${o.fps.toFixed(0)}`; },
+    text(f, opts) {
+      return { beat: hud.label(f), meta: hud.meta(f, opts), stat: hud.stat(opts) };
+    },
+  };
+
+  return { audio, hud };
+})());
