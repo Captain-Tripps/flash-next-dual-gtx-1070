@@ -374,18 +374,20 @@ wiring moves ahead of the content tasks so Tasks 7-12 land visibly.
 **Files:** Create: `README.md`, `tools/render-gate.mjs`; modify `01-shell.txt` (stats line).
 - Test: the render-gate run itself (pixel end state per framing).
 
-- [ ] Step 1: write `README.md` (what it is, how to open it, the beat list, the clock
+- [x] Step 1: write `README.md` (what it is, how to open it, the beat list, the clock
   values, provenance note pointing at DESIGN.md and the loss record).
-- [ ] Step 2: write `tools/render-gate.mjs` (copy the dragon-rider gate pattern): load
+- [x] Step 2: write `tools/render-gate.mjs` (copy the dragon-rider gate pattern): load
   `index.html`, seek to 5 named framings via `clock.seekTo`, assert per view: voxel count
   > 0, palette gate clean, blast-frame pixels contain the shatter id, dusk sky colour match,
   envelope never breached (camera witness screenshot must not be a full-bleed glass fill).
-- [ ] Step 3: run `node tools/render-gate.mjs index.html`; expect PASS, fix any failure.
-- [ ] Step 4: run `node tools/ui-verify.mjs`; expect the end state after the full 735 s run:
+  Six named views instead of five: the fx frames must sit at lobby level, because framing 2
+  aims past the atrium break (R22).
+- [x] Step 3: run `node tools/render-gate.mjs index.html`; expect PASS, fix any failure.
+- [x] Step 4: run `node tools/ui-verify.mjs`; expect the end state after the full 735 s run:
   `fade.black === 1`, HUD hold text, one wrap, vox totals = ground+tower totals.
-- [ ] Step 5: full suite: `node scripts/build.mjs --check && node verify/unit.mjs &&
+- [x] Step 5: full suite: `node scripts/build.mjs --check && node verify/unit.mjs &&
   node tools/render-gate.mjs index.html && node tools/ui-verify.mjs`; expect PASS.
-- [ ] Step 6: commit "nakatomi-plaza: full show render-gated"; push; open PR to `main`
+- [x] Step 6: commit "nakatomi-plaza: full show render-gated"; push; open PR to `main`
   (Jon merges - no merges by agents).
 
 ---

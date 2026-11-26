@@ -113,6 +113,18 @@ before that cut. Timings are derived with `seekTo(id)`, never from a start colum
   side - a page-side audio that only ever got read from the Node side is the failure this
   catches. The HUD's label rule (null beat → `HOLD_LABEL`) lives in this fragment and the
   scene's `label()` defers to it, so the page's label and the HUD's cannot drift apart.
+- **R22 - the render gate proves pixels, not counters.** `tools/render-gate.mjs` freezes six
+  named views with `setFraming`/`setPose` and reads the back buffer, because the full-take run
+  can not say whether a burst actually landed on the screen. Three consequences worth their
+  measurement: the dusk-sky bar compares the bytes the clear colour *arrives* as (`#0a0c12`
+  unchanged - no dither, no encode on the sky rows) rather than the constant the page starts
+  from; the shatter overlay is counted with a strict near-white signature against a same-lens
+  baseline frame (`pale` 0 at t=359 against 50 at 365 and 46 at 437), because the loose cool
+  signature runs ~700 in a quiet lobby frame - AA on lit glass reads cool too; and the two fx
+  views sit at lobby level rather than the mid-shaft framing, because the break lives at
+  storey bands 5..8 on the atrium face (`S.z0`) and framing 2 aims past it (measured `pale` 4
+  both inside and outside the window). The gate also asserts that no witness frame is a
+  full-bleed content fill: R12's breach would be exactly that.
 - **Fade completes one grace-frame early.** `fade.black` reaches exactly 1 at
   `FADE_START + FADE_LEN - dtClamp`, inside the fade window, so the full-black frame is
   rendered before `SHOW_LEN` rather at its boundary; the loop cut then waits for the grace
