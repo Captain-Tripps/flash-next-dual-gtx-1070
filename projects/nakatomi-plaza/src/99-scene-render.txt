@@ -327,6 +327,8 @@ Object.assign(NAKATOMIC, (() => {
         Math.max(600, envelope.radius * 8),
       );
       scene.setFraming(1);
+      // rigReady comes first: without it the rebuild below is a no-op, because
+      // rebuild's own guard refuses to read a buffer before the rig exists.
       rigReady = true;
       scene.rebuild();
       hud = {
@@ -336,10 +338,9 @@ Object.assign(NAKATOMIC, (() => {
         fade: document.getElementById("fade"),
       };
       bindInput(gl.domElement);
-      rigReady = true;
       scene.running = true;
       loop = (now) => {
-        rafId = requestAnimationFrame(loop);
+        requestAnimationFrame(loop);
         const dt = lastNow === null ? clock.dtClamp : (now - lastNow) / 1000;
         lastNow = now;
         scene.step(dt);
@@ -347,7 +348,7 @@ Object.assign(NAKATOMIC, (() => {
         const rate = 1 / Math.max(dt, 1e-4);
         scene.stats.fps = scene.stats.fps ? scene.stats.fps * 0.9 + rate * 0.1 : rate;
       };
-      rafId = requestAnimationFrame(loop);
+      requestAnimationFrame(loop);
       return scene;
     },
   };
@@ -362,7 +363,6 @@ Object.assign(NAKATOMIC, (() => {
     t: clock.t, beat: clock.beatAt(clock.t), black: clock.fade.black, wrapped: false,
   });
   let frame = frameFromClock();
-  let rafId = 0;
   let lastNow = null;
   let loop = null;
 

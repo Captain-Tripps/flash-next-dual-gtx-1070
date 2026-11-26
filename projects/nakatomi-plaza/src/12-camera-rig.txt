@@ -35,7 +35,6 @@ Object.assign(NAKATOMIC, (() => {
   const clock = NAKATOMIC.clock;
   const envelope = NAKATOMIC.envelope;
   const convoy = NAKATOMIC.convoy;
-  const plan = NAKATOMIC._plan;
   const S = NAKATOMIC.tower.sections;
 
   const FOV_MIN = 35;
@@ -301,14 +300,25 @@ Object.assign(NAKATOMIC, (() => {
     };
   };
 
+  // Which beat a key belongs to. The clock's own window is the answer, so the
+  // published id can not drift from what beatAt reports. A key that falls in the
+  // hold window (there is none today) belongs to the take's last beat, whose
+  // final key is the loop home.
+  const beatOf = (k) => {
+    const b = clock.beatAt(k.t);
+    return b ? b.id : clock.order[clock.order.length - 1];
+  };
+
   // A beat's own keys, as the slice of the master track it owns.
   const keysFor = (id) => keysOf(id).map((k) => ({
     t: k.t, pos: [k.pos[0], k.pos[1], k.pos[2]], target: [k.target[0], k.target[1], k.target[2]], fov: k.fov,
   }));
 
-  // The pull-back for the fed beats rides Task 11's route: the lens sits west of
-  // the lane and above it, looking down it. The route's own waypoints are the
-  // reference, so the shot matches the geometry the convoy drove.
+  // The witness layer for the fed beats: the pull-back is shot west of the lane
+  // and above it, looking down the boulevard the batch stands on. These keys are
+  // not the take - the take's fed legs are authored above - but the arc is the
+  // convoy route's own waypoints, so the shot matches the geometry that was laid
+  // down at t = 0 (R19). Seven samples across the beat, one every frac of 1/6.
   const routeKeys = (id) => {
     const t0 = clock.start(id);
     const dur = clock.dur(id);
@@ -333,7 +343,15 @@ Object.assign(NAKATOMIC, (() => {
   return {
     rig: {
       keys: keysFor,
-      sample: (id, t) => sampleAt(t),
+      // The beat argument is not decoration: it picks the slice, and the slice's
+      // ends are what a caller outside the beat's own window clamps to.
+      sample: (id, t) => {
+        const t0 = clock.start(id);
+        const t1 = t0 + clock.dur(id);
+        const p = sampleAt(Math.min(Math.max(t, t0), t1));
+        return { ...p, t };
+      },
+      allKeys: () => keys.map((k) => ({ t: k.t, id: beatOf(k) })),
       all: () => keys.map((k) => ({
         t: k.t, pos: [k.pos[0], k.pos[1], k.pos[2]], target: [k.target[0], k.target[1], k.target[2]], fov: k.fov,
       })),

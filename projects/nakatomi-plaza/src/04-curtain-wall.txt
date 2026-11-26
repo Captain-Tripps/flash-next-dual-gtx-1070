@@ -56,13 +56,14 @@ Object.assign(NAKATOMIC, (() => {
   };
 
   // The dusk rule. The arcade and the atrium glow warm; the tower above is dark
-  // at dusk except the odd office left on after work.
+  // at dusk except the odd office left on after work. The podium's own ring is
+  // capped one row under its deck slab (see `ring`), so every podium cell this
+  // facade draws is arcade level - the first line below is the podium's rule.
   const ATRIUM_Y = 9;
   const isLit = (c) => {
     const f = c.f;
     if (c.y <= S.podium.y1 - 1) return true;                                   // lobby, arcade
     if (f === S.lower && c.z === S.lower.z0 && c.y <= ATRIUM_Y) return true;   // atrium face
-    if (f === S.podium) return false;
     if (c.y < 13) return false;                                                // dark band above the atrium
     return (c.x - f.x0 + (c.z - f.z0) + c.y) % 8 === 0;                        // a few offices on
   };

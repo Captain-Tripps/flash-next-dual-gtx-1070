@@ -78,7 +78,7 @@ module, and no fragment parses on its own.
 cd projects/nakatomi-plaza
 node scripts/build.mjs            # join src/NN-*.txt -> index.html
 node scripts/build.mjs --check    # extract the module body and parse-check it
-node verify/unit.mjs              # 54 vm-sandbox tests against the built page
+node verify/unit.mjs              # 56 vm-sandbox tests against the built page
 node tools/render-gate.mjs index.html   # pixel end-state gates, six named views
 node tools/ui-verify.mjs          # drive the full show, assert end state
 ```
@@ -109,7 +109,7 @@ git-ignored, so they are artefacts, not history.
 | `verify/unit.mjs` | one suite, `vm` sandbox, THREE stubbed |
 | `tools/ui-verify.mjs` | live browser: drive the show, assert end state |
 | `tools/render-gate.mjs` | live browser: pixel gates per named view |
-| `DESIGN.md` | spec, clock, batch numbers, rulings R1-R22 |
+| `DESIGN.md` | spec, clock, batch numbers, rulings R1-R23 |
 | `docs/` | plan and loss record (below) |
 
 ## Provenance
@@ -120,5 +120,5 @@ is `docs/loss-record.md`. The v1 beat list was unrecoverable, so the table
 above is a v2 reconstruction - it keeps the v1 clock constants unchanged
 (`BEAT_END` 715, `SHOW_LEN` 735, `FADE_START` 729, storm dur 95, blast at 360)
 and the deltas are reviewable. The v1 rulings carried into v2, and everything
-decided since - R12 through R22 - is recorded in `DESIGN.md` §3 with the
+decided since - R12 through R23 - is recorded in `DESIGN.md` §3 with the
 reasoning. That spec is the contract; this README is the tour.

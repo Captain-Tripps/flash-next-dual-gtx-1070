@@ -125,6 +125,20 @@ before that cut. Timings are derived with `seekTo(id)`, never from a start colum
   storey bands 5..8 on the atrium face (`S.z0`) and framing 2 aims past it (measured `pale` 4
   both inside and outside the window). The gate also asserts that no witness frame is a
   full-bleed content fill: R12's breach would be exactly that.
+- **R23 - a published member only earns its keep if a test names it.** The rig's §5 row was
+  the only contract row that nothing checked: `unit.mjs` asked whether `rig.keys` and
+  `rig.sample` were functions, and the row went on describing `allKeys`, the `id` argument
+  of `sample`, and three `routeKeys` waypoints that no code existed. The surface is now
+  pinned member for member the way the scene's row is, which is how the stale claims were
+  found: `sample(id, t)` ignored its `id` and could pull a pose from the next beat early,
+  `allKeys` was never published, and `routeKeys` is seven arc samples of `convoy.routeAt`
+  across one beat, not three waypoints and not a leg the take drives. Two rules came out of
+  the fix, not the patch: a §5 row states what the code does, so when a row describes an API
+  the code never built the row moves, not the implementation to match paper; and the loop
+  home is a **pose**, not a time - the take's last key is its first key pose for pose at the
+  end of `drestle` (t 713.2), and `push()`'s own gate proves the final pose equals the
+  opening pose. Adding a key at `BEAT_END` would have made the lens dolly home in zero time
+  and given the sampled-segment gates a leg nobody measured.
 - **Fade completes one grace-frame early.** `fade.black` reaches exactly 1 at
   `FADE_START + FADE_LEN - dtClamp`, inside the fade window, so the full-black frame is
   rendered before `SHOW_LEN` rather at its boundary; the loop cut then waits for the grace
@@ -200,19 +214,23 @@ bounding-sphere radius about the envelope centre.
   hold), `restart()`, and the getter `t`. `tick(dt)` returns
   `{ t, beat, black, wrapped }` so the render loop reads the frame from one object.
   The 24 rows are Appendix B verbatim and one test compares them whole.
-- `NAKATOMIC.rig` - the single outside take (R20): `all()` (the master list of
-  `[ frac, pos, target, fov ]` per beat, in beat order), `allKeys` (one flat
-  `[{ t, id }]` array over absolute show times, strictly increasing, with the first key
-  repeated at `BEAT_END` as the loop home), `keys(id)` (that beat's slice, times absolute),
-  `sample(id, t)` (linear interpolation along the master, clamped at the slice ends), and
-  `routeKeys` (the three `convoy.routeAt` waypoints the boulevard pull-back walks, so the
-  response reads as something the lens travels past). Every leg is the pair that starts at
-  that key's `t`, so a segment's start is exactly the previous key's pose and the take
-  never cuts. Build-time gates: the keys are strictly increasing, fov stays in 35..60, the
-  last key is the first key, and every key endpoint passes `envelope.isOutside` - the unit
-  tests and the live driver check the sampled segments, which is the stronger pair (R20).
-  Consumes `clock.start`/`clock.dur` for every absolute time and `ground().streetY`/`street`
-  for the plaza-level legs, so no key carries a hand-kept time.
+- `NAKATOMIC.rig` - the single outside take (R20): `all()` (the flat master key list as
+  `{ t, pos, target, fov }`, absolute show times, in beat order - the `[ frac, pos,
+  target, fov ]` form is the internal row `beat()` takes, not what this returns),
+  `allKeys` (the same track as `[{ t, id }]`, each key stamped with the beat the clock
+  puts it in, strictly increasing), `keys(id)` (that beat's slice, times absolute),
+  `sample(id, t)` (linear interpolation along the master, clamped to the named beat's own
+  window, so a time past a beat can not pull that beat's exit pose from the next one),
+  and `routeKeys(id)` (seven arc samples of `convoy.routeAt` spread across one beat: the
+  fed beats' witness layer, the same route the batch stands on at t = 0 - not a leg the
+  take drives (R19)). Every leg is the pair that starts at that key's `t`, so a
+  segment's start is exactly the previous key's pose and the take never cuts. Build-time
+  gates: the keys are strictly increasing, fov stays in 35..60, the last key is the first
+  key pose for pose, and every key endpoint passes `envelope.isOutside` - the unit tests
+  and the live driver check the sampled segments, which is the stronger pair (R20). Every
+  absolute time comes from `clock.start`/`clock.dur`, so no key carries a hand-kept time.
+  `unit.mjs` pins this whole surface against this row, member for member, the same way
+  the scene's row is pinned.
 - `NAKATOMIC.splats(buffer)` - the page-side twin of `tools/jsp.mjs`: `{ points, colors }`,
   one splat per voxel, in run order. Asserted against the Node tool, so both sides match.
 - `NAKATOMIC.lobbyWorld()` - the arcade band, cached once, with its own occupancy map:
@@ -234,7 +252,9 @@ bounding-sphere radius about the envelope centre.
   own lit id.
 - `NAKATOMIC.roofWorld()` - the roof batch, cached once: exactly `{ voxels, batchVox,
   countVox, ids, stackCells, runCells, heloCells, lightCells, stackCount, runCount,
-  heloCount, lightCount, stackMinY, heloMinY, heloTopY, hover }`. Above the deck the
+  heloCount, lightCount, stackMinY, heloMinY, heloTopY, hover, roofline }`. `roofline`
+  echoes the raw geometry the batch was drawn from - the stacks, the pad, the disc and the
+  winch - beside the cell lists the tests walk. Above the deck the
   envelope is a floor, not a wall - the claim guard refuses anything at or below
   `roofDeck`, and the tests pin every cell against `envelope.isOutside`, the upper
   shaft bounds, and the penthouse box. The stacks are the glass the tile helo pulled

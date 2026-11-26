@@ -1318,6 +1318,69 @@ describe("camera rig", () => {
     }
   });
 
+  // DESIGN S5 names the rig's whole public surface. The scene's own surface is
+  // pinned key-for-key the same way; this is the rig's counterpart, and without it
+  // a §5 row that names a member the fragment never publishes reads green anyway.
+  test("the rig publishes exactly the surface DESIGN S5 names", () => {
+    build();
+    const { N } = boot();
+    const surface = "all allKeys fovRange glassLineKey keys routeKeys sample window".split(" ");
+    for (const k of surface)
+      assert.ok(k in N.rig, `rig is missing the published member ${k}`);
+    assert.deepStrictEqual(Object.keys(N.rig).sort(), [...surface].sort(),
+      "the rig publishes no member DESIGN S5 does not list");
+    assert.strictEqual(N.rig.window.join(","), "0,715",
+      "rig window is the take's own beat span");
+    // allKeys is the flat [t, id] view of the same track: one take, one list, and
+    // every key knows the beat it belongs to.
+    const flat = N.rig.allKeys();
+    assert.strictEqual(flat.length, N.rig.all().length, "allKeys and all() cover the same keys");
+    for (const k of flat) {
+      const b = N.clock.beatAt(k.t);
+      assert.ok(b, `allKeys has a key at t=${k.t} with no beat`);
+      assert.strictEqual(b.id, k.id, `allKeys says ${k.id} at t=${k.t}, the clock says ${b.id}`);
+    }
+    // The loop home: the take's last key is its first key, pose for pose, which is
+    // what makes the wrap a hold rather than a jump (R20).
+    const track = N.rig.all();
+    const home = track[0].pos.join(",");
+    assert.strictEqual(track[track.length - 1].pos.join(","), home,
+      "the take does not end on its opening pose");
+    assert.strictEqual(track[track.length - 1].target.join(","), track[0].target.join(","),
+      "the take does not end on its opening target");
+    assert.strictEqual(N.rig.keys("drestle").at(-1).pos.join(","), home,
+      "drestle's last key is the boulevard pose");
+  });
+
+  // R20: the published sample is the beat's own slice, so a time outside that
+  // slice's window cannot pull a pose from the next beat early.
+  test("sample clamps to the named beat's own window", () => {
+    build();
+    const { N } = boot();
+    // The page's own pose objects come from the page's realm, so they are compared
+    // as their xyz string, not object to object.
+    const xyz = (p) => `${p.x},${p.y},${p.z}`;
+    for (const id of N.clock.order) {
+      const t0 = N.clock.start(id);
+      const t1 = t0 + N.clock.dur(id);
+      for (const t of [t0 - 5, t0 - 1]) {
+        if (t < 0) continue;
+        assert.strictEqual(xyz(N.rig.sample(id, t).pos), xyz(N.rig.sample(id, t0).pos),
+          `sample("${id}", ${t}) runs ahead of the beat's entry pose`);
+      }
+      const lastKey = N.rig.keys(id).at(-1);
+      const home = `${lastKey.pos[0]},${lastKey.pos[1]},${lastKey.pos[2]}`;
+      assert.strictEqual(N.rig.sample(id, lastKey.t).t, lastKey.t,
+        `sample("${id}", at its final key) reports a different time`);
+      assert.strictEqual(xyz(N.rig.sample(id, lastKey.t).pos), home,
+        `sample("${id}", at its final key) does not read that key`);
+      const end = N.rig.sample(id, t1 + 5);
+      assert.strictEqual(end.t, t1 + 5, "sample must keep reporting the time it was given");
+      assert.strictEqual(xyz(end.pos), home,
+        `sample("${id}", past the end) leaves the beat's final key pose`);
+    }
+  });
+
   test("the glass-line key is 3.5 cells off the curtain wall and still outside", () => {
     build();
     const { N } = boot();
