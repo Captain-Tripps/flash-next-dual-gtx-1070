@@ -319,9 +319,21 @@ wiring moves ahead of the content tasks so Tasks 7-12 land visibly.
 **Files:** Create: `src/11-convoy-feds.txt`.
 - Test: "conv route follows boulevard, never inside envelope".
 
-- [ ] Steps 1-5: failing test (the convoy path sampled 20 points deep - every one either
+- [x] Steps 1-5: failing test (the convoy path sampled 20 points deep - every one either
   `isOnGround` or outside the envelope); implement the convoy path (boulevard, driveway
   loop, black-and-wipe position); PASS; commit.
+
+  What shipped differs in one respect and one typo: the batch is **staged once, statically**
+  (R16), so the convoy is world geometry that stands from t=0 and the `fedConvoy`/`wallOfCars`
+  windows carry camera interest and HUD labels rather than new geometry. The plan's
+  "black-and-wipe" is the *lead car* - the black-and-white that took the ramp into the sunken
+  driveway under the bridge, parked at `x -6..-3, z -19` two bands below street level. Route is
+  17 axis-aligned waypoints, which Task 12's pull-back consumes directly (a diagonal leg once
+  cut the skirt's corner at `-20,0,-18`). 147 cells, 90 body / 48 band / 9 light-bar parts, 9
+  FCPD cruisers in two rows, 3 fed SUVs, 13 cars, 18 light-bar cells (10 red / 8 blue). Screen
+  proof is the two lightbar hexes themselves - the only saturated red and saturated blue in the
+  dusk palette - 170 responder-light pixels from two legal witness lenses, `stats.fx` 0 through
+  the fed beats. Commit: "police convoy + fed arrival".
 
 ### Task 12: Camera rig - continuous take, outside only
 

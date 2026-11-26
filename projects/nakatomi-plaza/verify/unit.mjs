@@ -1118,6 +1118,159 @@ describe("blast + storm", () => {
   });
 });
 
+// --- Task 11: police convoy + fed arrival ---------------------------------
+// The convoy is the other half of the response: the FCPD cruisers that make a wall
+// in front of the tower, the Feds' black SUVs along the boulevard, and the lead car
+// that took the ramp down into the sunken driveway under the bridge. Like the
+// dressing batch (Task 8) it is entirely outside the envelope, and unlike Task 8 it
+// has a route as well as parked cells - the boulevard approach, the driveway loop,
+// the black-and-white's position - because Task 12's camera pulls back along it.
+describe("convoy + feds", () => {
+  // Expanded into a cell set straight from the batches, so the test never trusts a
+  // guessed key: the merged buffer is the truth the page renders.
+  const cellSet = (runs) => {
+    const s = new Set();
+    for (let i = 0; i < runs.length; i++) {
+      const r = runs[i];
+      for (let k = 0; k < r.len; k++) s.add(`${r.x + k}|${r.y}|${r.z}`);
+    }
+    return s;
+  };
+
+  test("the convoy belongs to the fed beats, from the boulevard to the wall of cars", () => {
+    build();
+    const { N } = boot();
+    const c = N.convoy;
+    assert.strictEqual(c.window[0], N.clock.start("fedConvoy"),
+      "the convoy does not open on the fed convoy beat");
+    assert.strictEqual(c.window[1], N.clock.start("wallOfCars") + N.clock.dur("wallOfCars"),
+      "the convoy does not run to the end of the wall-of-cars beat");
+    assert.ok(c.window[0] < N.clock.BEAT_END && c.window[1] <= N.clock.BEAT_END,
+      "the convoy window is not inside the beat timeline");
+    assert.ok(c.route.length >= 4, "the route needs waypoints to be a route");
+  });
+
+  test("the route follows the boulevard, dips into the sunken driveway, and never enters the tower", () => {
+    build();
+    const { N } = boot();
+    const c = N.convoy;
+    // The plan's own probe: 20 points deep along the path, every one on the block and
+    // outside the tower's shell. A route that clips the podium is a route the show's
+    // camera could never follow.
+    const seen = [];
+    for (let i = 0; i <= 20; i++) {
+      const p = c.routeAt(i / 20);
+      seen.push(p);
+      assert.strictEqual(N.isOnGround(p.x, p.z), true,
+        `route point ${p.x},${p.z} is off the block - the convoy drives through the city`);
+      assert.strictEqual(N.envelope.isOutside({ x: p.x, y: p.y, z: p.z }), true,
+        `route point ${p.x},${p.y},${p.z} is inside the envelope - the convoy drives through the tower`);
+    }
+    // The approach comes in at the block's edge, and the route ends at the parked
+    // wall - the last waypoint is the lane the convoy stops in, just off the front
+    // of the cruisers it stages there.
+    const first = c.routeAt(0), last = c.routeAt(1);
+    assert.strictEqual(first.z, N._plan.BLOCK.z0, "the convoy does not arrive at the block's edge");
+    const stage = c.stage;
+    assert.strictEqual(last.z, stage.z1 + 1,
+      "the route does not stop in the lane in front of the wall of cars");
+    assert.ok(last.x >= stage.x0 && last.x <= stage.x1, "the route stops outside the staging band");
+    const inDitch = (p) => {
+      const d = N._plan.DITCH_RECT;
+      return p.x >= d.x0 && p.x <= d.x1 && p.z >= d.z0 && p.z <= d.z1 && p.y < N._plan.STREET;
+    };
+    assert.ok(seen.some(inDitch), "the route never takes the driveway loop down the ramp");
+    assert.ok(seen.some((p) => p.y === N._plan.STREET), "the route never runs along the street level");
+    // the kerb strips are the boulevard's edge: the approach lane must stay inside them
+    const kerbIn = (p) => N._plan.KERB_X.some((k) => p.x >= k && p.x <= k + 1);
+    assert.strictEqual(seen.filter(kerbIn).length, 0, "the convoy drives on the boulevard kerbs");
+    // and the staging band it stops at is itself clear of the building and the pool
+    assert.ok(stage.z1 < N._plan.POOL.z0, "the staging band sits behind the reflecting pool");
+    for (const z of [stage.z0, stage.z1])
+      assert.strictEqual(N.envelope.isOutside({ x: 0, y: N._plan.STREET, z: z }), true,
+        `the staging band at z=${z} is inside the envelope - the wall of cars would be inside the tower`);
+  });
+
+  test("staged vehicles stand on the block, clear of the tower, and re-claim nobody's cells", () => {
+    build();
+    const { N } = boot();
+    const w = N.convoyWorld();
+    const all = []
+      .concat(w.cruiserCells.map((c) => ({ ...c })), w.fedCells.map((c) => ({ ...c })),
+        w.drivewayCells.map((c) => ({ ...c })));
+    assert.ok(all.length > 0, "the convoy has no staged vehicles");
+    const groundCells = cellSet(N.ground().voxels.map((r) => ({ x: r.x, y: r.y, z: r.z, len: r.len })));
+    const dressingCells = cellSet(N.plazaDressing().voxels.map((r) => ({ x: r.x, y: r.y, z: r.z, len: r.len })));
+    const glassLine = new Set(N.glass.cells.map((c) => `${c.x},${c.y},${c.z}`));
+    const ditch = N._plan.DITCH_RECT, floor = N._plan.DITCH;
+    for (const c of all) {
+      const k = `${c.x}|${c.y}|${c.z}`;
+      assert.strictEqual(N.envelope.isOutside({ x: c.x, y: c.y, z: c.z }), true,
+        `convoy cell ${k} is inside the envelope - the camera rules forbid it`);
+      assert.strictEqual(N.isOnGround(c.x, c.z), true, `convoy cell ${k} is off the block`);
+      assert.ok(c.y > floor, `convoy cell ${k} is under the sunken driveway floor`);
+      assert.strictEqual(groundCells.has(k), false, `convoy cell ${k} re-claims a ground cell`);
+      assert.strictEqual(dressingCells.has(k), false, `convoy cell ${k} re-claims a dressing cell`);
+      assert.strictEqual(glassLine.has(k), false, `convoy cell ${k} sits on the glass line`);
+      // a vehicle in the sunken cut must be inside that cut, not anywhere on the block
+      const inCut = c.x >= ditch.x0 && c.x <= ditch.x1 && c.z >= ditch.z0 && c.z <= ditch.z1;
+      if (c.y < N._plan.STREET)
+        assert.strictEqual(inCut, true, `convoy cell ${k} floats under the paving, outside the driveway`);
+    }
+  });
+
+  test("the black-and-white wears two paint ids, the feds their own, and every cruiser a lightbar", () => {
+    build();
+    const { N } = boot();
+    const w = N.convoyWorld();
+    assert.ok(w.cruiserCount >= 3 && w.fedCount >= 2, "the response needs a wall of cars and Feds");
+    // one cruiser has both halves of the classic two-tone paint
+    const paintIds = new Set(w.cruiserCells.map((c) => c.id));
+    assert.ok(paintIds.has(w.ids.cruiser) && paintIds.has(w.ids.cruiserBand),
+      "no cruiser wears the black-and-white's two-tone paint");
+    for (const c of w.fedCells)
+      assert.ok(c.id === w.ids.fed || c.id === w.ids.fedGlass,
+        `fed cell ${c.x},${c.y},${c.z} wears a cruiser id - the Feds are their own cars`);
+    // the responders' lights are what the beat reads as: red and blue, up above the cabin
+    const bars = w.lightCells.map((c) => ({ ...c }));
+    assert.ok(bars.length > 0, "no responder lights on the cruisers");
+    const barIds = new Set(bars.map((c) => c.id));
+    assert.strictEqual(barIds.has(w.ids.lightRed) && barIds.has(w.ids.lightBlue), true,
+      "the lightbars are not both responder colours");
+    for (const c of bars) {
+      assert.ok(c.y > N._plan.STREET, `lightbar cell ${c.x},${c.y},${c.z} is at street level`);
+      assert.ok(c.y <= N._plan.STREET + 2, `lightbar cell ${c.x},${c.y},${c.z} is taller than a car`);
+    }
+    // red and blue are separate palette entries, not one glowing blob
+    assert.notStrictEqual(w.ids.lightRed, w.ids.lightBlue, "the two responder colours are one id");
+  });
+
+  test("the convoy batch counts each cell exactly once, and caches itself", () => {
+    build();
+    const { N } = boot();
+    const w = N.convoyWorld();
+    // The batch number, pinned the way the ground's 9406 and the dressing's 138 are:
+    // 9 cruisers at 10 cells each, 3 Feds at 16, the lead car with its marker.
+    assert.strictEqual(w.countVox, 147, "the locked convoy batch number");
+    const parts = w.cruiserCells.length + w.fedCells.length + w.drivewayCells.length;
+    assert.strictEqual(parts, 90 + 48 + 9, "the convoy's parts breakdown is not the one that was staged");
+    assert.strictEqual(w.countVox, parts,
+      `occupancy holds ${w.countVox} cells but the parts add up to ${parts} - a cell is claimed twice`);
+    assert.strictEqual(w.carCount, w.cruiserCount + w.fedCount + w.drivewayCount,
+      "the car count is not the sum of the three kinds");
+    let emissions = 0;
+    const orig = N.vox.addRun;
+    N.vox.addRun = (...a) => { emissions++; return orig(...a); };
+    const runs = N.vox.runs().length, voxCount = N.vox.count;
+    const second = N.convoyWorld();
+    N.vox.addRun = orig;
+    assert.strictEqual(emissions, 0, "the second call must not re-emit into the shared buffer");
+    assert.strictEqual(second, w, "the cached batch is the same object");
+    assert.strictEqual(N.vox.runs().length, runs, "run count unchanged");
+    assert.strictEqual(N.vox.count, voxCount, "voxel count unchanged");
+  });
+});
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   await run(process.argv[2] || null);
 }

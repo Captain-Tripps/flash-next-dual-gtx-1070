@@ -46,6 +46,10 @@ const BOX_TOP_MARGIN = 2;      // framing 1 only: sky rows above the roofline
 // lens sees without it. Set well below what a real frame measures, so it catches
 // a missing overlay without tracking the last pixel.
 const MIN_OVERLAY_PIXELS = 8;
+// The convoy's floor: pixels of the two responder-light hexes, counted inside the
+// fed beats. Set below what a real frame measures and above what a plaza with no
+// response measures, so the bar catches a batch that never reached the cloud.
+const MIN_LIGHT_PIXELS = 12;
 // Bars sit below what a real frame measures, not guesses: framing 1 was 21.7% content
 // (towerFrac), a content box 94% of the frame height starting at row 3, and 41 warm
 // pixels; framings 2..4 measured 0.14-0.26 towerFrac with 38-74 warm. Retune these from
@@ -56,6 +60,13 @@ const FRAMINGS_SHOTS = [
   [1, "storm", "boulevard-wide"],
   [2, "blast", "tower-close"],
   [3, "storm", "shatter-lobby"],
+];
+// A review frame of the response, and the same witness lens the convoy gate probes
+// with: the four fixed framings orbit the tower and the wall of cruisers stands
+// behind the massing, so this beat needs its own legal pose until Task 12's rig
+// carries one. Same pose as the probe, so the screenshot and the numbers match.
+const POSE_SHOTS = [
+  ["fedConvoy", "convoy-wall", { x: -14, y: 12, z: 46 }, { x: 0, y: 2, z: 21 }, 45],
 ];
 
 run(`agent-browser open ${JSON.stringify(url)}`);
@@ -122,7 +133,7 @@ const sceneReport = evalJs(`(() => {
     const g2 = c.getContext("2d", { willReadFrequently: true });
     g2.drawImage(canvas, 0, 0, sw, sh);
     const d = g2.getImageData(0, 0, sw, sh).data;
-    let tower = 0, warm = 0, cool = 0;
+    let tower = 0, warm = 0, cool = 0, red = 0, blue = 0;
     let r0 = sh, r1 = -1, c0 = sw, c1 = -1;
     const total = sw * sh;
     // One linear index over the scan, and the row/column derived from it. The box is
@@ -146,6 +157,13 @@ const sceneReport = evalJs(`(() => {
       // A bright, cool pixel: the only thing in the show that pale and cold - the
       // dusk palette is warm amber and deep blue-grey, so this is the shatter id.
       if (d[i] > 90 && d[i + 1] > 100 && d[i + 2] > 120 && d[i + 2] >= d[i] - 6) cool++;
+      // Responder light: the convoy's lightbars are the only saturated red and the
+      // only saturated blue in the palette. Both signatures are set so nothing else
+      // in the dusk scene can match - the fountain's #7fb2d8 spray is pale blue, not
+      // saturated, and the lobby glow is amber. The bars stay below what a real frame
+      // measures, above what a scene without the convoy measures (which is 0).
+      if (d[i] > 110 && d[i + 1] < 90 && d[i + 2] < 90) red++;
+      if (d[i] < 140 && d[i + 2] > 150 && d[i + 2] > d[i] + 60 && d[i + 2] > d[i + 1] + 40) blue++;
     }
     // The content bounding box, in scan rows/columns: what the framing actually
     // contains. A wide shot whose content touches the top row is a tower clipped at
@@ -155,7 +173,7 @@ const sceneReport = evalJs(`(() => {
     const boxH = r1 >= r0 ? (r1 - r0 + 1) / sh : 0;
     const boxW = c1 >= c0 ? (c1 - c0 + 1) / sw : 0;
     return {
-      tower, warm, cool, total, towerFrac: tower / total, warmFrac: warm / total,
+      tower, warm, cool, red, blue, total, towerFrac: tower / total, warmFrac: warm / total,
       boxH, boxW, boxTop: r0, boxBottom: r1, boxLeft: c0, boxRight: c1,
     };
   };
@@ -214,6 +232,50 @@ const sceneReport = evalJs(`(() => {
     };
   })();
 
+  const convoy = (function probeConvoy() {
+    // Task 11's end state, read at the beat it is staged for. The batch is static
+    // world geometry (R16), so there is no frame delta to measure: the proof has to
+    // be the responders' own paint. The two lightbar hexes are the only saturated
+    // red and the only saturated blue in the dusk palette, so a pixel that reads
+    // that way is a lightbar the lens actually sees.
+    //
+    // The four fixed framings orbit the *tower*, so the wall of cruisers - which
+    // stands in the forecourt, along the north face of the podium - is hidden behind
+    // the massing in three of them. What Task 12 will do for these beats is a
+    // pull-back along the route, and that is what this probe does today: a legal
+    // witness lens (envelope-checked, R12/R13) out on the plaza side, looking down
+    // the row. If the wall reaches pixels from here, the batch is in the cloud.
+    N.clock.seekTo("fedConvoy");
+    N.clock.tick(10);                                   // inside the fedConvoy beat
+    const stage = N.convoy.stage;
+    const at = (f) => N.convoy.routeAt(f);
+    const poses = [];
+    const shot = (name, pos, target, fov) => {
+      N.scene.setPose({ pos, target, fov });
+      const fr = N.scene.step(0);
+      const px = look(240, 135);
+      const cam = N.scene.camera.position;
+      poses.push({
+        name, t: fr.t, beat: fr.beat && fr.beat.id,
+        outside: N.envelope.isOutside({ x: cam.x, y: cam.y, z: cam.z }),
+        red: px.red, blue: px.blue, lights: px.red + px.blue, fx: N.scene.stats.fx,
+      });
+    };
+    // The boulevard approach, straight out from the wall's west end, and the pull
+    // back the route's own far end gives: a lens high on the plaza, looking down the
+    // two rows from beyond the pool.
+    shot("wall from the plaza", { x: -14, y: 12, z: 46 }, { x: 0, y: 2, z: 21 }, 45);
+    shot("wall from the route's end", { x: at(1).x - 6, y: 18, z: stage.z1 + 12 },
+      { x: 0, y: 1, z: (stage.z0 + stage.z1) / 2 }, 50);
+    return {
+      poses,
+      lights: poses.reduce((s, p) => s + p.lights, 0),
+      cells: N.convoyWorld().lightBarCount,
+      cars: N.convoyWorld().carCount,
+      window: N.convoy.window,
+    };
+  })();
+
   // The fade has to track clock.fade.black, in both directions, on the element that
   // actually does the fading. Both the inline value the page wrote (exact) and the
   // value the browser computes for it (what the compositor uses) are reported.
@@ -244,6 +306,7 @@ const sceneReport = evalJs(`(() => {
     splatPoints: N.splats(N.vox.buffer()).points.length,
     holdLabel: N.clock.HOLD_LABEL,
     fx,
+    convoy,
     views,
     fadeMid,
     fadeBlack,
@@ -333,26 +396,48 @@ if (!sceneReport.fatal) {
   check(sceneReport.fx.flashDelta >= MIN_OVERLAY_PIXELS,
     `the blast flash reaches the screen: ${sceneReport.fx.flashDelta} cool pixels over the quiet frame `
     + `(quiet ${sceneReport.fx.quiet.cool}, flash ${sceneReport.fx.flash.cool})`);
+
+  // --- the convoy, asserted end-to-end --------------------------------------
+  // Ruling R16 makes the batch static world geometry, so the screen proof cannot be
+  // a frame delta: it is the responders' own colours landing on the sensor. The
+  // lightbars are the only saturated red and saturated blue in the dusk palette, and
+  // the lens that sees them is a legal one - outside the envelope, the same rule the
+  // show's own camera obeys.
+  for (const p of sceneReport.convoy.poses) {
+    check(p.outside === true, `the ${p.name} lens is inside the tower envelope`);
+    check(p.beat === "fedConvoy" || p.beat === "wallOfCars",
+      `the ${p.name} witness is not on a fed beat, got ${JSON.stringify(p.beat)}`);
+    check(p.fx === 0, `the ${p.name} frame has the fx overlay drawing ${p.fx} cells during the fed beats`);
+  }
+  check(sceneReport.convoy.lights >= MIN_LIGHT_PIXELS,
+    `the convoy's lightbars reach the screen: ${sceneReport.convoy.lights} responder-light pixels `
+    + `across ${sceneReport.convoy.poses.map((p) => `${p.name} ${p.red}/${p.blue}`).join(", ")} `
+    + `(${sceneReport.convoy.cells} light cells staged on ${sceneReport.convoy.cars} vehicles)`);
 }
 
-// --- screenshots for review: two framings, both mid-show, no fade overlay. -----
+// --- screenshots for review: two framings and the convoy witness, all mid-show,
+// no fade overlay.
 const shots = [];
-for (const [framing, beat, name] of FRAMINGS_SHOTS) {
+const shoot = (label, setup) => {
   const painted = evalJs(`(() => {
     const N = window.NAKATOMIC;
-    N.clock.seekTo(${JSON.stringify(beat)});
-    N.scene.setFraming(${framing});
+    ${setup}
     const fr = N.scene.step(0);
-    return JSON.stringify({ t: fr.t, beat: fr.beat && fr.beat.id, framing: ${framing},
+    return JSON.stringify({ t: fr.t, beat: fr.beat && fr.beat.id, label: ${JSON.stringify(label)},
       fade: getComputedStyle(document.getElementById("fade")).opacity });
   })()`);
-  const png = join(dir, "ui-verify", `${name}.png`);
+  const png = join(dir, "ui-verify", `${label}.png`);
   mkdirSync(dirname(png), { recursive: true });
   run(`agent-browser screenshot ${JSON.stringify(png)}`);
   const size = existsSync(png) ? statSync(png).size : 0;
   shots.push({ ...painted, png, size });
-  check(size > 20000, `screenshot ${name} is a real frame (${size} bytes)`);
-}
+  check(size > 20000, `screenshot ${label} is a real frame (${size} bytes)`);
+};
+for (const [framing, beat, name] of FRAMINGS_SHOTS)
+  shoot(name, `N.clock.seekTo(${JSON.stringify(beat)}); N.scene.setFraming(${framing});`);
+for (const [beat, name, pos, target, fov] of POSE_SHOTS)
+  shoot(name, `N.clock.seekTo(${JSON.stringify(beat)}); `
+    + `N.scene.setPose(${JSON.stringify({ pos, target, fov })});`);
 console.log(shots.map((s) => `shot ${s.png} t=${s.t} beat=${s.beat}`).join("\n"));
 
 if (fails.length) {
